@@ -4,6 +4,7 @@
 //! console logs. QuickJS was chosen over Boa by measurement — see the README.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -284,10 +285,26 @@ fn exception_message(ctx: &Ctx<'_>, e: rquickjs::Error) -> String {
     }
 }
 
-/// Engine-level failures that mean "a limit fired" rather than "the script is wrong".
+/// Engine-level failures that mean "a limit fired" rather than "the script is
+/// wrong". `expired` says whether the wall deadline passed, which is the only
+/// way to read an unsettled promise correctly.
 fn classify(msg: String) -> Outcome {
+    classify_with(msg, false)
+}
+
+fn classify_with(msg: String, expired: bool) -> Outcome {
     let lower = msg.to_lowercase();
-    if lower.contains("interrupted") {
+    // rquickjs reports an unsettled promise as a "dead lock". After the
+    // deadline that is simply the timeout; before it, the handler awaited
+    // something that never resolves — a timeout either way, not a crash.
+    if lower.contains("dead lock") || lower.contains("deadlock") {
+        return Outcome::Terminated(if expired {
+            "wall deadline: the handler was still running when time ran out".to_string()
+        } else {
+            "the handler never finished: it awaited a promise that never settles".to_string()
+        });
+    }
+    if expired || lower.contains("interrupted") {
         Outcome::Terminated(format!("wall deadline: {msg}"))
     } else if lower.contains("out of memory") {
         Outcome::Terminated(format!("memory limit: {msg}"))
@@ -298,13 +315,25 @@ fn classify(msg: String) -> Outcome {
     }
 }
 
-fn restricted_runtime(limits: &Limits) -> Runtime {
+/// The runtime plus a flag the interrupt handler raises when it fires. An
+/// interrupt inside a promise job leaves that promise unsettled, and the
+/// engine can only tell that apart from a genuinely stuck promise by asking
+/// whether the deadline passed.
+fn restricted_runtime(limits: &Limits) -> (Runtime, Arc<AtomicBool>) {
     let rt = Runtime::new().expect("quickjs runtime");
     rt.set_memory_limit(limits.memory_bytes);
     rt.set_max_stack_size(256 * 1024);
     let deadline = Instant::now() + Duration::from_millis(limits.wall_ms);
-    rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
-    rt
+    let expired = Arc::new(AtomicBool::new(false));
+    let flag = expired.clone();
+    rt.set_interrupt_handler(Some(Box::new(move || {
+        if Instant::now() >= deadline {
+            flag.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    })));
+    (rt, expired)
 }
 
 /// Evaluates the module and returns its default export, which must be a function.
@@ -372,7 +401,7 @@ impl Executor for QuickJsExecutor {
         let wall0 = Instant::now();
         let cpu0 = cpu_time::ThreadTime::now();
 
-        let rt = restricted_runtime(limits);
+        let (rt, expired) = restricted_runtime(limits);
         let ctx = Context::full(&rt).expect("quickjs context");
         let request_json = serde_json::to_string(request).expect("serialize request");
 
@@ -417,6 +446,7 @@ impl Executor for QuickJsExecutor {
             };
             let finished = promise.finish::<String>();
             let exec_wall = exec0.elapsed();
+            let expired = expired.load(Ordering::Relaxed);
             match finished {
                 Ok(envelope_json) => match serde_json::from_str::<Envelope>(&envelope_json) {
                     Ok(env) if env.ok => {
@@ -444,7 +474,13 @@ impl Executor for QuickJsExecutor {
                     }
                     // Rejections also classify: an uncatchable stack overflow
                     // surfaces here as a rejection, and it is a limit, not a bug.
-                    Ok(env) => (classify(env.error), None, env.logs, env.stack, exec_wall),
+                    Ok(env) => (
+                        classify_with(env.error, expired),
+                        None,
+                        env.logs,
+                        env.stack,
+                        exec_wall,
+                    ),
                     Err(e) => (
                         Outcome::Error(format!("malformed envelope: {e}")),
                         None,
@@ -454,7 +490,7 @@ impl Executor for QuickJsExecutor {
                     ),
                 },
                 Err(e) => (
-                    classify(exception_message(&c, e)),
+                    classify_with(exception_message(&c, e), expired),
                     None,
                     Vec::new(),
                     None,
@@ -478,7 +514,7 @@ impl Executor for QuickJsExecutor {
         // Module evaluation runs top-level code, so verify gets the same
         // wall/heap restrictions as an invocation.
         let limits = Limits::default();
-        let rt = restricted_runtime(&limits);
+        let (rt, _expired) = restricted_runtime(&limits);
         let ctx = Context::full(&rt).expect("quickjs context");
         ctx.with(|c| {
             install_fetch(
@@ -491,7 +527,7 @@ impl Executor for QuickJsExecutor {
 
     fn inspect(&self, source: &str) -> Result<FileConfig, String> {
         let limits = Limits::default();
-        let rt = restricted_runtime(&limits);
+        let (rt, _expired) = restricted_runtime(&limits);
         let ctx = Context::full(&rt).expect("quickjs context");
         ctx.with(|c| {
             install_fetch(
