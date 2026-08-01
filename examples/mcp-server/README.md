@@ -1,0 +1,49 @@
+# MCP server
+
+An [MCP](https://modelcontextprotocol.io) tool server in one file, with no
+dependencies.
+
+```bash
+rusted run index.js
+# POST http://127.0.0.1:7400/f/mcp
+```
+
+Point an MCP client at that URL, or drive it by hand:
+
+```bash
+curl -X POST http://127.0.0.1:7400/f/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+## Why this works
+
+MCP's Streamable HTTP transport lets a server answer a POST with a single
+`application/json` JSON-RPC response instead of opening an SSE stream. That is
+exactly the shape of a rusted function: one request in, one response out. A
+stateless tool server needs nothing more.
+
+`initialize`, `ping`, `tools/list`, and `tools/call` are all request/response,
+so the whole useful surface of a tool provider fits. Tool failures come back as
+results with `isError: true` rather than protocol errors, which is what lets a
+model see what went wrong and try again.
+
+## What doesn't work yet
+
+- **Sessions.** The spec identifies sessions with an `Mcp-Session-Id` response
+  header, and functions can't set response headers today. Stateless mode is
+  explicitly allowed, so this only rules out servers that need per-client state.
+- **Server-initiated messages.** No SSE, so no progress notifications, no
+  `tools/list_changed`, and no `GET` stream. Requests the client makes are
+  answered; the server can't speak first.
+- **Status codes.** A notification should get `202 Accepted` with no body; it
+  gets `200` with an empty object instead. Clients generally tolerate this.
+
+The first and third are small platform gaps rather than anything fundamental —
+a `context.json(body, { status, headers })` would close both.
+
+## Keep in mind
+
+- **Execution budget.** These tools run in ~0.05 ms, well inside the Dev plan's
+  50 ms. A tool that calls an API needs `fetch`, which means Pro or above.
+- **Concurrency is 1 per function.** Calls queue rather than overlap, so a slow
+  tool becomes the bottleneck for every client.
