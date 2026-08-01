@@ -18,11 +18,10 @@ jobs:
       matrix:
         include:
           # Native runners throughout: the build compiles C (QuickJS, blake3),
-          # which cross-compilation makes needlessly fragile.
+          # which cross-compilation makes needlessly fragile. Apple Silicon
+          # only — GitHub retired its Intel macOS runners.
           - target: aarch64-apple-darwin
             runner: macos-14
-          - target: x86_64-apple-darwin
-            runner: macos-13
           # 22.04 rather than latest: binaries link against its older glibc and
           # so keep running on older distros.
           - target: x86_64-unknown-linux-gnu

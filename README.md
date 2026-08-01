@@ -6,6 +6,8 @@ A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoi
 curl -fsSL https://raw.githubusercontent.com/iluxav/rusted/main/install.sh | sh
 ```
 
+Prebuilt binaries cover Apple Silicon and Linux (x86_64 and arm64). Anywhere else, including Intel Macs: `cargo install --path crates/rusted-cli`.
+
 Then develop a function locally — nothing else to install, no server or database needed:
 
 ```bash

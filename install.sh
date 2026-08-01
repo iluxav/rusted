@@ -30,7 +30,7 @@ os="$(uname -s)"
 arch="$(uname -m)"
 case "$os/$arch" in
 	Darwin/arm64)         target="aarch64-apple-darwin" ;;
-	Darwin/x86_64)        target="x86_64-apple-darwin" ;;
+	Darwin/x86_64)        die "Intel Macs aren't supported — build from source: cargo install --path crates/rusted-cli" ;;
 	Linux/x86_64|Linux/amd64)  target="x86_64-unknown-linux-gnu" ;;
 	Linux/aarch64|Linux/arm64) target="aarch64-unknown-linux-gnu" ;;
 	*) die "no prebuilt binary for $os $arch — build from source: cargo install --path crates/rusted-cli" ;;
