@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # testsupport creates a disposable database per test against this server.
+  RUSTED_TEST_DB_BASE: postgres://rusted:rusted@127.0.0.1:5432
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      # Postgres 18 for uuidv7(); the tests create their own databases here.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: rusted
+          POSTGRES_PASSWORD: rusted
+          POSTGRES_DB: rusted
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rusted"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      # Not `make check`: the Makefile starts Postgres through docker compose,
+      # which the service container above already provides.
+      - name: Tests
+        run: cargo test --release
