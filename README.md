@@ -105,7 +105,18 @@ rusted build index.js --sourcemap
 
 It refuses to write a bundle that wouldn't deploy — no handler, or code that won't load — and prints the route the file declares.
 
-Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline.
+### Limits while developing
+
+Local runs get the most permissive plan's limits — 30s execution, 10 outbound calls — so nothing blocks you mid-thought. Each run then reports what it *would* cost:
+
+```
+✓ 200 POST /convert/1   wall 1024ms · exec 1002ms
+  ⚠ needs Extra — 1000ms exec over 50ms on Dev
+```
+
+With `RUSTED_API_KEY` set, rusted looks up your actual plan in the background — never blocking startup — and the warning names it directly: `over your Pro plan: 1000ms exec over 500ms`.
+
+Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline. To develop against a specific tier, set both: `--exec-ms 50 --outbound 0` is the Dev plan.
 
 ## Using npm packages
 

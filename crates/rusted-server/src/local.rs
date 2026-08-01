@@ -26,6 +26,9 @@ use crate::store::HttpTrigger;
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 pub struct LocalConfig {
+    /// Admin API and key, when the developer has them. Used only to look up
+    /// which plan they're on, in the background, after the server is up.
+    pub admin: Option<(String, String)>,
     /// The file you point at — your source, whether or not it needs bundling.
     pub entry: PathBuf,
     /// Extra paths to watch; a change here triggers the build, then a reload.
@@ -126,6 +129,10 @@ struct LocalState {
     /// Shared so the bytecode cache stays warm across requests.
     executor: Arc<QuickJsExecutor>,
     limits: Limits,
+    /// The caller's plan code, resolved in the background when an API key is
+    /// available. None until (or unless) that lands — warnings fall back to
+    /// naming the cheapest tier that would work.
+    plan: RwLock<Option<String>>,
 }
 
 /// Reads the entry file and its `export const config`, falling back to the
@@ -258,6 +265,7 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
         loaded: RwLock::new(loaded),
         executor: executor.clone(),
         limits: config.limits.clone(),
+        plan: RwLock::new(None),
     });
 
     let app = Router::new()
@@ -273,9 +281,12 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
     println!("\x1b[1;38;5;209mrusted\x1b[0m dev server");
     println!("  \x1b[38;5;209m{methods}\x1b[0m http://{addr}{route}");
     println!(
-        "  limits: {}ms wall · {} outbound · watching {}",
-        config.limits.wall_ms,
+        "  limits: {} wall · {} outbound — the most any plan allows; yours may allow less",
+        human_ms(config.limits.wall_ms),
         config.limits.outbound.max_requests,
+    );
+    println!(
+        "  watching {}",
         pipeline
             .watch
             .iter()
@@ -285,11 +296,45 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
     );
     println!("  ctrl-c to stop\n");
 
+    if let Some((admin, key)) = config.admin.clone() {
+        tokio::spawn(resolve_plan(state.clone(), admin, key));
+    }
     tokio::spawn(watch_loop(state, config.entry.clone(), pipeline));
 
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("server stopped: {e}"))
+}
+
+/// Asks the server which plan the developer is on. Runs after the listener is
+/// already accepting requests, so a slow or absent server costs nothing: until
+/// this lands (or if it never does), warnings name the cheapest tier that fits
+/// instead of the developer's own plan.
+async fn resolve_plan(state: Arc<LocalState>, admin: String, key: String) {
+    let url = format!("{}/api/plan", admin.trim_end_matches('/'));
+    let Ok(response) = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(&key)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    else {
+        return;
+    };
+    let Ok(body) = response.json::<serde_json::Value>().await else {
+        return;
+    };
+    if let Some(code) = body.get("code").and_then(|c| c.as_str()) {
+        let name = body
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(code)
+            .to_string();
+        *state.plan.write().unwrap() = Some(code.to_string());
+        println!(
+            "\x1b[38;5;138myou're on the {name} plan — warnings below are against it\x1b[0m\n"
+        );
+    }
 }
 
 /// Polls mtimes; on a change runs the build (if any) and swaps in the new
@@ -422,6 +467,7 @@ async fn dispatch(
 
     let executor = state.executor.clone();
     let limits = state.limits.clone();
+    let script_bytes = source.len();
     let result = tokio::task::spawn_blocking(move || executor.execute(&source, &request, &limits))
         .await
         .expect("executor thread never panics");
@@ -430,7 +476,20 @@ async fn dispatch(
         .stack
         .as_deref()
         .map(|stack| remap_stack(stack, sourcemap.as_deref(), &sourcemap_base));
-    report(&method, rest.as_deref(), &result, stack.as_deref());
+    let usage = crate::tiers::Usage {
+        exec_ms: result.exec_wall.as_millis() as u64,
+        outbound_reqs: result.outbound_used,
+        script_bytes,
+    };
+    let plan = state.plan.read().unwrap().clone();
+    let advisory = crate::tiers::warning(&usage, plan.as_deref());
+    report(
+        &method,
+        rest.as_deref(),
+        &result,
+        stack.as_deref(),
+        advisory.as_deref(),
+    );
 
     // Unlike the deployed data plane, local dev returns the real error: the
     // only caller is the developer who wrote it.
@@ -541,11 +600,20 @@ fn problem(status: StatusCode, code: &str, message: String) -> Response {
 
 /// One block per request: outcome, timings, console output, and the JS stack
 /// when something threw.
+fn human_ms(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
 fn report(
     method: &Method,
     rest: Option<&str>,
     result: &rusted_engine::InvocationResult,
     stack: Option<&str>,
+    advisory: Option<&str>,
 ) {
     let path = rest.map(|r| format!("/{r}")).unwrap_or_default();
     let (mark, label) = match &result.outcome {
@@ -574,6 +642,11 @@ fn report(
             }
         }
         Outcome::Success(_) => {}
+    }
+    // Local runs at the ceiling deliberately; this is the only hint that a
+    // subscription might not take what just happened.
+    if let Some(advisory) = advisory {
+        println!("  \x1b[38;5;214m⚠ {advisory}\x1b[0m");
     }
     println!();
 }

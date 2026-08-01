@@ -1115,3 +1115,14 @@ async fn invocation_pages_are_twenty_rows() {
     // Pages must not overlap: newest-first ordering with a clean offset.
     assert!(first.last().unwrap().at >= second.first().unwrap().at);
 }
+
+#[tokio::test]
+async fn plan_endpoint_reports_the_callers_tier() {
+    let t = boot().await; // the harness subscribes to Extra
+    let v: Value = t.admin_get("/api/plan").await.json().await.unwrap();
+    assert_eq!(v["code"], "extra");
+    assert_eq!(v["limits"]["wall_ms"], 30000);
+
+    let r = t.client.get(t.admin("/api/plan")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "the plan is not public");
+}

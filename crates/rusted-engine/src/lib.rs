@@ -92,6 +92,8 @@ pub struct InvocationResult {
     /// Pure handler execution: the call and promise settlement, excluding setup.
     /// Zero when setup itself failed.
     pub exec_wall: Duration,
+    /// Outbound `fetch()` calls this invocation attempted.
+    pub outbound_used: u32,
 }
 
 /// Deployment intent a script declares about itself via `export const config`.
@@ -507,6 +509,7 @@ impl Executor for QuickJsExecutor {
             wall: wall0.elapsed(),
             cpu: cpu0.elapsed(),
             exec_wall,
+            outbound_used: budget.used(),
         }
     }
 

@@ -85,6 +85,11 @@ impl OutboundBudget {
         }
     }
 
+    /// Requests actually attempted during this invocation.
+    pub fn used(&self) -> u32 {
+        self.used.load(Ordering::Relaxed)
+    }
+
     pub fn perform(&self, request: FetchRequest) -> FetchResponse {
         if self.policy.max_requests == 0 {
             return FetchResponse::refused(
