@@ -400,3 +400,46 @@ fn compile_errors_still_surface_with_the_cache_in_play() {
         o => panic!("expected Error, got {o:?}"),
     }
 }
+
+#[test]
+fn a_timeout_after_an_await_reads_as_a_limit_not_a_crash() {
+    // The await suspends the handler, so the interrupt lands inside a promise
+    // job and leaves it unsettled. That used to surface as rquickjs's internal
+    // "dead lock" wording under a generic function error.
+    let src = r#"export default async function handler(request, context) {
+        await request.json();
+        const until = Date.now() + 5000;
+        while (Date.now() < until) {}
+        return context.text("never");
+    }"#;
+    let limits = Limits {
+        wall_ms: 100,
+        ..Limits::default()
+    };
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &limits);
+    match &r.outcome {
+        Outcome::Terminated(reason) => {
+            assert!(reason.contains("wall deadline"), "reason: {reason}");
+            assert!(
+                !reason.contains("dead lock"),
+                "internal wording leaked: {reason}"
+            );
+        }
+        o => panic!("expected Terminated, got {o:?}"),
+    }
+}
+
+#[test]
+fn a_promise_that_never_settles_reads_as_a_timeout() {
+    let src = r#"export default async function handler() {
+        await new Promise(() => {});
+        return "never";
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    match &r.outcome {
+        Outcome::Terminated(reason) => {
+            assert!(reason.contains("never settles"), "reason: {reason}");
+        }
+        o => panic!("expected Terminated, got {o:?}"),
+    }
+}
