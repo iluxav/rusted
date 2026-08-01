@@ -81,12 +81,12 @@ enum Cmd {
         /// Paths whose changes trigger a rebuild (default: the file's directory)
         #[arg(long)]
         watch: Vec<PathBuf>,
-        /// Execution budget in ms
-        #[arg(long, default_value_t = 200)]
-        exec_ms: u64,
+        /// Execution budget in ms (defaults to the most any plan allows)
+        #[arg(long)]
+        exec_ms: Option<u64>,
         /// Outbound fetch() calls allowed per invocation
-        #[arg(long, default_value_t = 2)]
-        outbound: u32,
+        #[arg(long)]
+        outbound: Option<u32>,
     },
     /// Bundle a function into a single deployable file
     Build {
@@ -207,6 +207,8 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             watch.clone(),
             exec_ms,
             outbound,
+            cli.admin.clone(),
+            cli.api_key.clone(),
         ),
         Cmd::Build {
             ref file,
@@ -453,23 +455,29 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
 }
 
 /// Local development: one function, hot reload, no server or database.
+#[allow(clippy::too_many_arguments)]
 fn run_local(
     file: PathBuf,
     port: u16,
     build: Option<String>,
     watch: Vec<PathBuf>,
-    exec_ms: u64,
-    outbound: u32,
+    exec_ms: Option<u64>,
+    outbound: Option<u32>,
+    admin: String,
+    api_key: Option<String>,
 ) -> Result<(), String> {
     // With --build the entry may be the build's output, which a clean
     // checkout hasn't produced yet.
     if build.is_none() && !file.exists() {
         return Err(format!("{} does not exist", file.display()));
     }
+    // Develop against the ceiling: nothing deployable exceeds the top plan, so
+    // this never blocks work, and each run reports what it would cost.
+    let ceiling = rusted_server::tiers::most_permissive();
     let limits = rusted_engine::Limits {
-        wall_ms: exec_ms,
+        wall_ms: exec_ms.unwrap_or(ceiling.exec_ms),
         outbound: rusted_engine::OutboundPolicy {
-            max_requests: outbound,
+            max_requests: outbound.unwrap_or(ceiling.outbound_reqs),
             ..Default::default()
         },
         ..Default::default()
@@ -477,6 +485,8 @@ fn run_local(
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(rusted_server::local::serve(
         rusted_server::local::LocalConfig {
+            // Only used to look up the plan, in the background, after startup.
+            admin: api_key.map(|key| (admin, key)),
             entry: file,
             watch,
             build,

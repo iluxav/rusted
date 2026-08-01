@@ -12,6 +12,7 @@ pub mod plans;
 pub mod state;
 pub mod store;
 pub mod testsupport;
+pub mod tiers;
 pub mod web;
 
 use sqlx::postgres::PgPoolOptions;

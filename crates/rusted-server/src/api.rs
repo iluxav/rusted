@@ -973,6 +973,23 @@ struct VerifyBody {
     source: String,
 }
 
+/// The caller's plan. Local development resolves this in the background so it
+/// can say "over your Pro plan" instead of guessing.
+async fn current_plan(State(state): Shared, headers: HeaderMap) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    Json(json!({
+        "code": plan.code,
+        "name": plan.name,
+        "version": plan.version,
+        "limits": limits_json(&state, &plan),
+    }))
+    .into_response()
+}
+
 async fn verify(
     State(state): Shared,
     headers: HeaderMap,
@@ -997,6 +1014,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/api/runs", post(create_run))
         .route("/api/invoke", post(invoke))
         .route("/api/verify", post(verify))
+        .route("/api/plan", get(current_plan))
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT * 2))
         .layer(axum::middleware::from_fn(envelope_errors))
         .with_state(state)
