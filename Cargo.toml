@@ -35,3 +35,13 @@ tempfile = "3"
 
 [profile.release]
 debug = true
+
+# Release artifacts: no debug info, one codegen unit, LTO. Slower to build,
+# much smaller to download.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = "symbols"
+lto = true
+codegen-units = 1
+panic = "abort"

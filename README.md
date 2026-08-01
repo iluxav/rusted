@@ -3,10 +3,26 @@
 A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint in seconds, executed by QuickJS inside a restricted Rust runtime.
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/iluxav/rusted/main/install.sh | sh
+```
+
+Then develop a function locally — nothing else to install, no server or database needed:
+
+```bash
+rusted run index.js        # http://127.0.0.1:7400/f/<name>, hot reload
+```
+
+To run the platform itself (server, console, storage):
+
+```bash
 make db                                  # postgres:18 via docker compose (port 5457)
 cargo build --release
 ./target/release/rusted serve &          # functions on :7411, admin + console on :7412
+```
 
+### Deploying
+
+```bash
 cat > greet.js <<'EOF'
 export default async function handler(request, context) {
   const input = await request.json();
@@ -18,15 +34,10 @@ rusted push greet.js --name greet        # → http://127.0.0.1:7411/f/greet
 curl -X POST http://127.0.0.1:7411/f/greet -d '{"name":"Ada"}'
 # {"message":"Hello, Ada"}
 
-rusted preview greet.js --ttl 120        # temporary endpoint, expires automatically
+rusted preview greet.js --ttl 120        # temporary endpoint, expires on its own
 rusted invoke greet --body '{"name":"Bob"}'
-rusted list | rusted pull greet | rusted verify greet.js | rusted delete greet
 rusted logs greet                        # recent invocations with console output
-
-# HTTP trigger config: methods and a route with path params
-rusted push api.js --name api --method GET,POST --path '/users/{id}'
-curl http://127.0.0.1:7411/f/api/users/42?verbose=1   # handler sees request.params.id,
-                                                      # request.query.verbose, request.method
+rusted list | rusted pull greet | rusted verify greet.js | rusted delete greet
 ```
 
 Scripts can carry their own deployment intent, so `rusted push api.js` needs no flags:
@@ -52,7 +63,6 @@ API keys are minted in the console (shown once; only a hash is stored). `rusted 
 Everything lives in Postgres (`DATABASE_URL`, default `postgres://rusted:rusted@127.0.0.1:5457/rusted`; connect directly with `psql` on port 5457).
 
 Configuration comes from the environment, and `rusted` loads a `.env` from the working directory at startup — `cp .env.example .env`, fill in the GitHub credentials, done. `.env` is gitignored.
-```
 
 Every command takes `--json` for stable machine-readable output.
 
