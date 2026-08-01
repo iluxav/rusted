@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}rusted — a file becomes an endpoint{% endblock %}
+{% block body %}
+<div class="relative isolate mx-auto flex min-h-full max-w-6xl flex-col overflow-hidden px-5 sm:px-8">
+  <div class="pointer-events-none absolute left-1/2 top-24 -z-10 h-[34rem] w-[34rem] -translate-x-1/2 rounded-full bg-ember/[0.07] blur-[110px]"></div>
+
+  <header class="flex items-center justify-between border-b border-copper/10 py-5">
+    <a href="/" class="group flex items-center gap-2.5 font-display text-xl font-bold tracking-[-0.04em] text-cream">
+      <span class="flex h-7 w-7 items-center justify-center rounded-md border border-ember/30 bg-ember/10 font-mono text-sm text-ember transition-colors group-hover:bg-ember group-hover:text-rust-950">r_</span>
+      rusted
+    </a>
+    <nav class="flex items-center gap-3 text-sm text-clay">
+      <a href="https://github.com" class="hidden px-3 py-2 font-mono text-xs transition-colors hover:text-cream sm:block">GitHub ↗</a>
+      <a href="/login" class="btn-secondary px-4 py-2 text-sm">Open console <span class="text-ember">→</span></a>
+    </nav>
+  </header>
+
+  <main class="flex flex-1 flex-col items-center justify-center pb-20 pt-16 text-center sm:pt-24">
+    <div class="mb-7 inline-flex items-center gap-2.5 rounded-full border border-copper/20 bg-rust-900/80 px-3.5 py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-clay backdrop-blur">
+      <span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span>
+      Runtime online
+      <span class="text-copper/50">/</span>
+      js microfunctions
+    </div>
+    <h1 class="max-w-4xl font-display text-5xl font-semibold leading-[0.98] tracking-[-0.06em] text-cream sm:text-7xl lg:text-[5.75rem]">
+      From local file to<br><span class="text-ember">live endpoint.</span>
+    </h1>
+    <p class="mt-7 max-w-xl text-base leading-7 text-clay sm:text-lg">
+      Ship a tiny JavaScript handler. Get a production URL in seconds.
+      No containers, no config maze, nothing to babysit.
+    </p>
+
+    <a href="/login" class="btn-primary mt-9 px-6 py-3 text-sm">
+      Deploy your first function <span aria-hidden="true">→</span>
+    </a>
+
+    <div class="surface mt-14 w-full max-w-3xl overflow-hidden rounded-xl text-left shadow-[0_28px_100px_-34px_rgba(255,107,36,0.28)]">
+      <div class="flex items-center justify-between border-b border-copper/10 bg-black/10 px-4 py-3 sm:px-5">
+        <div class="flex items-center gap-2">
+          <span class="h-2 w-2 rounded-full bg-blood/70"></span>
+          <span class="h-2 w-2 rounded-full bg-copper/60"></span>
+          <span class="h-2 w-2 rounded-full bg-sage/70"></span>
+          <span class="ml-2 font-mono text-[11px] text-clay">terminal — ~/hooks</span>
+        </div>
+        <span class="hidden font-mono text-[10px] uppercase tracking-widest text-copper/70 sm:block">rusted cli</span>
+      </div>
+      <div class="space-y-3 overflow-x-auto px-5 py-6 font-mono text-[12px] leading-relaxed sm:px-7 sm:text-[13px]">
+        <p><span class="mr-2 text-ember">❯</span><span class="text-cream">rusted push greet.js</span></p>
+        <p class="text-clay"><span class="mr-2 text-sage">✓</span>Built <span class="text-cream">greet</span> <span class="text-copper">rev. 01</span> <span class="text-clay/60">· 218 bytes</span></p>
+        <p class="text-clay"><span class="mr-2 text-copper">◆</span>200ms wall <span class="text-copper/50">/</span> 32MB <span class="text-copper/50">/</span> concurrency 1</p>
+        <p class="pt-2 whitespace-nowrap">
+          <span class="mr-2 rounded border border-ember/20 bg-ember/10 px-1.5 py-0.5 text-[10px] font-semibold text-ember">POST</span><span class="text-ember-soft">https://rusted.dev/f/greet</span>
+        </p>
+        <p class="caret"><span class="mr-2 text-ember">❯</span></p>
+      </div>
+    </div>
+
+    <div class="mt-10 grid w-full max-w-3xl grid-cols-1 border-y border-copper/10 text-left sm:grid-cols-3">
+      <div class="px-2 py-5 sm:border-r sm:border-copper/10 sm:px-5">
+        <p class="eyebrow">01 / tiny</p><p class="mt-2 text-sm text-cream">One file is enough.</p>
+      </div>
+      <div class="border-t border-copper/10 px-2 py-5 sm:border-r sm:border-t-0 sm:px-5">
+        <p class="eyebrow">02 / bounded</p><p class="mt-2 text-sm text-cream">Hard limits by design.</p>
+      </div>
+      <div class="border-t border-copper/10 px-2 py-5 sm:border-t-0 sm:px-5">
+        <p class="eyebrow">03 / disposable</p><p class="mt-2 text-sm text-cream">Expire it when you're done.</p>
+      </div>
+    </div>
+  </main>
+
+  <footer class="flex items-center justify-between border-t border-copper/10 py-5 font-mono text-[10px] uppercase tracking-widest text-clay/70">
+    <span>rusted / local build</span>
+    <a href="/login" class="text-copper transition-colors hover:text-ember">console →</a>
+  </footer>
+</div>
+{% endblock %}

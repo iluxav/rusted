@@ -1,0 +1,12 @@
+<div class="rounded-xl border border-ember/35 bg-gradient-to-br from-rust-800 to-rust-900 px-5 py-4 shadow-[0_16px_50px_-24px_rgba(255,107,36,0.45)]">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-2"><span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span><p class="text-sm font-medium text-cream">{{ name }}</p></div>
+    <p class="font-mono text-[9px] font-semibold uppercase tracking-widest text-ember">copy now / shown once</p>
+  </div>
+  <div class="mt-2 flex items-center gap-3">
+    <code class="flex-1 truncate rounded-md border border-copper/10 bg-rust-950 px-3 py-2.5 font-mono text-[12px] text-ember-soft">{{ token }}</code>
+    <button onclick="navigator.clipboard.writeText('{{ token }}'); this.textContent='copied'; setTimeout(() => this.textContent='copy', 1500)"
+            class="btn-secondary px-3.5 py-2 font-mono text-[10px] uppercase tracking-wider text-ember">copy</button>
+  </div>
+  <p class="mt-2 font-mono text-[10px] text-clay">Store it securely. The server keeps only a hash.</p>
+</div>

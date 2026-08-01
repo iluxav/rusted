@@ -1,0 +1,63 @@
+{% if rows.is_empty() %}
+<p class="px-6 py-8 text-center font-mono text-[11px] text-clay">no invocations match</p>
+{% else %}
+<table class="responsive-table w-full min-w-[560px] font-mono text-[12px]">
+  <thead>
+    <tr class="border-b border-copper/[0.07] text-left text-[10px] uppercase tracking-wider text-clay/70">
+      <th class="px-6 py-2 font-normal">function</th>
+      <th class="px-3 py-2 font-normal">outcome</th>
+      <th class="px-3 py-2 text-right font-normal">wall</th>
+      <th class="px-3 py-2 text-right font-normal">cpu</th>
+      <th class="px-3 py-2 text-right font-normal">exec</th>
+      <th class="px-6 py-2 text-right font-normal">when</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr class="border-b border-copper/[0.07] last:border-0 hover:bg-rust-800/50 transition-colors">
+      <td class="px-6 py-3.5 text-cream"><span class="mr-2 text-copper">ƒ</span>{{ row.function }}</td>
+      <td class="px-3 py-3">
+        <span class="inline-flex items-center gap-1.5 {% if row.ok %}text-sage{% else %}text-blood{% endif %}">
+          <span class="h-1.5 w-1.5 rounded-full {% if row.ok %}bg-sage{% else %}bg-blood{% endif %}"></span>{{ row.outcome }}
+          {% if row.detail.is_some() %}
+          <button type="button" title="Show what went wrong"
+                  onclick="this.closest('tr').nextElementSibling.hidden = !this.closest('tr').nextElementSibling.hidden"
+                  class="ml-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-blood/40 text-[9px] leading-none text-blood transition-colors hover:bg-blood hover:text-rust-950">!</button>
+          {% endif %}
+        </span>
+      </td>
+      <td class="px-3 py-3 text-right text-clay">{{ row.wall }}</td>
+      <td class="px-3 py-3 text-right text-clay">{{ row.cpu }}</td>
+      <td class="px-3 py-3 text-right text-cream">{{ row.exec }}</td>
+      <td class="px-6 py-3 text-right text-clay">{{ row.when }}</td>
+    </tr>
+    {% if row.detail.is_some() %}
+    <tr hidden>
+      <td colspan="6" class="px-6 pb-4">
+        <pre class="overflow-x-auto whitespace-pre-wrap rounded-md border border-blood/25 bg-blood/[0.06] px-4 py-3 text-[11px] leading-relaxed text-blood">{{ row.detail.as_deref().unwrap_or("") }}</pre>
+      </td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if prev_url.is_some() || next_url.is_some() %}
+<div class="flex items-center justify-between border-t border-copper/10 px-6 py-3 font-mono text-[11px] text-clay">
+  <span>page {{ page }}</span>
+  <div class="flex items-center gap-2">
+    {% match prev_url %}{% when Some with (url) %}
+    <button hx-get="{{ url }}" hx-target="#invocation-rows" hx-swap="innerHTML"
+            class="rounded-md border border-copper/25 px-2.5 py-1 transition-colors hover:border-ember hover:text-ember">← newer</button>
+    {% when None %}
+    <span class="rounded-md border border-copper/10 px-2.5 py-1 opacity-30">← newer</span>
+    {% endmatch %}
+    {% match next_url %}{% when Some with (url) %}
+    <button hx-get="{{ url }}" hx-target="#invocation-rows" hx-swap="innerHTML"
+            class="rounded-md border border-copper/25 px-2.5 py-1 transition-colors hover:border-ember hover:text-ember">older →</button>
+    {% when None %}
+    <span class="rounded-md border border-copper/10 px-2.5 py-1 opacity-30">older →</span>
+    {% endmatch %}
+  </div>
+</div>
+{% endif %}

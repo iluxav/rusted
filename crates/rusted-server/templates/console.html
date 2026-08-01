@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Console — rusted{% endblock %}
+{% block body %}
+<div class="console-shell flex h-full">
+  <!-- sidebar -->
+  <aside class="console-sidebar flex w-64 shrink-0 flex-col border-r border-copper/10 bg-rust-950/95 backdrop-blur-xl">
+    <a href="/console" class="console-brand group flex items-center gap-2.5 px-5 pb-7 pt-6 font-display text-lg font-bold tracking-[-0.04em] text-cream">
+      <span class="flex h-7 w-7 items-center justify-center rounded-md border border-ember/30 bg-ember/10 font-mono text-sm text-ember transition-colors group-hover:bg-ember group-hover:text-rust-950">r_</span>
+      rusted <span class="ml-auto font-mono text-[9px] font-medium uppercase tracking-widest text-copper/60">console</span>
+    </a>
+
+    <nav class="console-nav flex-1 space-y-0.5 overflow-y-auto px-3" id="sidenav"
+         hx-target="#content" hx-push-url="true" hx-swap="innerHTML show:window:top">
+      <a hx-get="/console/dashboard" href="/console/dashboard"
+         class="nav-item {% if active == "dashboard" %}nav-active{% endif %} flex rounded-full items-center gap-2.5 px-3 py-2.5 text-[13px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" d="M3 13h6V3H3v10Zm12 8h6v-8h-6v8ZM3 21h6v-4H3v4Zm12-10h6V3h-6v8Z"/></svg>
+        Dashboard
+      </a>
+      <a hx-get="/console/keys" href="/console/keys"
+         class="nav-item {% if active == "keys" %}nav-active{% endif %} flex rounded-full items-center gap-2.5 px-3 py-2.5 text-[13px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.03 5.91l-2.27 2.27H10.5v1.94H8.56v1.94H5.25v-3.31l6.34-6.34A6 6 0 1 1 21.75 8.25Z"/></svg>
+        API keys
+      </a>
+      <a hx-get="/console/billing" href="/console/billing"
+         class="nav-item {% if active == "billing" %}nav-active{% endif %} flex rounded-full items-center gap-2.5 px-3 py-2.5 text-[13px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z"/></svg>
+        Billing
+      </a>
+
+      <details open class="pt-5">
+        <summary class="flex cursor-pointer list-none items-center justify-between px-3 pb-2 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-copper/70 hover:text-copper">
+          Lambdas
+          <svg class="h-3 w-3 transition-transform [details[open]_&]:rotate-90" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m9 5 7 7-7 7"/></svg>
+        </summary>
+        {% if lambdas.is_empty() %}
+        <p class="px-3 py-2 font-mono text-xs text-clay/60">none yet — try<br><span class="text-clay">rusted push fn.js</span></p>
+        {% endif %}
+        {% for name in lambdas %}
+        <a hx-get="/console/lambda/{{ name }}" href="/console/lambda/{{ name }}"
+           class="nav-item {% if active == name.as_str() %}nav-active{% endif %} flex items-center gap-2 truncate rounded-full px-3 py-2 font-mono text-[12px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+          <span class="text-copper">ƒ</span> {{ name }}
+        </a>
+        {% endfor %}
+      </details>
+    </nav>
+
+    <div class="console-user border-t border-copper/10 p-4">
+      <div class="flex items-center gap-3">
+        <span class="flex h-8 w-8 items-center justify-center rounded-md border border-copper/20 bg-rust-800 font-mono text-xs font-semibold text-ember">{{ user_initial }}</span>
+        <div class="min-w-0 flex-1">
+          <p class="truncate text-sm text-cream">{{ user_name }}</p>
+          <p class="font-mono text-[10px] text-clay">github / local</p>
+        </div>
+        <a href="/logout" title="Sign out" class="text-clay hover:text-ember transition-colors">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9"/></svg>
+        </a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- content -->
+  <main id="content" class="console-content min-w-0 flex-1 overflow-y-auto">{{ inner|safe }}</main>
+</div>
+
+<style>
+  .nav-active {
+    border-radius: 50px;
+    background: #18120f;
+    color: #f2eae3;
+  }
+  .nav-active svg,
+  .nav-active > span:first-child { color: #ff6b24; }
+  @media (max-width: 720px) {
+    .nav-active { box-shadow: inset 0 -2px 0 #ff6b24; }
+  }
+</style>
+<script>
+  // keep the sidebar highlight in sync with htmx navigation
+  document.addEventListener('htmx:afterRequest', (e) => {
+    const link = e.target.closest?.('.nav-item');
+    if (!link) return;
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('nav-active'));
+    link.classList.add('nav-active');
+  });
+</script>
+{% endblock %}

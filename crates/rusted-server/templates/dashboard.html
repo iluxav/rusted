@@ -1,0 +1,75 @@
+<div class="page-wrap mx-auto max-w-6xl px-10 py-10">
+  <div class="mb-8 flex items-end justify-between gap-5">
+    <div>
+      <p class="eyebrow mb-2">Overview</p>
+      <h1 class="page-title">Dashboard</h1>
+      <p class="mt-2 text-sm text-clay">Runtime health and recent traffic — {{ window }}.</p>
+    </div>
+    <div class="hidden items-center gap-2 rounded-md border border-sage/15 bg-sage/[0.04] px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-sage sm:flex">
+      <span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span> systems nominal
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+    <div class="surface surface-interactive rounded-xl px-5 py-5">
+      <div class="flex items-center justify-between"><p class="eyebrow">Invocations</p><span class="font-mono text-[10px] text-copper/60">01</span></div>
+      <p class="mt-4 font-mono text-3xl font-semibold tracking-tight text-cream">{{ stats.invocations }}</p>
+      <p class="mt-2 font-mono text-[11px] text-sage">↗ {{ stats.invocations_delta }} vs prior week</p>
+    </div>
+    <div class="surface surface-interactive rounded-xl px-5 py-5">
+      <div class="flex items-center justify-between"><p class="eyebrow">p95 exec</p><span class="font-mono text-[10px] text-copper/60">02</span></div>
+      <p class="mt-4 font-mono text-3xl font-semibold tracking-tight text-cream">{{ stats.p95_exec }}</p>
+      <p class="mt-2 font-mono text-[11px] text-clay">pure handler time</p>
+    </div>
+    <div class="surface surface-interactive rounded-xl px-5 py-5">
+      <div class="flex items-center justify-between"><p class="eyebrow">Error rate</p><span class="font-mono text-[10px] text-copper/60">03</span></div>
+      <p class="mt-4 font-mono text-3xl font-semibold tracking-tight text-cream">{{ stats.error_rate }}</p>
+      <p class="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-clay"><span class="h-1.5 w-1.5 rounded-full bg-blood"></span>{{ stats.errors }} failed calls</p>
+    </div>
+  </div>
+
+  <div class="surface mt-5 rounded-xl px-5 py-5 sm:px-6">
+    <div class="flex items-center justify-between">
+      <p class="eyebrow">Invocations by day</p>
+      <p class="font-mono text-[10px] text-clay">UTC / rolling 7d</p>
+    </div>
+    <div class="mt-8 flex h-48 gap-2 sm:gap-3">
+      {% for bar in bars %}
+      <div class="group flex h-full flex-1 flex-col" title="{{ bar.label }}: {{ bar.value }} invocations">
+        <div class="relative flex-1">
+          <div class="bar-fill absolute inset-x-0 bottom-0 rounded-t-sm transition-all duration-200 group-hover:brightness-125" style="height: {{ bar.pct }}%"></div>
+          {% if bar.peak %}<p class="absolute inset-x-0 text-center font-mono text-[11px] text-cream" style="bottom: calc({{ bar.pct }}% + 6px)">{{ bar.value }}</p>{% endif %}
+        </div>
+        <p class="mt-2 text-center font-mono text-[10px] text-clay">{{ bar.label }}</p>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="surface mt-5 overflow-hidden rounded-xl">
+    <div class="flex items-center justify-between border-b border-copper/10 px-5 py-4 sm:px-6">
+      <p class="eyebrow">Recent invocations</p>
+      <form class="flex items-center gap-2" hx-get="/console/invocations"
+            hx-target="#invocation-rows" hx-swap="innerHTML"
+            hx-trigger="change from:(select, input)">
+        <select name="function"
+                class="rounded-md border border-copper/20 bg-rust-950 px-2.5 py-1 font-mono text-[11px] text-clay focus:border-ember focus:outline-none">
+          <option value="">all functions</option>
+          {% for name in functions %}
+          <option value="{{ name }}" {% if filter_function == name.as_str() %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+        <label class="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] text-clay">
+          <input type="checkbox" name="errors" value="1" {% if filter_errors %}checked{% endif %}
+                 class="h-3 w-3 accent-blood">
+          errors only
+        </label>
+      </form>
+    </div>
+    <div id="invocation-rows">{{ invocations|safe }}</div>
+  </div>
+</div>
+
+<style>
+  .bar-fill { background: linear-gradient(to top, #8d3f1e, #ff6b24); box-shadow: 0 -8px 24px rgba(255,107,36,.08); }
+</style>

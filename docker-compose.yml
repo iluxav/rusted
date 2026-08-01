@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:18-alpine
+    container_name: rusted-postgres
+    ports:
+      - "5457:5432"
+    environment:
+      POSTGRES_USER: rusted
+      POSTGRES_PASSWORD: rusted
+      POSTGRES_DB: rusted
+    volumes:
+      - rusted-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rusted -d rusted"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  rusted-pgdata:

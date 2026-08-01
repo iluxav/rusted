@@ -1,0 +1,171 @@
+<div class="flex h-full flex-col">
+  <div class="border-b border-copper/10 bg-rust-950/70 px-5 py-6 backdrop-blur sm:px-8">
+    <div class="flex flex-col items-start justify-between gap-5 sm:flex-row sm:gap-6">
+      <div class="min-w-0">
+        <p class="eyebrow mb-2">Function / revision {{ revision }}</p>
+        <h1 class="font-mono text-2xl font-medium tracking-tight text-cream"><span class="mr-2 text-ember">ƒ</span>{{ name }}</h1>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          {% for method in methods %}
+          <span class="rounded border border-ember/20 bg-ember/10 px-2 py-1 font-mono text-[10px] font-semibold text-ember">{{ method }}</span>
+          {% endfor %}
+          <button onclick="navigator.clipboard.writeText('{{ url }}'); this.querySelector('span').textContent='copied!'; setTimeout(() => this.querySelector('span').textContent='{{ url }}', 1500)"
+                  title="Copy URL"
+                  class="btn-secondary group flex min-w-0 max-w-full px-3 py-1.5">
+            <span class="truncate font-mono text-[11px] text-copper sm:text-[12px]">{{ url }}</span>
+            <svg class="h-3.5 w-3.5 shrink-0 text-clay group-hover:text-ember" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75"/></svg>
+          </button>
+        </div>
+        <p class="mt-3 font-mono text-[10px] text-clay">{{ size }} <span class="text-copper/40">/</span> read-only <span class="text-copper/40">/</span> push via CLI to revise</p>
+      </div>
+      <button onclick="document.getElementById('test-dialog').showModal()"
+              class="btn-primary shrink-0 px-5 py-2.5 text-sm">
+        <span class="font-mono text-xs">▶</span> Test function
+      </button>
+    </div>
+    {% if hidden_kb > 0 %}
+    <div class="mt-4 flex items-center gap-3 font-mono text-[10px] text-clay">
+      <span>showing your code · {{ hidden_kb }} KB of bundled dependencies hidden</span>
+      <button id="bundle-toggle" onclick="toggleBundle(this)" class="text-copper hover:text-ember">view full bundle →</button>
+    </div>
+    {% endif %}
+  </div>
+
+  <div id="editor" class="min-h-0 flex-1"></div>
+</div>
+
+<script type="application/json" id="lambda-code">{{ code_json|safe }}</script>
+
+<dialog id="test-dialog" class="surface w-[calc(100%_-_2rem)] max-w-2xl rounded-2xl p-0 text-cream shadow-[0_32px_30px_-32px_rgba(255,107,36,0.45)]">
+  <form hx-post="/console/test" hx-target="#test-result" hx-swap="innerHTML" id="test-form" class="p-5 sm:p-7">
+    <div class="flex items-center justify-between">
+      <div><p class="eyebrow mb-1.5">Request lab</p><h2 class="font-display text-xl font-semibold tracking-tight">Test <span class="font-mono text-lg text-ember">ƒ {{ name }}</span></h2></div>
+      <button type="button" onclick="document.getElementById('test-dialog').close()" class="text-clay hover:text-cream">
+        <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="mt-6 flex gap-2">
+      <select name="method" id="test-method" onchange="toggleBody()"
+              class="field px-3 py-2.5 font-mono text-sm text-ember">
+        {% for method in methods %}<option>{{ method }}</option>{% endfor %}
+      </select>
+      <input name="url" value="{{ url_example }}" spellcheck="false"
+             class="field min-w-0 flex-1 px-4 py-2.5 font-mono text-xs text-cream sm:text-sm">
+    </div>
+
+    <div class="mt-5">
+      <div class="flex items-center justify-between">
+        <p class="eyebrow">Bearer token</p>
+        <a href="/console/keys" class="font-mono text-[10px] text-copper hover:text-ember">manage keys →</a>
+      </div>
+      <input name="token" id="test-token" placeholder="rk_live_… (needed when the server runs with --require-auth)"
+             spellcheck="false" autocomplete="off"
+             class="field mt-2 w-full px-4 py-2.5 font-mono text-xs text-cream">
+    </div>
+
+    <div class="mt-5">
+      <div class="flex items-center justify-between">
+        <p class="eyebrow">Headers</p>
+        <button type="button" onclick="addHeaderRow('', '')" class="font-mono text-[10px] text-copper hover:text-ember">+ add header</button>
+      </div>
+      <div id="header-rows" class="mt-2 space-y-2"></div>
+    </div>
+
+    <div class="mt-5" id="body-section">
+      <p class="eyebrow mb-2">Body</p>
+      <textarea name="body" rows="5" spellcheck="false" placeholder='{"name": "Ada"}'
+                class="field w-full px-4 py-3 font-mono text-[12px] text-cream"></textarea>
+    </div>
+
+    <div class="mt-6 flex items-center justify-between">
+      <p class="hidden font-mono text-[10px] text-clay/70 sm:block">server → data plane</p>
+      <button type="submit" class="btn-primary ml-auto px-6 py-2.5 text-sm">
+        Send request <span>→</span>
+      </button>
+    </div>
+
+    <div id="test-result" class="mt-5"></div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+  const payload = JSON.parse(document.getElementById('lambda-code').textContent);
+  let showingFull = false;
+  window.toggleBundle = (btn) => {
+    showingFull = !showingFull;
+    btn.textContent = showingFull ? 'show my code only' : 'view full bundle';
+    if (window.__rustedEditor) window.__rustedEditor.setValue(showingFull ? payload.full : payload.user);
+  };
+
+  const boot = () => {
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+    require(['vs/editor/editor.main'], () => {
+      monaco.editor.defineTheme('rusted', {
+        base: 'vs-dark', inherit: true,
+        rules: [
+          { token: 'comment', foreground: '806B5D' },
+          { token: 'string', foreground: 'D99A6C' },
+          { token: 'keyword', foreground: 'FF6B24' },
+          { token: 'number', foreground: 'F2EAE3' },
+        ],
+        colors: {
+          'editor.background': '#0E0B09',
+          'editor.foreground': '#F2EAE3',
+          'editor.lineHighlightBackground': '#17120F',
+          'editorLineNumber.foreground': '#4D3A2D',
+          'editorLineNumber.activeForeground': '#C47B45',
+          'editor.selectionBackground': '#4A291A',
+        }
+      });
+      window.__rustedEditor = monaco.editor.create(document.getElementById('editor'), {
+        value: payload.user, language: 'javascript', theme: 'rusted', readOnly: true,
+        minimap: { enabled: false }, fontSize: 13, fontFamily: '"JetBrains Mono", monospace',
+        scrollBeyondLastLine: false, padding: { top: 20 }, renderLineHighlight: 'none',
+        domReadOnly: true, contextmenu: false,
+      });
+    });
+  };
+  if (window.require) boot();
+  else {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js';
+    s.onload = boot;
+    document.head.appendChild(s);
+  }
+
+  window.addHeaderRow = (k, v) => {
+    const row = document.createElement('div');
+    row.className = 'flex gap-2 header-row';
+    row.innerHTML = `
+      <input placeholder="Header" value="${k}" spellcheck="false" class="field hk w-2/5 px-3 py-2 font-mono text-xs text-cream">
+      <input placeholder="Value" value="${v}" spellcheck="false" class="field hv flex-1 px-3 py-2 font-mono text-xs text-cream">
+      <button type="button" class="px-1 text-clay hover:text-blood" onclick="this.parentElement.remove()">✕</button>`;
+    document.getElementById('header-rows').appendChild(row);
+  };
+  addHeaderRow('content-type', 'application/json');
+
+  window.toggleBody = () => {
+    const method = document.getElementById('test-method').value;
+    document.getElementById('body-section').style.display =
+      ['POST', 'PUT', 'PATCH'].includes(method) ? '' : 'none';
+  };
+  toggleBody();
+
+  // Kept for the tab's lifetime only — a bearer token doesn't belong in
+  // localStorage, but retyping it for every test does nobody any favours.
+  const tokenField = document.getElementById('test-token');
+  tokenField.value = sessionStorage.getItem('rustedTestToken') || '';
+  tokenField.addEventListener('change', () =>
+    sessionStorage.setItem('rustedTestToken', tokenField.value.trim()));
+
+  document.getElementById('test-form').addEventListener('htmx:configRequest', (e) => {
+    const headers = {};
+    document.querySelectorAll('#header-rows .header-row').forEach((row) => {
+      const k = row.querySelector('.hk').value.trim();
+      if (k) headers[k] = row.querySelector('.hv').value;
+    });
+    e.detail.parameters.headers_json = JSON.stringify(headers);
+  });
+})();
+</script>

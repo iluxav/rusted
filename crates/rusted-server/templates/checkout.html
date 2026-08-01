@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Checkout — rusted{% endblock %}
+{% block body %}
+<div class="min-h-full bg-[#0d0705] py-10">
+  <div class="mx-auto grid max-w-4xl grid-cols-1 gap-10 px-6 md:grid-cols-2">
+    <!-- order summary -->
+    <div class="md:border-r md:border-white/5 md:pr-10">
+      <a href="/console/billing" class="mb-8 flex items-center gap-2 font-mono text-xs text-clay hover:text-cream">← back</a>
+      <p class="text-sm text-clay">Subscribe to rusted {{ name }}</p>
+      <p class="mt-2 font-mono text-4xl text-cream">{{ price }}<span class="ml-1 text-base text-clay">{{ period }}</span></p>
+
+      <div class="mt-8 space-y-3 border-t border-white/5 pt-6 font-mono text-xs">
+        <div class="flex justify-between"><span class="text-clay">rusted {{ name }} · v{{ version }}</span><span class="text-cream">{{ price }}</span></div>
+        <div class="flex justify-between"><span class="text-clay">billed</span><span class="text-cream">{{ billed }}</span></div>
+        <div class="flex justify-between border-t border-white/5 pt-3"><span class="text-clay">total due today</span><span class="text-cream">{{ price }}</span></div>
+      </div>
+
+      <div class="mt-8 rounded-lg border border-ember/20 bg-ember/[0.06] p-4 font-mono text-[11px] leading-relaxed text-clay">
+        <span class="text-ember">Emulated checkout.</span> No payment provider is connected and no card is charged. Confirming subscribes you to plan version {{ version }} with the limits shown on the billing page.
+      </div>
+    </div>
+
+    <!-- payment form (inert, for shape) -->
+    <form method="post" action="/console/checkout/{{ code }}" class="space-y-5">
+      <div>
+        <label class="mb-1.5 block font-mono text-[11px] uppercase tracking-wider text-clay">Email</label>
+        <input type="email" value="{{ email }}" readonly class="w-full rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2.5 font-mono text-sm text-cream focus:border-ember focus:outline-none">
+      </div>
+      <div>
+        <label class="mb-1.5 block font-mono text-[11px] uppercase tracking-wider text-clay">Card information</label>
+        <input value="4242 4242 4242 4242" readonly class="w-full rounded-t-lg border border-white/10 bg-white/[0.03] px-4 py-2.5 font-mono text-sm text-cream">
+        <div class="flex">
+          <input value="12 / 34" readonly class="w-1/2 rounded-bl-lg border border-t-0 border-white/10 bg-white/[0.03] px-4 py-2.5 font-mono text-sm text-cream">
+          <input value="123" readonly class="w-1/2 rounded-br-lg border border-l-0 border-t-0 border-white/10 bg-white/[0.03] px-4 py-2.5 font-mono text-sm text-cream">
+        </div>
+      </div>
+      <div>
+        <label class="mb-1.5 block font-mono text-[11px] uppercase tracking-wider text-clay">Name on card</label>
+        <input value="{{ cardholder }}" readonly class="w-full rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2.5 font-mono text-sm text-cream">
+      </div>
+
+      <button type="submit" class="btn-primary w-full justify-center py-3 text-sm">
+        {% if price_cents == 0 %}Switch to {{ name }}{% else %}Subscribe · {{ price }}{% endif %}
+      </button>
+      <p class="text-center font-mono text-[10px] text-clay/60">test mode · powered by nothing</p>
+    </form>
+  </div>
+</div>
+{% endblock %}

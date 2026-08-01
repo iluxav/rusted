@@ -1,0 +1,16 @@
+[package]
+name = "rusted-engine"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The rusted JavaScript runtime: QuickJS behind an executor trait with hard resource limits."
+repository = "https://github.com/iluxav/rusted"
+
+[dependencies]
+rquickjs = { workspace = true }
+cpu-time = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

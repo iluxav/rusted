@@ -1,0 +1,26 @@
+[package]
+name = "rusted-cli"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The rusted command line: run functions locally, bundle them, and deploy them."
+repository = "https://github.com/iluxav/rusted"
+
+[[bin]]
+name = "rusted"
+path = "src/main.rs"
+
+[dependencies]
+rusted-server = { workspace = true }
+rusted-engine = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+dotenvy = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = "3"
+tempfile = { workspace = true }

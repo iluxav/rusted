@@ -1,0 +1,1031 @@
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{any, get, post};
+use axum::Router;
+use rusted_engine::{Executor, HttpRequest, InvocationResult, Outcome};
+use serde::Deserialize;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::state::{
+    now_epoch, AppState, InvocationRecord, TempRun, RECORD_CAP, REQUEST_BODY_LIMIT,
+};
+
+const DEFAULT_RUN_TTL_SECS: u64 = 120;
+const MAX_RUN_TTL_SECS: u64 = 3600;
+
+type Shared = State<Arc<AppState>>;
+
+/// True when the function exists and belongs to `user_id`.
+async fn owns(state: &Arc<AppState>, name: &str, user_id: Uuid) -> bool {
+    matches!(state.store.owner(name).await, Ok(Some(owner)) if owner == user_id)
+}
+
+/// The user behind an admin request, resolved from `Authorization: Bearer
+/// rk_live_…`. Returns the 401 response when absent or invalid.
+async fn caller(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Uuid, Response> {
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match presented {
+        Some(token) => match crate::auth::user_for_key(state, token).await {
+            Some(user_id) => Ok(user_id),
+            None => Err(err(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "that API key is not valid",
+            )),
+        },
+        None => Err(err(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "set RUSTED_API_KEY in .env — create a key in the console at /console/keys",
+        )),
+    }
+}
+
+fn err(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message.into() } })),
+    )
+        .into_response()
+}
+
+/// The resource budget a deployed function runs under, echoed on push/run so
+/// owners know what they were allocated. CPU is bounded via the wall deadline
+/// for now; a separate CPU budget is a cloud-milestone item.
+fn limits_json(state: &AppState, plan: &crate::plans::Plan) -> serde_json::Value {
+    json!({
+        "plan": plan.name,
+        "plan_version": plan.version,
+        "wall_ms": plan.limits.exec_ms,
+        "memory_bytes": state.limits.memory_bytes,
+        "request_body_bytes": REQUEST_BODY_LIMIT,
+        "response_body_bytes": state.limits.max_output_bytes,
+        "max_script_bytes": plan.limits.max_script_bytes,
+        "max_functions": plan.limits.max_functions,
+        "rate_per_min": plan.limits.rate_per_min,
+        "outbound_reqs": plan.limits.outbound_reqs,
+        "concurrency": 1,
+    })
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+fn validate_trigger(methods: &[String], path: &Option<String>) -> Result<(), String> {
+    if methods.is_empty() {
+        return Err("at least one HTTP method is required".into());
+    }
+    for m in methods {
+        if !ALLOWED_METHODS.contains(&m.as_str()) {
+            return Err(format!("unsupported method: {m}"));
+        }
+    }
+    if let Some(path) = path {
+        if !path.starts_with('/') {
+            return Err("path must start with '/'".into());
+        }
+        if path.contains('?') || path.contains('#') {
+            return Err(
+                "path must not declare a query string or fragment; query parameters are dynamic and arrive via request.query"
+                    .into(),
+            );
+        }
+        for segment in path.trim_matches('/').split('/') {
+            if segment.is_empty() {
+                return Err("path has an empty segment".into());
+            }
+            if segment.starts_with('{') != segment.ends_with('}') {
+                return Err(format!("malformed parameter segment: {segment}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Matches an actual sub-path against a declared pattern like `/users/{id}`,
+/// returning the captured params.
+pub fn match_path(pattern: &str, actual: &str) -> Option<BTreeMap<String, String>> {
+    let pattern: Vec<&str> = pattern.trim_matches('/').split('/').collect();
+    let actual: Vec<&str> = actual.trim_matches('/').split('/').collect();
+    if pattern.len() != actual.len() {
+        return None;
+    }
+    let mut params = BTreeMap::new();
+    for (p, a) in pattern.iter().zip(actual.iter()) {
+        if let Some(name) = p.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
+            params.insert(name.to_string(), (*a).to_string());
+        } else if p != a {
+            return None;
+        }
+    }
+    Some(params)
+}
+
+// ---------------------------------------------------------------- execution
+
+/// Runs `source` on a worker thread with no per-key state — used for ad-hoc
+/// invocations so they can't leak locks or records. The wait for a worker slot
+/// is bounded by the same queue-wait budget as the per-function lock.
+async fn execute_raw(
+    state: &Arc<AppState>,
+    source: String,
+    request: HttpRequest,
+    limits: rusted_engine::Limits,
+) -> Result<InvocationResult, Response> {
+    let slots = state.exec_slots.clone();
+    let _slot = tokio::time::timeout(
+        Duration::from_millis(state.queue_wait_ms),
+        slots.acquire_owned(),
+    )
+    .await
+    .map_err(|_| {
+        err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "busy",
+            "all worker slots are busy",
+        )
+    })?
+    .expect("semaphore never closed");
+
+    let executor = state.executor.clone();
+    Ok(
+        tokio::task::spawn_blocking(move || executor.execute(&source, &request, &limits))
+            .await
+            .expect("executor thread never panics"),
+    )
+}
+
+/// Runs `source` with concurrency 1 per `key` and records the invocation.
+async fn execute_serialized(
+    state: &Arc<AppState>,
+    key: &str,
+    source: String,
+    request: HttpRequest,
+    limits: rusted_engine::Limits,
+    owner: Option<uuid::Uuid>,
+) -> Result<InvocationResult, Response> {
+    let lock = {
+        let mut locks = state.fn_locks.lock().unwrap();
+        locks
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _turn = tokio::time::timeout(Duration::from_millis(state.queue_wait_ms), lock.lock())
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "function is busy; concurrency is 1 per function",
+            )
+        })?;
+    let result = execute_raw(state, source, request, limits).await?;
+    debug_print(state, key, &result);
+
+    let record = InvocationRecord {
+        at: now_epoch(),
+        outcome: match &result.outcome {
+            Outcome::Success(_) => "success".into(),
+            Outcome::Terminated(_) => "terminated".into(),
+            Outcome::Error(_) => "error".into(),
+        },
+        detail: match &result.outcome {
+            Outcome::Success(_) => None,
+            Outcome::Terminated(reason) => Some(reason.clone()),
+            Outcome::Error(message) => Some(message.clone()),
+        },
+        wall_ms: result.wall.as_secs_f64() * 1000.0,
+        cpu_ms: result.cpu.as_secs_f64() * 1000.0,
+        logs: result.logs.clone(),
+    };
+    // Queued, never awaited: analytics can shed load but never delay a call.
+    state.analytics.record(crate::analytics::Invocation {
+        function_name: key.to_string(),
+        user_id: owner,
+        outcome: record.outcome.clone(),
+        detail: record.detail.clone(),
+        wall_ms: record.wall_ms,
+        cpu_ms: record.cpu_ms,
+        exec_ms: result.exec_wall.as_secs_f64() * 1000.0,
+    });
+
+    let mut records = state.records.lock().unwrap();
+    let ring = records.entry(key.to_string()).or_default();
+    ring.push_front(record);
+    ring.truncate(RECORD_CAP);
+
+    Ok(result)
+}
+
+/// Engine limits for a plan: execution budget and outbound allowance.
+fn limits_for_plan(state: &AppState, plan: &crate::plans::PlanLimits) -> rusted_engine::Limits {
+    rusted_engine::Limits {
+        wall_ms: plan.exec_ms,
+        memory_bytes: state.limits.memory_bytes,
+        max_output_bytes: state.limits.max_output_bytes,
+        outbound: rusted_engine::OutboundPolicy {
+            max_requests: plan.outbound_reqs,
+            max_response_bytes: state.limits.max_output_bytes,
+            timeout: Duration::from_millis(plan.exec_ms),
+        },
+    }
+}
+
+/// The plan governing a function, and its engine limits. The owner comes from
+/// the cached function record, so a warm invocation never queries Postgres.
+async fn plan_for_owner(
+    state: &Arc<AppState>,
+    owner: Option<uuid::Uuid>,
+) -> (crate::plans::Plan, rusted_engine::Limits) {
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, owner).await;
+    let limits = limits_for_plan(state, &plan.limits);
+    (plan, limits)
+}
+
+/// With `--debug`, prints one line per invocation (plus its console output) to
+/// the server's stdout.
+fn debug_print(state: &AppState, key: &str, result: &InvocationResult) {
+    if !state.debug {
+        return;
+    }
+    let (status, detail) = match &result.outcome {
+        Outcome::Success(_) => ("success", None),
+        Outcome::Terminated(reason) => ("terminated", Some(reason.as_str())),
+        Outcome::Error(message) => ("error", Some(message.as_str())),
+    };
+    println!(
+        "[rusted] {key} {status} wall={:.2}ms cpu={:.2}ms exec={:.2}ms{}",
+        result.wall.as_secs_f64() * 1000.0,
+        result.cpu.as_secs_f64() * 1000.0,
+        result.exec_wall.as_secs_f64() * 1000.0,
+        detail.map(|d| format!(" — {d}")).unwrap_or_default(),
+    );
+    for log in &result.logs {
+        println!("[rusted] {key} console.{}: {}", log.level, log.message);
+    }
+}
+
+/// Drops the per-key lock and record state for keys that no longer exist
+/// (deleted functions, expired temp runs).
+fn prune_keys(state: &Arc<AppState>, keys: impl IntoIterator<Item = String>) {
+    let mut locks = state.fn_locks.lock().unwrap();
+    let mut records = state.records.lock().unwrap();
+    for key in keys {
+        locks.remove(&key);
+        records.remove(&key);
+    }
+}
+
+/// Maps an outcome to a data-plane HTTP response. Endpoint callers are third
+/// parties: JS error messages and console logs never appear here — the owner
+/// inspects them through the admin API (`recent`) or `rusted logs`.
+fn outcome_to_http(result: InvocationResult) -> Response {
+    match result.outcome {
+        Outcome::Success(body) => {
+            // context.json/context.text set an explicit type; bare returns are sniffed.
+            let content_type = result.content_type.unwrap_or_else(|| {
+                if serde_json::from_str::<serde_json::Value>(&body).is_ok() {
+                    "application/json"
+                } else {
+                    "text/plain; charset=utf-8"
+                }
+                .to_string()
+            });
+            (StatusCode::OK, [(CONTENT_TYPE, content_type)], body).into_response()
+        }
+        Outcome::Terminated(reason) => err(StatusCode::TOO_MANY_REQUESTS, "limit_exceeded", reason),
+        Outcome::Error(_) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "function_error",
+            "function execution failed",
+        ),
+    }
+}
+
+/// Wraps error responses that bypass our handlers (body-limit 413, router 404/405)
+/// in the standard `{error:{code,message}}` envelope.
+async fn envelope_errors(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let response = next.run(request).await;
+    let status = response.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
+    let already_json = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .map(|v| v.as_bytes().starts_with(b"application/json"))
+        .unwrap_or(false);
+    if already_json {
+        return response;
+    }
+    let code = match status {
+        StatusCode::PAYLOAD_TOO_LARGE => "body_too_large",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        _ => "http_error",
+    };
+    err(status, code, status.canonical_reason().unwrap_or("error"))
+}
+
+fn to_engine_request(
+    method: &str,
+    headers: &HeaderMap,
+    query: HashMap<String, String>,
+    params: BTreeMap<String, String>,
+    body: Bytes,
+) -> HttpRequest {
+    HttpRequest {
+        method: method.to_string(),
+        headers: headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect(),
+        query: query.into_iter().collect::<BTreeMap<_, _>>(),
+        params,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
+// ----------------------------------------------------------------- data API
+
+async fn call_function_root(
+    State(state): Shared,
+    Path(name): Path<String>,
+    method: Method,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    serve_function(state, name, None, method, query, headers, body).await
+}
+
+async fn call_function_sub(
+    State(state): Shared,
+    Path((name, rest)): Path<(String, String)>,
+    method: Method,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    serve_function(state, name, Some(rest), method, query, headers, body).await
+}
+
+async fn serve_function(
+    state: Arc<AppState>,
+    name: String,
+    rest: Option<String>,
+    method: Method,
+    query: HashMap<String, String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Served through the store's read cache; NOTIFY events keep it fresh.
+    let (source, trigger, owner) = match state.store.fetch(&name).await {
+        Ok(Some(hit)) => (hit.1.clone(), hit.0.trigger.clone(), hit.0.user_id),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_error",
+                e.to_string(),
+            )
+        }
+    };
+    if !trigger.methods.iter().any(|m| m == method.as_str()) {
+        return err(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            format!("allowed: {}", trigger.methods.join(", ")),
+        );
+    }
+    let params = match (&trigger.path, rest.as_deref()) {
+        (None, None) => BTreeMap::new(),
+        (None, Some(_)) => {
+            return err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "function has no sub-path",
+            )
+        }
+        (Some(pattern), rest) => match match_path(pattern, rest.unwrap_or("")) {
+            Some(params) => params,
+            None => {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    format!("this function serves /f/{name}{pattern}"),
+                )
+            }
+        },
+    };
+    let (plan, limits) = plan_for_owner(&state, owner).await;
+    if let Err(retry_after) = state.rate_limiter.check(&name, plan.limits.rate_per_min) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
+            Json(json!({ "error": {
+                "code": "rate_limited",
+                "message": format!("{} allows {} requests per minute for this function", plan.name, plan.limits.rate_per_min)
+            }})),
+        )
+            .into_response();
+    }
+    let request = to_engine_request(method.as_str(), &headers, query, params, body);
+    match execute_serialized(&state, &name, source, request, limits, owner).await {
+        Ok(result) => outcome_to_http(result),
+        Err(response) => response,
+    }
+}
+
+async fn call_run(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let source = {
+        let mut runs = state.temp_runs.lock().unwrap();
+        match runs.get(&id) {
+            Some(run) if run.expires_at > now_epoch() => run.source.clone(),
+            Some(_) => {
+                runs.remove(&id);
+                drop(runs);
+                prune_keys(&state, [format!("run:{id}")]);
+                return err(StatusCode::NOT_FOUND, "expired", "temporary run expired");
+            }
+            None => return err(StatusCode::NOT_FOUND, "not_found", "no such run"),
+        }
+    };
+    let request = to_engine_request("POST", &headers, query, BTreeMap::new(), body);
+    let key = format!("run:{id}");
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, None).await;
+    let limits = limits_for_plan(&state, &plan.limits);
+    match execute_serialized(&state, &key, source, request, limits, None).await {
+        Ok(result) => outcome_to_http(result),
+        Err(response) => response,
+    }
+}
+
+/// With `--require-auth`, every data-plane call needs a valid API key. The
+/// verdict comes from the in-memory cache (see [`crate::auth`]) — steady-state
+/// traffic never touches Postgres.
+async fn bearer_gate(
+    State(state): Shared,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !state.require_auth {
+        return next.run(request).await;
+    }
+    let presented = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let ok = match presented {
+        Some(token) => crate::auth::verify_key(&state, token).await,
+        None => false,
+    };
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+            Json(json!({ "error": {
+                "code": "unauthorized",
+                "message": "provide Authorization: Bearer rk_live_… — create keys in the console"
+            }})),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+pub fn data_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/f/{name}", any(call_function_root))
+        .route("/f/{name}/{*rest}", any(call_function_sub))
+        .route("/r/{id}", post(call_run))
+        .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            bearer_gate,
+        ))
+        .layer(axum::middleware::from_fn(envelope_errors))
+        .with_state(state)
+}
+
+// ---------------------------------------------------------------- admin API
+
+async fn verify_source(state: &Arc<AppState>, source: String) -> Result<(), String> {
+    let executor = state.executor.clone();
+    tokio::task::spawn_blocking(move || executor.verify(&source))
+        .await
+        .expect("verify thread never panics")
+}
+
+#[derive(Deserialize)]
+struct PushBody {
+    #[serde(default)]
+    name: Option<String>,
+    source: String,
+    #[serde(default, rename = "type")]
+    trigger_type: Option<String>,
+    #[serde(default)]
+    methods: Option<Vec<String>>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// Compile-checks the source and reads its `export const config` declaration.
+async fn inspect_source(
+    state: &Arc<AppState>,
+    source: String,
+) -> Result<rusted_engine::FileConfig, String> {
+    let executor = state.executor.clone();
+    tokio::task::spawn_blocking(move || executor.inspect(&source))
+        .await
+        .expect("inspect thread never panics")
+}
+
+async fn push_function(
+    State(state): Shared,
+    headers: HeaderMap,
+    Json(body): Json<PushBody>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    if body.source.len() as i64 > plan.limits.max_script_bytes {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "plan_limit",
+            format!(
+                "script is {} bytes; the {} plan allows {} — upgrade at /console/billing",
+                body.source.len(),
+                plan.name,
+                plan.limits.max_script_bytes
+            ),
+        );
+    }
+    if let Some(t) = &body.trigger_type {
+        if t != "http" {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_trigger",
+                format!("trigger type {t} is not supported yet; only http"),
+            );
+        }
+    }
+    // Compile check + read `export const config` from the file in one pass.
+    let file_config = match inspect_source(&state, body.source.clone()).await {
+        Ok(cfg) => cfg,
+        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e),
+    };
+    // Explicit request fields express fresher intent than the file config.
+    let Some(name) = body.name.clone().or(file_config.name) else {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "missing_name",
+            "provide --name or declare it in `export const config = { name: ... }`",
+        );
+    };
+    if !valid_name(&name) {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_name",
+            "names are 1-64 chars of a-z, 0-9, '-', '_'",
+        );
+    }
+    // Replacing an existing function doesn't consume another slot.
+    let replacing = matches!(state.store.owner(&name).await, Ok(Some(owner)) if owner == user_id);
+    if !replacing {
+        let owned = state.store.count_for_user(user_id).await.unwrap_or(0);
+        if owned >= plan.limits.max_functions {
+            return err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "plan_limit",
+                format!(
+                    "you have {owned} functions; the {} plan allows {} — upgrade at /console/billing",
+                    plan.name, plan.limits.max_functions
+                ),
+            );
+        }
+        if let Ok(Some(other)) = state.store.owner(&name).await {
+            let _ = other;
+            return err(
+                StatusCode::CONFLICT,
+                "name_taken",
+                "another account already deployed a function with that name",
+            );
+        }
+    }
+    let methods = body.methods.clone().or(file_config.methods);
+    let path = body.path.clone().or(file_config.path);
+    // A push that names no trigger fields (anywhere) keeps the function's
+    // existing route; naming any of them replaces the whole trigger config.
+    let new_trigger = if methods.is_some() || path.is_some() {
+        let methods: Vec<String> = methods
+            .unwrap_or_else(|| vec!["POST".to_string()])
+            .iter()
+            .map(|m| m.to_uppercase())
+            .collect();
+        if let Err(e) = validate_trigger(&methods, &path) {
+            return err(StatusCode::UNPROCESSABLE_ENTITY, "invalid_trigger", e);
+        }
+        Some(crate::store::HttpTrigger { methods, path })
+    } else {
+        None
+    };
+    let pushed = match new_trigger {
+        Some(trigger) => {
+            state
+                .store
+                .push_with_trigger(&name, &body.source, trigger, Some(user_id))
+                .await
+        }
+        None => state.store.push(&name, &body.source, Some(user_id)).await,
+    };
+    let pushed = match pushed {
+        Ok(revision) => match state.store.get(&name).await {
+            Ok(Some(record)) => Ok((revision, record.trigger)),
+            Ok(None) => Err(sqlx::Error::RowNotFound),
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    };
+    match pushed {
+        Ok((revision, trigger)) => {
+            let route = format!("/f/{}{}", name, trigger.path.as_deref().unwrap_or(""));
+            Json(json!({
+                "name": name,
+                "revision": revision.rev,
+                "hash": revision.hash,
+                "size_bytes": body.source.len(),
+                "methods": trigger.methods,
+                "path": trigger.path,
+                "limits": limits_json(&state, &plan),
+                "url": state.data_url(&route),
+            }))
+            .into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            e.to_string(),
+        ),
+    }
+}
+
+async fn list_functions(State(state): Shared, headers: HeaderMap) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let names = match state.store.names_for_user(user_id).await {
+        Ok(names) => names,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_error",
+                e.to_string(),
+            )
+        }
+    };
+    let mut functions = Vec::with_capacity(names.len());
+    for name in names {
+        if let Ok(Some(record)) = state.store.get(&name).await {
+            let current = record.current();
+            functions.push(json!({
+                "name": name,
+                "revision": current.rev,
+                "hash": current.hash,
+                "updated_at": current.created_at,
+                "url": state.data_url(&format!("/f/{name}")),
+            }));
+        }
+    }
+    let now = now_epoch();
+    let runs: Vec<_> = state
+        .temp_runs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, run)| run.expires_at > now)
+        .map(|(id, run)| {
+            json!({
+                "id": id,
+                "url": state.data_url(&format!("/r/{id}")),
+                "expires_at": run.expires_at,
+            })
+        })
+        .collect();
+    Json(json!({ "functions": functions, "runs": runs })).into_response()
+}
+
+async fn function_detail(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    if !owns(&state, &name, user_id).await {
+        return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+    }
+    let Ok(record) = state.store.get(&name).await else {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            "lookup failed",
+        );
+    };
+    let Some(record) = record else {
+        return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+    };
+    let source = if query.get("source").map(String::as_str) == Some("true") {
+        match state.store.source(&name).await {
+            Ok(s) => s,
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store_error",
+                    e.to_string(),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let recent: Vec<InvocationRecord> = state
+        .records
+        .lock()
+        .unwrap()
+        .get(&name)
+        .map(|ring| ring.iter().cloned().collect())
+        .unwrap_or_default();
+    let mut body = json!({
+        "name": name,
+        "revision": record.current().rev,
+        "hash": record.current().hash,
+        "revisions": record.revisions,
+        "url": state.data_url(&format!("/f/{name}")),
+        "recent": recent,
+    });
+    if let Some(source) = source {
+        body["source"] = json!(source);
+    }
+    Json(body).into_response()
+}
+
+async fn delete_function(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    if !owns(&state, &name, user_id).await {
+        return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+    }
+    let deleted = state.store.delete(&name).await;
+    match deleted {
+        Ok(true) => {
+            prune_keys(&state, [name]);
+            Json(json!({ "deleted": true })).into_response()
+        }
+        Ok(false) => err(StatusCode::NOT_FOUND, "not_found", "no such function"),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            e.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct RunBody {
+    source: String,
+    ttl_seconds: Option<u64>,
+}
+
+async fn create_run(
+    State(state): Shared,
+    headers: HeaderMap,
+    Json(body): Json<RunBody>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    if let Err(e) = verify_source(&state, body.source.clone()).await {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e);
+    }
+    let ttl = body
+        .ttl_seconds
+        .unwrap_or(DEFAULT_RUN_TTL_SECS)
+        .clamp(1, MAX_RUN_TTL_SECS);
+    let seq = state.invoke_seq.fetch_add(1, Ordering::Relaxed);
+    let digest = Sha256::digest(format!("{}:{seq}:{}", now_epoch(), body.source));
+    let id = hex::encode(&digest[..6]);
+    let expires_at = now_epoch() + ttl;
+    let size_bytes = body.source.len();
+    state.temp_runs.lock().unwrap().insert(
+        id.clone(),
+        TempRun {
+            source: body.source,
+            expires_at,
+        },
+    );
+    Json(json!({
+        "id": id,
+        "url": state.data_url(&format!("/r/{id}")),
+        "expires_at": expires_at,
+        "size_bytes": size_bytes,
+        "limits": limits_json(&state, &plan),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct InvokeBody {
+    name: Option<String>,
+    source: Option<String>,
+    #[serde(default)]
+    body: String,
+}
+
+async fn invoke(
+    State(state): Shared,
+    headers: HeaderMap,
+    Json(body): Json<InvokeBody>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    if let Some(name) = &body.name {
+        if !owns(&state, name, user_id).await {
+            return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+        }
+    }
+    let (key, source) = match (&body.name, body.source) {
+        (Some(name), _) => match state.store.source(name).await {
+            Ok(Some(s)) => (Some(name.clone()), s),
+            Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store_error",
+                    e.to_string(),
+                )
+            }
+        },
+        // Ad-hoc source: nothing shared to serialize on, nothing to record —
+        // deliberately keyless so repeated invokes can't grow server state.
+        (None, Some(source)) => (None, source),
+        (None, None) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "provide either name or source",
+            )
+        }
+    };
+    let request = HttpRequest::post_json(body.body);
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    let limits = limits_for_plan(&state, &plan.limits);
+    let executed = match key {
+        Some(key) => execute_serialized(&state, &key, source, request, limits, Some(user_id)).await,
+        None => match execute_raw(&state, source, request, limits).await {
+            Ok(result) => {
+                debug_print(&state, "ad-hoc", &result);
+                Ok(result)
+            }
+            Err(response) => Err(response),
+        },
+    };
+    let result = match executed {
+        Ok(r) => r,
+        Err(response) => return response,
+    };
+    let mut response = json!({
+        "logs": result.logs,
+        "wall_ms": result.wall.as_secs_f64() * 1000.0,
+        "cpu_ms": result.cpu.as_secs_f64() * 1000.0,
+    });
+    match result.outcome {
+        Outcome::Success(s) => {
+            response["outcome"] = json!("success");
+            response["response"] = json!(s);
+        }
+        Outcome::Terminated(reason) => {
+            response["outcome"] = json!("terminated");
+            response["reason"] = json!(reason);
+        }
+        Outcome::Error(message) => {
+            response["outcome"] = json!("error");
+            response["message"] = json!(message);
+        }
+    }
+    Json(response).into_response()
+}
+
+#[derive(Deserialize)]
+struct VerifyBody {
+    source: String,
+}
+
+async fn verify(
+    State(state): Shared,
+    headers: HeaderMap,
+    Json(body): Json<VerifyBody>,
+) -> Response {
+    if let Err(response) = caller(&state, &headers).await {
+        return response;
+    }
+    match inspect_source(&state, body.source).await {
+        Ok(config) => Json(json!({ "valid": true, "config": config })).into_response(),
+        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e),
+    }
+}
+
+pub fn admin_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/api/functions", post(push_function).get(list_functions))
+        .route(
+            "/api/functions/{name}",
+            get(function_detail).delete(delete_function),
+        )
+        .route("/api/runs", post(create_run))
+        .route("/api/invoke", post(invoke))
+        .route("/api/verify", post(verify))
+        .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT * 2))
+        .layer(axum::middleware::from_fn(envelope_errors))
+        .with_state(state)
+}
+
+/// One sweep pass: drops expired temp runs (they're also checked lazily on
+/// call) along with their per-key lock and record state.
+pub fn sweep_once(state: &Arc<AppState>) {
+    let now = now_epoch();
+    let expired: Vec<String> = {
+        let mut runs = state.temp_runs.lock().unwrap();
+        let dead: Vec<String> = runs
+            .iter()
+            .filter(|(_, run)| run.expires_at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dead {
+            runs.remove(id);
+        }
+        dead
+    };
+    if !expired.is_empty() {
+        prune_keys(state, expired.into_iter().map(|id| format!("run:{id}")));
+    }
+}
+
+pub async fn sweep_temp_runs(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        sweep_once(&state);
+    }
+}

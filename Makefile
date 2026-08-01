@@ -1,0 +1,46 @@
+CARGO ?= cargo
+BIN   := target/release/rusted
+
+.PHONY: all build test lint fmt fmt-check check serve install i clean help db db-clean
+
+all: check build
+
+build: ## Build the release `rusted` binary
+	$(CARGO) build --release -p rusted-cli
+
+db: ## Start the local Postgres (docker compose)
+	docker compose up -d --wait db
+
+db-clean: ## Drop accumulated rusted_test_* databases
+	docker exec rusted-postgres psql -U rusted -d postgres -tAc \
+	  "select datname from pg_database where datname like 'rusted_test_%'" \
+	  | xargs -I% docker exec rusted-postgres psql -U rusted -d postgres -c 'drop database "%"'
+
+test: db db-clean ## Run the full test suite (needs the database)
+	$(CARGO) test --release
+	@$(MAKE) --no-print-directory db-clean
+
+lint: ## Clippy on all targets; warnings are errors
+	$(CARGO) clippy --release --all-targets -- -D warnings
+
+fmt: ## Format the workspace
+	$(CARGO) fmt --all
+
+fmt-check: ## Fail if formatting is off
+	$(CARGO) fmt --all -- --check
+
+check: fmt-check lint test ## Everything a CI gate would run
+
+serve: build ## Run the server (functions on :7411, admin API on :7412)
+	$(BIN) serve
+
+install: ## Install `rusted` into ~/.cargo/bin
+	$(CARGO) install --path crates/rusted-cli
+
+i: build install ## Shorthand: build and install
+
+clean:
+	$(CARGO) clean
+
+help: ## List available targets
+	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'

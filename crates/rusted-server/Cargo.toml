@@ -1,0 +1,28 @@
+[package]
+name = "rusted-server"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "The rusted server: data plane, admin API, and web console."
+repository = "https://github.com/iluxav/rusted"
+
+[dependencies]
+rusted-engine = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+askama = { workspace = true }
+reqwest = { workspace = true }
+sqlx = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+sourcemap = { workspace = true }
+rolldown = { workspace = true }
+rolldown_common = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = { workspace = true }

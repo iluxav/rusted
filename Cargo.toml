@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rusted-engine",
+    "crates/rusted-server",
+    "crates/rusted-cli",
+]
+
+[workspace.dependencies]
+rquickjs = "0.12.2"
+cpu-time = "1.0"
+askama = "0.16"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros", "uuid"] }
+rand = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+dotenvy = "0.15"
+ureq = { version = "3", features = ["json"] }
+sourcemap = "9"
+# Rolldown's Rust crates explicitly do not follow semver — pin exactly.
+rolldown = "=1.2.1"
+rolldown_common = "=1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusted-engine = { path = "crates/rusted-engine" }
+rusted-server = { path = "crates/rusted-server" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+dirs = "6"
+assert_cmd = "2"
+tempfile = "3"
+
+[profile.release]
+debug = true
