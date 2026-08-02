@@ -1340,7 +1340,9 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
 async fn mcp_endpoint(State(state): Shared, headers: HeaderMap, body: Bytes) -> Response {
     let user_id = match caller(&state, &headers).await {
         Ok(user_id) => user_id,
-        Err(response) => return response,
+        // Not the generic 401: the WWW-Authenticate header is how a client with
+        // no credentials discovers where to get them, and the spec requires it.
+        Err(_) => return crate::oauth::unauthorized_challenge(&state),
     };
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return (

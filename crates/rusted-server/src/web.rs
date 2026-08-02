@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use askama::Template;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::header::{HeaderMap, SET_COOKIE};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -60,6 +61,10 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/", get(landing))
         .route("/login", get(login))
+        .route(
+            "/oauth/authorize",
+            get(oauth_authorize).post(oauth_authorize_decide),
+        )
         .route("/auth/github", get(auth_github))
         .route("/auth/github/callback", get(auth_github_callback))
         .route("/logout", get(logout))
@@ -347,6 +352,17 @@ struct LoginT {
 }
 
 #[derive(Template)]
+#[template(path = "authorize.html")]
+struct AuthorizeT {
+    client_name: String,
+    login: String,
+    redirect_host: String,
+    /// Carried through the consent form so the POST can be re-validated from
+    /// scratch rather than trusting anything held server-side between requests.
+    fields: Vec<(String, String)>,
+}
+
+#[derive(Template)]
 #[template(path = "console.html")]
 struct ConsoleT {
     active: String,
@@ -528,6 +544,151 @@ async fn login(State(state): State<WebState>, Query(query): Query<LoginQuery>) -
         ),
     )
         .into_response()
+}
+
+// ------------------------------------------------------------ oauth consent
+
+/// These two pages report a client's mistake back to a human, and the text
+/// includes values the client chose — so it is escaped rather than trusted.
+fn escape_html(raw: &str) -> String {
+    raw.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The parameters a client sent, flattened for the consent form so the POST
+/// can be validated on its own terms.
+fn authorize_fields(params: &crate::oauth::AuthorizeParams) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("client_id".into(), params.client_id.clone()),
+        ("redirect_uri".into(), params.redirect_uri.clone()),
+        ("response_type".into(), params.response_type.clone()),
+        ("code_challenge".into(), params.code_challenge.clone()),
+        (
+            "code_challenge_method".into(),
+            params.code_challenge_method.clone(),
+        ),
+    ];
+    if let Some(v) = &params.state {
+        fields.push(("state".into(), v.clone()));
+    }
+    if let Some(v) = &params.resource {
+        fields.push(("resource".into(), v.clone()));
+    }
+    if let Some(v) = &params.scope {
+        fields.push(("scope".into(), v.clone()));
+    }
+    fields
+}
+
+fn host_of(uri: &str) -> String {
+    uri.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(uri)
+        .to_string()
+}
+
+/// Shows a human what a client is asking for.
+///
+/// Signed out, this sends them through GitHub and back here with the request
+/// intact, so approving does not mean starting over.
+async fn oauth_authorize(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(params): Query<crate::oauth::AuthorizeParams>,
+    raw: RawQuery,
+) -> Response {
+    let user = match current_user(&state, &headers).await {
+        Some(user) => user,
+        None => {
+            let back = format!("/oauth/authorize?{}", raw.0.unwrap_or_default());
+            return Redirect::to(&format!("/login?next={}", urlencoding::encode(&back)))
+                .into_response();
+        }
+    };
+
+    // Checked before anyone is asked to approve: a bad request should read as
+    // an error, not as a consent screen for something that cannot work.
+    let pending = match crate::oauth::validate_authorize(&state.0.app, &params).await {
+        Ok(pending) => pending,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(format!(
+                    "<p style=\"font:14px system-ui;padding:2rem;color:#eee;background:#1d0e07\">\
+                     This authorization request cannot be completed: {}</p>",
+                    escape_html(&message)
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    Html(
+        AuthorizeT {
+            client_name: pending.client_name,
+            login: user.login.clone(),
+            redirect_host: host_of(&pending.redirect_uri),
+            fields: authorize_fields(&params),
+        }
+        .render()
+        .expect("authorize renders"),
+    )
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct AuthorizeDecision {
+    decision: String,
+    #[serde(flatten)]
+    params: crate::oauth::AuthorizeParams,
+}
+
+/// Records the decision. Everything is re-validated: the form came back from a
+/// browser, and so did the parameters on it.
+async fn oauth_authorize_decide(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Form(body): Form<AuthorizeDecision>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+
+    if body.decision != "approve" {
+        // Refusal is an answer the client is entitled to, delivered the way the
+        // spec expects rather than as a dead end in the browser.
+        let sep = if body.params.redirect_uri.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
+        let mut location = format!(
+            "{}{sep}error=access_denied&error_description={}",
+            body.params.redirect_uri,
+            urlencoding::encode("the person declined this request")
+        );
+        if let Some(client_state) = &body.params.state {
+            location.push_str(&format!("&state={}", urlencoding::encode(client_state)));
+        }
+        return Redirect::to(&location).into_response();
+    }
+
+    match crate::oauth::grant(&state.0.app, user.id, &body.params).await {
+        Ok(location) => Redirect::to(&location).into_response(),
+        Err(message) => (
+            StatusCode::BAD_REQUEST,
+            Html(format!(
+                "<p style=\"font:14px system-ui;padding:2rem;color:#eee;background:#1d0e07\">\
+                 Could not complete authorization: {}</p>",
+                escape_html(&message)
+            )),
+        )
+            .into_response(),
+    }
 }
 
 /// Resolves the signed-in user or produces the redirect to /login.
