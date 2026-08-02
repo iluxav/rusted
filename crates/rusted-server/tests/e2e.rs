@@ -1681,3 +1681,300 @@ async fn multibyte_utf8_still_round_trips_intact() {
         "multi-byte UTF-8 must survive unchanged"
     );
 }
+
+// --- OAuth for MCP clients ----------------------------------------------------
+
+/// A hosted assistant cannot be handed a Bearer key: it discovers the server,
+/// registers itself, and sends the user through a browser. This walks that
+/// path end to end, because the pieces are only worth anything together.
+#[tokio::test]
+async fn an_mcp_client_can_register_authorize_and_get_a_token() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let t = boot().await;
+
+    // 1. Unauthenticated, /mcp must point at the metadata rather than just refuse.
+    let r = t
+        .client
+        .post(t.admin("/mcp"))
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let challenge = r
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        challenge.contains("resource_metadata="),
+        "a client has no way to discover the auth server: {challenge:?}"
+    );
+
+    // 2. Protected resource metadata names an authorization server.
+    let meta: Value = t
+        .client
+        .get(t.admin("/.well-known/oauth-protected-resource"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let auth_server = meta["authorization_servers"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!auth_server.is_empty(), "{meta}");
+
+    // 3. Authorization server metadata advertises what is implemented.
+    let as_meta: Value = t
+        .client
+        .get(t.admin("/.well-known/oauth-authorization-server"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(as_meta["code_challenge_methods_supported"][0], "S256");
+    assert!(as_meta["registration_endpoint"].is_string(), "{as_meta}");
+
+    // 4. Register dynamically.
+    let reg: Value = t
+        .client
+        .post(t.admin("/oauth/register"))
+        .json(&serde_json::json!({
+            "client_name": "Test Assistant",
+            "redirect_uris": ["https://client.example/cb"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+
+    // 5. Approve, as the signed-in human would.
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let no_follow = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let approval = no_follow
+        .post(t.admin("/oauth/authorize"))
+        .header("cookie", format!("rusted_session={session}"))
+        .form(&[
+            ("decision", "approve"),
+            ("client_id", &client_id),
+            ("redirect_uri", "https://client.example/cb"),
+            ("response_type", "code"),
+            ("code_challenge", &code_challenge),
+            ("code_challenge_method", "S256"),
+            ("state", "xyz"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        approval.status().is_redirection(),
+        "expected a redirect back to the client, got {}",
+        approval.status()
+    );
+    let location = approval
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("state=xyz"),
+        "state must round-trip: {location}"
+    );
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("a code in the redirect")
+        .to_string();
+
+    // 6. Exchange it, proving possession with the PKCE verifier.
+    let token: Value = t
+        .client
+        .post(t.admin("/oauth/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", "https://client.example/cb"),
+            ("client_id", &client_id),
+            ("code_verifier", verifier),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let access_token = token["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+    assert_eq!(token["token_type"], "Bearer", "{token}");
+
+    // 7. The token works on /mcp — the point of all of it.
+    let used: Value = t
+        .client
+        .post(t.admin("/mcp"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(used["result"]["tools"][0]["name"], "execute", "{used}");
+
+    // 8. And the code cannot be spent twice.
+    let replay = t
+        .client
+        .post(t.admin("/oauth/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", "https://client.example/cb"),
+            ("client_id", &client_id),
+            ("code_verifier", verifier),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.status(),
+        400,
+        "an authorization code must be single use"
+    );
+}
+
+/// PKCE is the only thing standing in for a client secret here, so a token
+/// request without the matching verifier must fail.
+#[tokio::test]
+async fn a_wrong_pkce_verifier_is_refused() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let t = boot().await;
+    let reg: Value = t
+        .client
+        .post(t.admin("/oauth/register"))
+        .json(&serde_json::json!({ "client_name": "T", "redirect_uris": ["https://x.example/cb"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_id = reg["client_id"].as_str().unwrap().to_string();
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(b"the-real-verifier"));
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let no_follow = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let approval = no_follow
+        .post(t.admin("/oauth/authorize"))
+        .header("cookie", format!("rusted_session={session}"))
+        .form(&[
+            ("decision", "approve"),
+            ("client_id", &client_id),
+            ("redirect_uri", "https://x.example/cb"),
+            ("response_type", "code"),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    let location = approval.headers()["location"].to_str().unwrap().to_string();
+    let code = location
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+
+    let r = t
+        .client
+        .post(t.admin("/oauth/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", "https://x.example/cb"),
+            ("client_id", &client_id),
+            ("code_verifier", "not-the-real-verifier"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "a wrong verifier must not yield a token");
+}
+
+/// An unregistered redirect URI must never reach a browser: that is the open
+/// redirect the spec spends a section on.
+#[tokio::test]
+async fn an_unregistered_redirect_uri_is_refused() {
+    let t = boot().await;
+    let reg: Value = t
+        .client
+        .post(t.admin("/oauth/register"))
+        .json(&serde_json::json!({ "client_name": "T", "redirect_uris": ["https://good.example/cb"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_id = reg["client_id"].as_str().unwrap().to_string();
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .post(t.admin("/oauth/authorize"))
+        .header("cookie", format!("rusted_session={session}"))
+        .form(&[
+            ("decision", "approve"),
+            ("client_id", &client_id),
+            ("redirect_uri", "https://attacker.example/steal"),
+            ("response_type", "code"),
+            ("code_challenge", "irrelevant"),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "must not redirect to an unregistered URI");
+
+    // Registration itself must refuse an unsafe target too.
+    let bad = t
+        .client
+        .post(t.admin("/oauth/register"))
+        .json(&serde_json::json!({ "redirect_uris": ["http://attacker.example/cb"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400, "plain http off loopback must be refused");
+}

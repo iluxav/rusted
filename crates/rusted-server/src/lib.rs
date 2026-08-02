@@ -10,6 +10,7 @@ pub mod bundler;
 pub mod device;
 pub mod local;
 pub mod memory;
+pub mod oauth;
 pub mod plans;
 pub mod state;
 pub mod store;
@@ -106,8 +107,9 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .expect("admin_addr set exactly once");
 
     let data_app = api::data_router(state.clone());
-    let admin_app =
-        api::admin_router(state.clone()).merge(web::router(web::WebState::new(state.clone())));
+    let admin_app = api::admin_router(state.clone())
+        .merge(oauth::router(state.clone()))
+        .merge(web::router(web::WebState::new(state.clone())));
     let tasks = vec![
         tokio::spawn(async move {
             axum::serve(data_listener, data_app)
