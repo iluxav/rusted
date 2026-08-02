@@ -10,14 +10,37 @@ use reqwest::blocking::Client;
 use reqwest::Method;
 use serde_json::{json, Value};
 
+/// Where the CLI looks when nobody said otherwise. Installing the CLI is
+/// overwhelmingly a step toward using the hosted service; running your own
+/// server is the deliberate case, and `RUSTED_ADMIN` is how you say so.
+const HOSTED_ADMIN: &str = "https://rusted.sh";
+
+/// The admin port `rusted serve` binds, quoted in errors so self-hosters who
+/// hit the hosted default by accident are told the exact way back.
+const LOCAL_ADMIN: &str = "http://127.0.0.1:7412";
+
+/// A connection failure is nearly always "pointed at the wrong server," so say
+/// what the two servers usually are rather than only reporting the socket error.
+fn unreachable(admin: &str, e: impl std::fmt::Display) -> String {
+    let other = if admin.starts_with(HOSTED_ADMIN) {
+        format!("running your own server? {LOCAL_ADMIN}")
+    } else {
+        format!("meant the hosted service? {HOSTED_ADMIN}")
+    };
+    format!(
+        "cannot reach rusted at {admin}: {e}\n\n  {other}\n  \
+         point somewhere else with --admin <url>, or set RUSTED_ADMIN to make it stick"
+    )
+}
+
 #[derive(Parser)]
 #[command(name = "rusted", version, about = "Tiny JavaScript microfunctions")]
 struct Cli {
-    /// Admin API of a running `rusted serve`
+    /// Admin API to talk to — the hosted service unless you say otherwise
     #[arg(
         long,
         global = true,
-        default_value = "http://127.0.0.1:7412",
+        default_value = HOSTED_ADMIN,
         env = "RUSTED_ADMIN"
     )]
     admin: String,
@@ -163,7 +186,7 @@ fn login(cli: &Cli) -> Result<(), String> {
         .post(format!("{admin}/api/device/code"))
         .json(&json!({ "label": label }))
         .send()
-        .map_err(|e| format!("cannot reach rusted at {admin}: {e}"))?
+        .map_err(|e| unreachable(&admin, e))?
         .json()
         .map_err(|e| format!("unexpected response: {e}"))?;
 
@@ -190,7 +213,7 @@ fn login(cli: &Cli) -> Result<(), String> {
             .post(format!("{admin}/api/device/token"))
             .json(&json!({ "device_code": device_code }))
             .send()
-            .map_err(|e| format!("cannot reach rusted at {admin}: {e}"))?;
+            .map_err(|e| unreachable(&admin, e))?;
         let body: Value = response.json().unwrap_or_else(|_| json!({}));
         if let Some(key) = body["api_key"].as_str() {
             let path = credentials::save(&admin, key)?;
@@ -492,12 +515,7 @@ fn api(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<Val
     if let Some(body) = body {
         request = request.json(&body);
     }
-    let response = request.send().map_err(|e| {
-        format!(
-            "cannot reach rusted server at {}: {e}\nis `rusted serve` running?",
-            cli.admin
-        )
-    })?;
+    let response = request.send().map_err(|e| unreachable(&cli.admin, e))?;
     let status = response.status();
     let text = response.text().map_err(|e| e.to_string())?;
     let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
