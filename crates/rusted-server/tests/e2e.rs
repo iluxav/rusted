@@ -1490,3 +1490,119 @@ async fn the_plan_refuses_oversized_scripts_not_the_router() {
         "should name the plan's allowance: {body}"
     );
 }
+
+// --- MCP: one tool, so a model spends context on the task, not on schemas ----
+
+async fn mcp(t: &TestServer, msg: serde_json::Value) -> (u16, serde_json::Value) {
+    let r = t
+        .client
+        .post(t.admin("/mcp"))
+        .header("authorization", format!("Bearer {}", t.key))
+        .json(&msg)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    let body = r.json().await.unwrap_or(serde_json::json!(null));
+    (status, body)
+}
+
+#[tokio::test]
+async fn mcp_handshake_and_tool_listing() {
+    let t = boot().await;
+    let (_, init) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                           "params":{"protocolVersion":"2025-06-18"}}),
+    )
+    .await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18", "{init}");
+    assert!(init["result"]["serverInfo"]["name"].is_string(), "{init}");
+
+    let (_, list) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    let tools = list["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1, "one tool replaces a toolbelt: {list}");
+    assert_eq!(tools[0]["name"], "run");
+}
+
+#[tokio::test]
+async fn mcp_run_executes_code_and_returns_logs() {
+    let t = boot().await;
+    let (_, res) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"run",
+            "arguments":{
+                "code":"export default async function handler(request, context) { const { xs } = await request.json(); console.log('n=', xs.length); return context.json({ sum: xs.reduce((a,b)=>a+b,0) }); }",
+                "input":{"xs":[1,2,3,4]}
+            }}}),
+    )
+    .await;
+    let text = res["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("\"sum\":10"),
+        "should carry the result: {res}"
+    );
+    assert!(text.contains("n= 4"), "should carry console output: {res}");
+    assert_ne!(res["result"]["isError"], serde_json::json!(true), "{res}");
+}
+
+/// A model can only correct code it gets feedback on, so a failing script is a
+/// tool result carrying the error — never a JSON-RPC protocol error.
+#[tokio::test]
+async fn mcp_run_reports_broken_code_as_a_result_the_model_can_read() {
+    let t = boot().await;
+    let (_, res) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"run",
+            "arguments":{"code":"export default async function handler(r, c) { return c.json({ v: notDefinedAnywhere.x }); }"}}}),
+    )
+    .await;
+    assert!(
+        res["error"].is_null(),
+        "must not be a protocol error: {res}"
+    );
+    assert_eq!(res["result"]["isError"], serde_json::json!(true), "{res}");
+    let text = res["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("notDefinedAnywhere"),
+        "the model needs to see what broke: {res}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_notifications_get_202_and_no_body() {
+    let t = boot().await;
+    let r = t
+        .client
+        .post(t.admin("/mcp"))
+        .header("authorization", format!("Bearer {}", t.key))
+        .json(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    assert!(r.text().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mcp_requires_a_key() {
+    let t = boot().await;
+    let r = t
+        .client
+        .post(t.admin("/mcp"))
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        401,
+        "arbitrary code execution must be authenticated"
+    );
+}

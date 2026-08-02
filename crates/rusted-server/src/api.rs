@@ -12,7 +12,7 @@ use axum::routing::{any, get, post};
 use axum::Router;
 use rusted_engine::{Executor, HttpRequest, InvocationResult, Outcome};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -1129,6 +1129,205 @@ async fn verify(
     }
 }
 
+// ------------------------------------------------------------------------ mcp
+//
+// One tool, deliberately. The prevailing MCP pattern hands a model dozens of
+// tools whose schemas cost context before the conversation starts — an
+// abstraction from when models could not write code. A model that writes
+// JavaScript does not need a schema per capability; it needs `fetch` and
+// somewhere safe to run. `run` is that, and the sandbox is what makes handing
+// it to a model defensible.
+
+const MCP_PROTOCOL: &str = "2025-06-18";
+
+fn mcp_tools() -> Value {
+    json!([{
+        "name": "run",
+        "description":
+            "Execute JavaScript on rusted and return its result plus console output. \
+             Write an ES module with `export default async function handler(request, context)`. \
+             Read the input with `await request.json()` and reply with `context.json(value)`. \
+             `fetch` is available for outbound HTTP. Run code close to the data and return only \
+             what you need, so large payloads never enter your context. Execution is sandboxed \
+             and time- and memory-capped; there is no filesystem and no process access.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "description": "The ES module to run." },
+                "input": { "description": "Any JSON value; the handler reads it via request.json()." }
+            },
+            "required": ["code"]
+        }
+    }])
+}
+
+/// Tool failures come back as results, not JSON-RPC errors: that is how the
+/// model sees what broke and fixes its own code.
+fn mcp_tool_result(text: String, is_error: bool) -> Value {
+    let mut result = json!({ "content": [{ "type": "text", "text": text }] });
+    if is_error {
+        result["isError"] = json!(true);
+    }
+    result
+}
+
+async fn mcp_run(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
+    let Some(code) = args.get("code").and_then(|c| c.as_str()) else {
+        return mcp_tool_result("`code` is required and must be a string".into(), true);
+    };
+    let input = match args.get("input") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => "{}".to_string(),
+    };
+
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    if code.len() as i64 > plan.limits.max_script_bytes {
+        return mcp_tool_result(
+            format!(
+                "script is {} bytes; the {} plan allows {}",
+                code.len(),
+                plan.name,
+                plan.limits.max_script_bytes
+            ),
+            true,
+        );
+    }
+    let limits = limits_for_plan(state, &plan.limits);
+
+    // Ad-hoc, so keyless: nothing is stored and nothing accumulates per call.
+    let result = match execute_raw(
+        state,
+        code.to_string(),
+        HttpRequest::post_json(input),
+        limits,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            return mcp_tool_result("the server is at capacity; retry in a moment".into(), true)
+        }
+    };
+
+    let logs: Vec<String> = result
+        .logs
+        .iter()
+        .map(|l| format!("[{}] {}", l.level, l.message))
+        .collect();
+    let ms = (result.wall.as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+
+    match &result.outcome {
+        rusted_engine::Outcome::Success(body) => {
+            // Handlers almost always reply with context.json, so the body is
+            // already JSON. Embed it as a value rather than a string: a model
+            // should not have to unescape JSON nested inside JSON.
+            let result = serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!(body));
+            let mut out = json!({ "result": result, "ms": ms });
+            if !logs.is_empty() {
+                out["logs"] = json!(logs);
+            }
+            mcp_tool_result(out.to_string(), false)
+        }
+        rusted_engine::Outcome::Terminated(reason) => mcp_tool_result(
+            json!({ "error": reason, "kind": "limit", "logs": logs, "ms": ms }).to_string(),
+            true,
+        ),
+        rusted_engine::Outcome::Error(message) => {
+            let mut out = json!({ "error": message, "kind": "script", "ms": ms });
+            if !logs.is_empty() {
+                out["logs"] = json!(logs);
+            }
+            if let Some(stack) = &result.stack {
+                out["stack"] = json!(stack);
+            }
+            mcp_tool_result(out.to_string(), true)
+        }
+    }
+}
+
+/// One JSON-RPC message. `None` means it was a notification and wants no reply.
+async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Option<Value> {
+    let id = msg.get("id").cloned()?;
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(json!({}));
+    let ok = |result: Value| Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+
+    match method {
+        "initialize" => ok(json!({
+            "protocolVersion": params.get("protocolVersion")
+                .and_then(|v| v.as_str()).unwrap_or(MCP_PROTOCOL),
+            "capabilities": { "tools": { "listChanged": false } },
+            "serverInfo": { "name": "rusted", "version": env!("CARGO_PKG_VERSION") },
+        })),
+        "ping" => ok(json!({})),
+        "tools/list" => ok(json!({ "tools": mcp_tools() })),
+        "tools/call" => {
+            let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            match name {
+                "run" => ok(mcp_run(state, user_id, &args).await),
+                other => ok(mcp_tool_result(format!("unknown tool: {other}"), true)),
+            }
+        }
+        other => Some(json!({
+            "jsonrpc": "2.0", "id": id,
+            "error": { "code": -32601, "message": format!("method not found: {other}") }
+        })),
+    }
+}
+
+/// MCP over Streamable HTTP in JSON response mode — the spec allows answering a
+/// POST with one `application/json` body instead of an SSE stream, so no
+/// session or streaming machinery is needed.
+async fn mcp_endpoint(State(state): Shared, headers: HeaderMap, body: Bytes) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let Ok(message) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "jsonrpc": "2.0", "id": null,
+                         "error": { "code": -32700, "message": "parse error" } })),
+        )
+            .into_response();
+    };
+
+    let replies: Vec<Value> = match &message {
+        Value::Array(batch) => {
+            let mut out = Vec::new();
+            for m in batch {
+                if let Some(reply) = mcp_dispatch(&state, user_id, m).await {
+                    out.push(reply);
+                }
+            }
+            out
+        }
+        single => mcp_dispatch(&state, user_id, single)
+            .await
+            .into_iter()
+            .collect(),
+    };
+
+    // Nothing asked for an answer — say so the way the spec does.
+    if replies.is_empty() {
+        return (StatusCode::ACCEPTED, "").into_response();
+    }
+
+    let session = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("stateless")
+        .to_string();
+    let payload = if message.is_array() {
+        Value::Array(replies)
+    } else {
+        replies.into_iter().next().expect("one reply")
+    };
+    ([("mcp-session-id", session)], Json(payload)).into_response()
+}
+
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/functions", post(push_function).get(list_functions))
@@ -1142,6 +1341,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/api/plan", get(current_plan))
         // Unauthenticated by necessity: a client starting the device flow has
         // no credential yet. Both are rate limited and every code expires.
+        .route("/mcp", post(mcp_endpoint))
         .route("/api/device/code", post(device_start))
         .route("/api/device/token", post(device_poll))
         .layer(DefaultBodyLimit::max(ADMIN_BODY_LIMIT))
