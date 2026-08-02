@@ -18,6 +18,24 @@ export HCLOUD_TOKEN=...          # read/write, in a Hetzner project used only fo
 That creates a **CX22** (2 vCPU, 4 GB, ~€4.5/mo), attaches a firewall allowing
 only 22, 80 and 443, and boots it with `cloud-init.yaml`.
 
+### When everything is sold out
+
+Hetzner's cheap lines sell out in waves, and it has nothing to do with your
+account. The script searches five types across six locations before giving up,
+and can wait for capacity to appear:
+
+```bash
+./provision.sh --wait           # keep looking for an hour
+./provision.sh --wait=21600     # for six
+```
+
+It usually clears within hours. If you'd rather not wait, the deploy is plain
+docker compose and runs anywhere — **Netcup** (~€3), **Scaleway** (~€4),
+**OVH** (~€4), **Vultr** or **DigitalOcean** ($6–12) all work, and nothing but
+`provision.sh` is Hetzner-specific. Create a box with Ubuntu 24.04, paste
+`cloud-init.yaml` into its user-data field, and the rest of this runbook is
+unchanged.
+
 ### Picking a type
 
 Any of these run rusted comfortably — releases cover both architectures and the
