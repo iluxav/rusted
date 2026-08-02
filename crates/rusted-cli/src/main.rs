@@ -168,6 +168,14 @@ enum Cmd {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Scaffold a new function: handler, types, and tsconfig, ready to run
+    New {
+        /// Directory to create; also the function's default name
+        name: String,
+        /// Plain JavaScript instead of TypeScript
+        #[arg(long)]
+        js: bool,
+    },
 }
 
 impl Cli {
@@ -177,6 +185,114 @@ impl Cli {
             .clone()
             .or_else(|| credentials::get(&self.admin))
     }
+}
+
+/// Declarations for `request`, `context`, and the globals. Shipped inside the
+/// binary so they always describe this runtime rather than whatever a registry
+/// last published.
+const DECLARATIONS: &str = include_str!("../../rusted-engine/rusted.d.ts");
+
+/// Everything needed to run one function, and nothing else. No install step:
+/// `rusted run` bundles in-process, so this is ready the moment it is written.
+fn scaffold(name: &str, js: bool) -> Result<(), String> {
+    if name.is_empty() || name.contains(['/', '\\', '.']) {
+        return Err(format!(
+            "'{name}' is not a usable directory name — letters, digits and dashes work best"
+        ));
+    }
+    let root = PathBuf::from(name);
+    if root.exists() {
+        return Err(format!(
+            "{name} already exists — pick another name, or delete it first"
+        ));
+    }
+
+    let ext = if js { "js" } else { "ts" };
+    let entry = format!("index.{ext}");
+    let handler = if js {
+        format!(
+            "export const config = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
+             \n\
+             export default async function handler(request, context) {{\n\
+             \x20 const {{ name }} = await request.json();\n\
+             \x20 return context.json({{ message: `Hello, ${{name ?? \"world\"}}` }});\n\
+             }}\n"
+        )
+    } else {
+        format!(
+            "/// <reference path=\"./rusted.d.ts\" />\n\
+             \n\
+             interface Input {{\n\
+             \x20 name?: string;\n\
+             }}\n\
+             \n\
+             export const config: Rusted.Config = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
+             \n\
+             const handler: Rusted.Handler = async (request, context) => {{\n\
+             \x20 const {{ name }} = await request.json<Input>();\n\
+             \x20 return context.json({{ message: `Hello, ${{name ?? \"world\"}}` }});\n\
+             }};\n\
+             \n\
+             export default handler;\n"
+        )
+    };
+
+    // "lib": ["ES2020"] with no "DOM" on purpose: this runtime's fetch and
+    // console are smaller than a browser's, and DOM would promise methods the
+    // engine does not have — code would typecheck and then fail at runtime.
+    let tsconfig = "{\n\
+        \x20 \"compilerOptions\": {\n\
+        \x20   \"strict\": true,\n\
+        \x20   \"lib\": [\"ES2020\"],\n\
+        \x20   \"types\": [],\n\
+        \x20   \"target\": \"ES2020\",\n\
+        \x20   \"module\": \"ESNext\",\n\
+        \x20   \"moduleResolution\": \"bundler\",\n\
+        \x20   \"noEmit\": true\n\
+        \x20 },\n\
+        \x20 \"include\": [\"*.ts\", \"rusted.d.ts\"]\n\
+        }\n";
+
+    // Only needed once you add dependencies — `rusted run` needs no install.
+    // Imports from node_modules are bundled in, so `npm i zod` just works.
+    let package = format!(
+        "{{\n\
+         \x20 \"name\": \"{name}\",\n\
+         \x20 \"private\": true,\n\
+         \x20 \"type\": \"module\",\n\
+         \x20 \"scripts\": {{\n\
+         \x20   \"dev\": \"rusted run {entry}\",\n\
+         \x20   \"deploy\": \"rusted push {entry}\"\n\
+         \x20 }}\n\
+         }}\n"
+    );
+
+    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {name}: {e}"))?;
+    let mut written = vec![entry.clone()];
+    write_file(&root, &entry, &handler)?;
+    write_file(&root, "package.json", &package)?;
+    write_file(&root, ".gitignore", "node_modules/\ndist/\n")?;
+    written.push("package.json".into());
+    written.push(".gitignore".into());
+    if !js {
+        write_file(&root, "rusted.d.ts", DECLARATIONS)?;
+        write_file(&root, "tsconfig.json", tsconfig)?;
+        written.push("rusted.d.ts".into());
+        written.push("tsconfig.json".into());
+    }
+
+    println!("created {name}/");
+    for f in &written {
+        println!("  {f}");
+    }
+    println!("\n  cd {name}\n  rusted run {entry}\n");
+    println!("no install needed — imports are bundled in, so `npm i <pkg>` also just works");
+    Ok(())
+}
+
+fn write_file(root: &Path, name: &str, body: &str) -> Result<(), String> {
+    let path = root.join(name);
+    std::fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// The device flow: the browser work happens on the human's side, and the CLI
@@ -464,11 +580,8 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             )?;
             emit(&cli, &v, |_| format!("deleted {name}"))
         }
+        Cmd::New { ref name, js } => scaffold(name, js),
         Cmd::Types { ref out } => {
-            // Shipped inside the binary, so the declarations always describe the
-            // runtime this CLI actually has rather than whatever a registry last
-            // published.
-            const DECLARATIONS: &str = include_str!("../../rusted-engine/rusted.d.ts");
             let path = out.clone().unwrap_or_else(|| PathBuf::from("rusted.d.ts"));
             std::fs::write(&path, DECLARATIONS)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
