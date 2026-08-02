@@ -65,7 +65,12 @@ runcmd:
   - sh -c 'echo "/swapfile none swap sw 0 0" >> /etc/fstab'
   - sysctl -p /etc/sysctl.d/60-rusted.conf
 
-  # Defence in depth behind the Hetzner firewall.
+  # Oracle Cloud images ship iptables rules that drop everything but SSH, which
+  # survive any console security-list change and silently swallow 80/443. This
+  # is a no-op anywhere else.
+  - sh -c 'if [ -f /etc/iptables/rules.v4 ] && grep -q OCI /etc/iptables/rules.v4 2>/dev/null; then iptables -F INPUT || true; netfilter-persistent save || true; fi'
+
+  # Defence in depth behind the provider's own firewall.
   - ufw default deny incoming
   - ufw default allow outgoing
   - ufw allow 22/tcp

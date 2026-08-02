@@ -29,12 +29,26 @@ and can wait for capacity to appear:
 ./provision.sh --wait=21600     # for six
 ```
 
-It usually clears within hours. If you'd rather not wait, the deploy is plain
-docker compose and runs anywhere — **Netcup** (~€3), **Scaleway** (~€4),
-**OVH** (~€4), **Vultr** or **DigitalOcean** ($6–12) all work, and nothing but
-`provision.sh` is Hetzner-specific. Create a box with Ubuntu 24.04, paste
+It usually clears within hours. If you'd rather not wait, nothing but
+`provision.sh` is Hetzner-specific: create a box with Ubuntu 24.04, paste
 `cloud-init.yaml` into its user-data field, and the rest of this runbook is
 unchanged.
+
+| Host | ~cost | Notes |
+|---|---|---|
+| **OVHcloud** | €3.5–5 | Closest substitute — established, EU and Canada, plenty of bandwidth |
+| **Netcup** | €3 | Cheapest credible option; support is slow |
+| **Scaleway** | €4 | Good API if you ever want this in Terraform |
+| **DigitalOcean / Vultr** | $6–12 | More expensive, best documentation |
+| **Fly.io** | ~$5+ | Multi-region is trivial; Postgres is more work |
+| **Oracle Always Free** | €0 | 4 ARM cores, 24 GB — but see below |
+
+Oracle's free tier is extraordinary value and a poor place for a domain people
+depend on: ARM capacity is frequently unavailable for weeks, idle free
+resources have been reclaimed, and there is no support. Good for staging, not
+for production. If you do use it, note that its images carry iptables rules
+that drop 80/443 regardless of what the console's security lists say —
+`cloud-init.yaml` clears them.
 
 ### Picking a type
 
