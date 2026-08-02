@@ -867,19 +867,19 @@ async fn rate_limit_returns_429_with_retry_after() {
 #[tokio::test]
 async fn plan_execution_budget_replaces_the_fixed_wall_limit() {
     let t = boot().await;
-    // A ~120ms busy loop: fits Extra's 30s budget, exceeds Dev's 50ms.
+    // A ~1500ms busy loop: fits Extra's 30s budget, exceeds Dev's 1s.
     let slow = r#"export default async function handler(request, context) {
-        const until = Date.now() + 120;
+        const until = Date.now() + 1500;
         while (Date.now() < until) {}
         return context.text("done");
     }"#;
     push(&t, "slow", slow).await;
     let r = t.client.post(t.data("/f/slow")).send().await.unwrap();
-    assert_eq!(r.status(), 200, "Extra's 30s budget should allow 120ms");
+    assert_eq!(r.status(), 200, "Extra's 30s budget should allow 1500ms");
 
     downgrade_to_dev(&t).await;
     let r = t.client.post(t.data("/f/slow")).send().await.unwrap();
-    assert_eq!(r.status(), 429, "Dev's 50ms budget should terminate it");
+    assert_eq!(r.status(), 429, "Dev's 1s budget should terminate it");
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["error"]["code"], "limit_exceeded");
 }
@@ -1210,9 +1210,12 @@ async fn the_dev_plan_can_reach_the_internet() {
         plan.limits.concurrency >= 2,
         "Dev should allow parallel calls"
     );
-    assert_eq!(
-        plan.version, 2,
-        "the newest Dev version is the generous one"
+    // An API call measured 126-306ms from the server, so a budget that cannot
+    // fit one makes the outbound allowance above meaningless.
+    assert!(
+        plan.limits.exec_ms >= 1000,
+        "Dev must fit a real API call, got {}ms",
+        plan.limits.exec_ms
     );
 }
 

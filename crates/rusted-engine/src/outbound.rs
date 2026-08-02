@@ -1,11 +1,17 @@
-//! Outbound HTTP for handler `fetch()`. Blocking by design: the engine is
-//! synchronous and the invocation's wall-clock interrupt still bounds total
-//! time. Every request is checked against the plan's per-execution quota and
-//! the SSRF guards below.
+//! Outbound HTTP for handler `fetch()`. Blocking by design, which has a
+//! consequence worth stating plainly: while a fetch is in flight no JavaScript
+//! runs, so QuickJS's interrupt handler cannot fire and the wall deadline
+//! cannot stop it. A 500ms budget did not interrupt a 10s fetch, and three
+//! two-second fetches took six seconds.
+//!
+//! So the deadline is enforced here instead. Each request gets whatever time
+//! the invocation has left, and one past the deadline is refused before any
+//! connection work. That keeps `exec_ms` an honest bound on total wall time
+//! rather than a bound on JavaScript alone.
 
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +21,8 @@ pub struct OutboundPolicy {
     pub max_requests: u32,
     /// Cap on a single response body.
     pub max_response_bytes: usize,
-    /// Per-request timeout; the wall deadline still bounds the whole execution.
+    /// Ceiling for one request. The invocation's remaining time can lower it,
+    /// never raise it.
     pub timeout: Duration,
 }
 
@@ -63,26 +70,56 @@ impl FetchResponse {
     }
 }
 
-/// Per-invocation state: counts requests against the plan quota.
+/// Per-invocation state: counts requests against the plan quota and holds the
+/// deadline the whole invocation shares.
 pub struct OutboundBudget {
     policy: OutboundPolicy,
     used: AtomicU32,
-    agent: ureq::Agent,
+    /// When this invocation must be finished. `None` outside an invocation —
+    /// `verify` and local dev, where nothing is holding a worker slot.
+    deadline: Option<Instant>,
 }
 
 impl OutboundBudget {
     pub fn new(policy: OutboundPolicy) -> Self {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(policy.timeout))
-            // Redirects are resolved by us, so each hop gets the same guards.
-            .max_redirects(0)
-            .build()
-            .into();
         Self {
             policy,
             used: AtomicU32::new(0),
-            agent,
+            deadline: None,
         }
+    }
+
+    /// The usual case: fetches share the invocation's wall-clock budget.
+    pub fn with_deadline(policy: OutboundPolicy, deadline: Instant) -> Self {
+        Self {
+            policy,
+            used: AtomicU32::new(0),
+            deadline: Some(deadline),
+        }
+    }
+
+    /// How long the next request may take: the policy ceiling, or the time the
+    /// invocation has left, whichever is smaller. `None` once that is gone.
+    fn effective_timeout(&self) -> Option<Duration> {
+        match self.deadline {
+            None => Some(self.policy.timeout),
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                (!left.is_zero()).then(|| self.policy.timeout.min(left))
+            }
+        }
+    }
+
+    /// A fresh agent per request, because the timeout is per request and ureq
+    /// fixes it at construction. Costs connection reuse between fetches in one
+    /// invocation; buys a bound that actually holds.
+    fn agent(&self, timeout: Duration) -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            // Redirects are resolved by us, so each hop gets the same guards.
+            .max_redirects(0)
+            .build()
+            .into()
     }
 
     /// Requests actually attempted during this invocation.
@@ -103,6 +140,12 @@ impl OutboundBudget {
                 self.policy.max_requests
             ));
         }
+        // Before DNS or connect: past the deadline, nothing may start.
+        let Some(timeout) = self.effective_timeout() else {
+            return FetchResponse::refused(
+                "execution deadline reached before this fetch could start",
+            );
+        };
         if let Err(reason) = vet_url(&request.url) {
             return FetchResponse::refused(reason);
         }
@@ -129,7 +172,7 @@ impl OutboundBudget {
             Ok(built) => built,
             Err(e) => return FetchResponse::refused(format!("bad request: {e}")),
         };
-        let result = self.agent.run(built);
+        let result = self.agent(timeout).run(built);
         let mut response = match result {
             Ok(response) => response,
             // ureq surfaces non-2xx as errors; unwrap them into real responses.
@@ -225,5 +268,69 @@ fn is_private(ip: &IpAddr) -> bool {
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
                 || v6.to_ipv4_mapped().map(|v4| is_private(&IpAddr::V4(v4))) == Some(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    fn policy() -> OutboundPolicy {
+        OutboundPolicy {
+            max_requests: 10,
+            max_response_bytes: 1024,
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Past the invocation's deadline, a fetch must be refused before any DNS
+    /// or connection work — otherwise it extends a slot hold that is already
+    /// over budget.
+    #[test]
+    fn a_fetch_after_the_deadline_is_refused_immediately() {
+        let past = std::time::Instant::now() - Duration::from_millis(10);
+        let budget = OutboundBudget::with_deadline(policy(), past);
+        let started = std::time::Instant::now();
+        let r = budget.perform(FetchRequest {
+            url: "http://198.51.100.1/never".into(),
+            method: None,
+            headers: Default::default(),
+            body: None,
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "it tried to connect"
+        );
+        assert!(
+            r.error.as_deref().unwrap_or("").contains("deadline"),
+            "should say the deadline is why: {:?}",
+            r.error
+        );
+    }
+
+    /// Within the deadline, a fetch may not be given longer than the time the
+    /// invocation has left, however generous the policy timeout is.
+    #[test]
+    fn a_fetch_is_capped_by_the_time_the_invocation_has_left() {
+        let soon = std::time::Instant::now() + Duration::from_millis(200);
+        let budget = OutboundBudget::with_deadline(policy(), soon);
+        let effective = budget
+            .effective_timeout()
+            .expect("still inside the deadline");
+        assert!(
+            effective <= Duration::from_millis(200),
+            "capped to the remaining time, got {effective:?}"
+        );
+        assert!(
+            effective < policy().timeout,
+            "the 30s policy timeout must not win"
+        );
+    }
+
+    /// With no deadline (verify, local dev), the policy timeout stands.
+    #[test]
+    fn without_a_deadline_the_policy_timeout_stands() {
+        let budget = OutboundBudget::new(policy());
+        assert_eq!(budget.effective_timeout(), Some(Duration::from_secs(30)));
     }
 }
