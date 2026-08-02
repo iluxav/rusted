@@ -520,7 +520,14 @@ impl Executor for QuickJsExecutor {
         // A compile failure is the script's problem, not the cache's: fall
         // through to source so the error surfaces from the same code path.
         let bytecode = self.bytecode_for(source).ok();
-        let budget = Arc::new(outbound::OutboundBudget::new(limits.outbound.clone()));
+        // Fetches share the invocation's budget. Without this, exec_ms bounds
+        // only JavaScript: a blocking fetch runs no bytecode, so the interrupt
+        // handler never fires and the timeouts add up on top of it.
+        let deadline = wall0 + Duration::from_millis(limits.wall_ms);
+        let budget = Arc::new(outbound::OutboundBudget::with_deadline(
+            limits.outbound.clone(),
+            deadline,
+        ));
         let (outcome, response, logs, stack, exec_wall) = ctx.with(|c| {
             let zero = Duration::ZERO;
             if let Err(msg) = install_fetch(&c, budget.clone()) {
