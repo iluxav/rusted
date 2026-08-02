@@ -976,6 +976,11 @@ async fn confirm_checkout(
         Ok(user) => user,
         Err(redirect) => return redirect,
     };
+    // The code comes from the URL, so an internal plan must not be reachable by
+    // guessing its name.
+    if !crate::plans::is_public(&code) {
+        return Redirect::to("/console/billing").into_response();
+    }
     let Ok(Some(plan)) = crate::plans::latest_by_code(&state.0.app.pool, &code).await else {
         return Redirect::to("/console/billing").into_response();
     };
