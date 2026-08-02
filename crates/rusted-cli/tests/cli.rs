@@ -962,3 +962,30 @@ export default async function handler(request, context) { return context.text("a
     let pulled = String::from_utf8(pulled.get_output().stdout.clone()).unwrap();
     assert_eq!(pulled.trim(), source, "no imports means nothing to bundle");
 }
+
+// --- where the CLI points when nobody said ------------------------------------
+
+#[test]
+fn defaults_to_the_hosted_service() {
+    // Someone who installed the CLI to use rusted.sh should not have to discover
+    // a flag before `rusted login` does anything.
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["--help"])
+        .env_remove("RUSTED_ADMIN")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("https://rusted.sh"));
+}
+
+#[test]
+fn an_unreachable_server_says_how_to_point_somewhere_else() {
+    // Port 1 is reserved and never listening, so this always fails to connect.
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["--admin", "http://127.0.0.1:1", "login"])
+        .env_remove("RUSTED_ADMIN")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("RUSTED_ADMIN"));
+}

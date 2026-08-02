@@ -20,7 +20,14 @@ To run the platform itself (server, console, storage):
 make db                                  # postgres:18 via docker compose (port 5457)
 cargo build --release
 ./target/release/rusted serve &          # functions on :7411, admin + console on :7412
+
+export RUSTED_ADMIN=http://127.0.0.1:7412
 ```
+
+That last line matters: the CLI talks to the hosted service at `https://rusted.sh`
+unless told otherwise, so without it `push` and friends would deploy to a server
+that isn't yours. `RUSTED_ADMIN` points them at your own; `--admin <url>` does it
+for a single command.
 
 ### Deploying
 
