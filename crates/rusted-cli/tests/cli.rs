@@ -28,6 +28,8 @@ fn boot() -> Harness {
                 debug: false,
                 database_url,
                 require_auth: false,
+                host: "127.0.0.1".to_string(),
+                public_url: None,
             })
             .await
         })

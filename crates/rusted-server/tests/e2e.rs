@@ -78,6 +78,8 @@ async fn boot_full(
         debug: false,
         database_url,
         require_auth,
+        host: "127.0.0.1".to_string(),
+        public_url: None,
     })
     .await
     .expect("server should start");
@@ -508,6 +510,7 @@ async fn sweeping_expired_runs_also_prunes_locks_and_records() {
         1500,
         false,
         false,
+        None,
     ));
     state.temp_runs.lock().unwrap().insert(
         "dead".into(),

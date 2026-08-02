@@ -11,6 +11,8 @@ tiny-quickjs-lambda-platform.md
 
 # Secrets and local configuration
 .env
+deploy/certs/
+deploy/.env
 
 # Editor and OS noise
 .claude

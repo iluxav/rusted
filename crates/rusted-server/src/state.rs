@@ -57,6 +57,10 @@ pub struct AppState {
     pub exec_slots: Arc<tokio::sync::Semaphore>,
     pub data_addr: OnceLock<SocketAddr>,
     pub admin_addr: OnceLock<SocketAddr>,
+    /// Where callers actually reach this server. Behind a reverse proxy the
+    /// bound socket is a private address, so every URL we hand out — function
+    /// endpoints, device sign-in, the console — has to come from here instead.
+    pub public_url: Option<String>,
     pub invoke_seq: AtomicU64,
     /// How long a queued invocation waits for its function's turn before 429.
     pub queue_wait_ms: u64,
@@ -72,6 +76,7 @@ impl AppState {
         queue_wait_ms: u64,
         debug: bool,
         require_auth: bool,
+        public_url: Option<String>,
     ) -> Self {
         // JS execution is CPU-bound, so more workers than cores buys nothing
         // but context switching. This is the ceiling on real parallelism; a
@@ -95,6 +100,7 @@ impl AppState {
             exec_slots: Arc::new(tokio::sync::Semaphore::new(workers)),
             data_addr: OnceLock::new(),
             admin_addr: OnceLock::new(),
+            public_url: public_url.map(|u| u.trim_end_matches('/').to_string()),
             invoke_seq: AtomicU64::new(0),
             queue_wait_ms,
             debug,
@@ -103,17 +109,23 @@ impl AppState {
 
     /// Where a human goes to finish something the CLI started.
     pub fn console_url(&self, path: &str) -> String {
-        format!(
-            "http://{}{path}",
-            self.admin_addr.get().expect("admin_addr set at startup")
-        )
+        match &self.public_url {
+            Some(base) => format!("{base}{path}"),
+            None => format!(
+                "http://{}{path}",
+                self.admin_addr.get().expect("admin_addr set at startup")
+            ),
+        }
     }
 
     pub fn data_url(&self, path: &str) -> String {
-        format!(
-            "http://{}{path}",
-            self.data_addr.get().expect("data_addr set at startup")
-        )
+        match &self.public_url {
+            Some(base) => format!("{base}{path}"),
+            None => format!(
+                "http://{}{path}",
+                self.data_addr.get().expect("data_addr set at startup")
+            ),
+        }
     }
 }
 

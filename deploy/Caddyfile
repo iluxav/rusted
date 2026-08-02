@@ -1,0 +1,26 @@
+# One domain, split by path: functions on /f and /r, everything else is the
+# console and its API. Keeps every URL on rusted.sh, which is what the server
+# advertises via PUBLIC_URL.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Cloudflare issues the origin certificate; it never expires the way ACME
+	# certs do and needs no inbound challenge. Set SSL mode to Full (strict).
+	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+
+	# Requests arrive through Cloudflare, so the client address is in a header.
+	@functions path /f/* /r/*
+	handle @functions {
+		reverse_proxy rusted:7411
+	}
+
+	handle {
+		reverse_proxy rusted:7412
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
