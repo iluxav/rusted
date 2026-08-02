@@ -86,7 +86,10 @@ export default async function handler(request, context) {
   try {
     message = await request.json();
   } catch {
-    return context.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+    return context.json(
+      { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } },
+      { status: 400 },
+    );
   }
 
   // JSON-RPC allows a batch; answer only the messages that asked for a reply.
@@ -94,5 +97,14 @@ export default async function handler(request, context) {
     ? message.map(handle).filter(Boolean)
     : handle(message);
 
-  return context.json(replies ?? {});
+  // Nothing asked for an answer, so say so the way the spec does.
+  if (replies === null || (Array.isArray(replies) && replies.length === 0)) {
+    return context.text("", { status: 202 });
+  }
+
+  // A session id lets a client correlate its requests. This server keeps no
+  // state, so the id is derived rather than stored — enough to satisfy clients
+  // that expect one, honest about there being nothing behind it.
+  const session = request.headers["mcp-session-id"] || "stateless";
+  return context.json(replies, { headers: { "mcp-session-id": session } });
 }

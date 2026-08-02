@@ -42,17 +42,17 @@ doesn't offer one — so nothing waits on a stream that will never open.
 
 ## What doesn't work yet
 
-- **Sessions.** The spec identifies sessions with an `Mcp-Session-Id` response
-  header, and functions can't set response headers today. Stateless mode is
-  explicitly allowed, so this only rules out servers that need per-client state.
 - **Server-initiated messages.** No SSE, so no progress notifications, no
   `tools/list_changed`, and no `GET` stream. Requests the client makes are
-  answered; the server can't speak first.
-- **Status codes.** A notification should get `202 Accepted` with no body; it
-  gets `200` with an empty object instead. Clients generally tolerate this.
+  answered; the server can't speak first. A client's `GET` gets a `405`, which
+  is what the spec prescribes for a server that offers no stream.
+- **Real sessions.** The `Mcp-Session-Id` header is echoed rather than backed by
+  stored state, because this function keeps none. Enough for clients that expect
+  the header; not enough for per-client state.
 
-The first and third are small platform gaps rather than anything fundamental —
-a `context.json(body, { status, headers })` would close both.
+Everything else the transport asks of a stateless server is here: `202` with no
+body for notifications, `400` for malformed JSON, and a session header on
+replies — all through `context.json(body, { status, headers })`.
 
 ## Keep in mind
 

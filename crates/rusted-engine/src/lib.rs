@@ -82,6 +82,10 @@ pub struct InvocationResult {
     /// Explicit content type when the handler used `context.json`/`context.text`;
     /// None for bare returns (the server may sniff).
     pub content_type: Option<String>,
+    /// Status the handler asked for, already validated.
+    pub status: Option<u16>,
+    /// Response headers the handler set, already vetted.
+    pub headers: BTreeMap<String, String>,
     pub logs: Vec<LogEntry>,
     /// JS stack for a thrown error — owner-facing debugging only; endpoint
     /// callers never see it.
@@ -171,22 +175,31 @@ const GLUE: &str = r#"(handler, requestJson) => {
     body: req.body,
     json: async () => JSON.parse(req.body),
   };
+  const respond = (body, contentType, init) => ({
+    __rustedResponse: true,
+    body,
+    contentType,
+    status: init && init.status,
+    headers: (init && init.headers) || {},
+  });
   const context = {
-    json: (o) => ({ __rustedResponse: true, body: JSON.stringify(o), contentType: "application/json" }),
-    text: (s) => ({ __rustedResponse: true, body: String(s), contentType: "text/plain; charset=utf-8" }),
+    json: (o, init) => respond(JSON.stringify(o), "application/json", init),
+    text: (s, init) => respond(String(s), "text/plain; charset=utf-8", init),
   };
   return Promise.resolve(handler(request, context)).then(
     (r) => {
-      let body, contentType = null;
+      let body, contentType = null, status = null, headers = {};
       if (r !== null && typeof r === "object" && r.__rustedResponse === true) {
         body = String(r.body);
         contentType = r.contentType;
+        status = r.status ?? null;
+        headers = r.headers || {};
       } else if (typeof r === "string") {
         body = r;
       } else {
         body = JSON.stringify(r === undefined ? null : r);
       }
-      return JSON.stringify({ ok: true, response: body, contentType, logs });
+      return JSON.stringify({ ok: true, response: body, contentType, status, headers, logs });
     },
     (e) => JSON.stringify({
       ok: false,
@@ -204,6 +217,10 @@ struct Envelope {
     response: String,
     #[serde(default, rename = "contentType")]
     content_type: Option<String>,
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
     #[serde(default)]
     error: String,
     #[serde(default)]
@@ -285,6 +302,81 @@ fn exception_message(ctx: &Ctx<'_>, e: rquickjs::Error) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// What the handler asked the response to look like, beyond its body.
+#[derive(Debug, Default, Clone)]
+struct Response {
+    content_type: Option<String>,
+    status: Option<u16>,
+    headers: BTreeMap<String, String>,
+}
+
+/// Headers a handler must never set: these frame the response itself, and
+/// letting a function rewrite them invites smuggling and corrupt replies.
+const RESERVED_HEADERS: &[&str] = &[
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "te",
+    "trailer",
+    "host",
+];
+
+/// Enough for anything reasonable; a bound so a handler can't grow the
+/// response headers without limit.
+const MAX_HEADERS: usize = 32;
+const MAX_HEADER_NAME: usize = 64;
+const MAX_HEADER_VALUE: usize = 1024;
+
+/// Checks what the handler asked for. Returning an error rather than silently
+/// dropping it: a status of 999 is a bug, and a bug that vanishes is worse
+/// than one that says so.
+fn vet_response(
+    status: Option<u16>,
+    headers: BTreeMap<String, String>,
+) -> Result<(Option<u16>, BTreeMap<String, String>), String> {
+    if let Some(status) = status {
+        if !(200..=599).contains(&status) {
+            return Err(format!("invalid response status {status}: use 200 to 599"));
+        }
+    }
+    if headers.len() > MAX_HEADERS {
+        return Err(format!(
+            "too many response headers: {} (limit {MAX_HEADERS})",
+            headers.len()
+        ));
+    }
+    let mut vetted = BTreeMap::new();
+    for (name, value) in headers {
+        let lower = name.trim().to_ascii_lowercase();
+        if lower.is_empty() || lower.len() > MAX_HEADER_NAME {
+            return Err(format!("invalid response header name: {name:?}"));
+        }
+        // A newline in either half would let a handler inject a second header
+        // or split the response.
+        if !lower
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(format!("invalid response header name: {name:?}"));
+        }
+        if RESERVED_HEADERS.contains(&lower.as_str()) {
+            return Err(format!(
+                "{lower} is set by the platform and cannot be overridden"
+            ));
+        }
+        if value.len() > MAX_HEADER_VALUE {
+            return Err(format!("response header {lower} is too long"));
+        }
+        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+            return Err(format!("response header {lower} contains a line break"));
+        }
+        vetted.insert(lower, value);
+    }
+    Ok((status, vetted))
 }
 
 /// Engine-level failures that mean "a limit fired" rather than "the script is
@@ -411,22 +503,28 @@ impl Executor for QuickJsExecutor {
         // through to source so the error surfaces from the same code path.
         let bytecode = self.bytecode_for(source).ok();
         let budget = Arc::new(outbound::OutboundBudget::new(limits.outbound.clone()));
-        let (outcome, content_type, logs, stack, exec_wall) = ctx.with(|c| {
+        let (outcome, response, logs, stack, exec_wall) = ctx.with(|c| {
             let zero = Duration::ZERO;
             if let Err(msg) = install_fetch(&c, budget.clone()) {
-                return (Outcome::Error(msg), None, Vec::new(), None, zero);
+                return (
+                    Outcome::Error(msg),
+                    Response::default(),
+                    Vec::new(),
+                    None,
+                    zero,
+                );
             }
             let handler = match load_handler(&c, source, bytecode.as_deref().map(|b| b.as_slice()))
             {
                 Ok(h) => h,
-                Err(msg) => return (classify(msg), None, Vec::new(), None, zero),
+                Err(msg) => return (classify(msg), Response::default(), Vec::new(), None, zero),
             };
             let glue: Function = match c.eval(GLUE) {
                 Ok(g) => g,
                 Err(e) => {
                     return (
                         classify(exception_message(&c, e)),
-                        None,
+                        Response::default(),
                         Vec::new(),
                         None,
                         zero,
@@ -439,7 +537,7 @@ impl Executor for QuickJsExecutor {
                 Err(e) => {
                     return (
                         classify(exception_message(&c, e)),
-                        None,
+                        Response::default(),
                         Vec::new(),
                         None,
                         exec0.elapsed(),
@@ -459,33 +557,46 @@ impl Executor for QuickJsExecutor {
                                     env.response.len(),
                                     limits.max_output_bytes
                                 )),
-                                None,
+                                Response::default(),
                                 env.logs,
                                 None,
                                 exec_wall,
                             )
                         } else {
-                            (
-                                Outcome::Success(env.response),
-                                env.content_type,
-                                env.logs,
-                                None,
-                                exec_wall,
-                            )
+                            match vet_response(env.status, env.headers) {
+                                Ok((status, headers)) => (
+                                    Outcome::Success(env.response),
+                                    Response {
+                                        content_type: env.content_type,
+                                        status,
+                                        headers,
+                                    },
+                                    env.logs,
+                                    None,
+                                    exec_wall,
+                                ),
+                                Err(message) => (
+                                    Outcome::Error(message),
+                                    Response::default(),
+                                    env.logs,
+                                    None,
+                                    exec_wall,
+                                ),
+                            }
                         }
                     }
                     // Rejections also classify: an uncatchable stack overflow
                     // surfaces here as a rejection, and it is a limit, not a bug.
                     Ok(env) => (
                         classify_with(env.error, expired),
-                        None,
+                        Response::default(),
                         env.logs,
                         env.stack,
                         exec_wall,
                     ),
                     Err(e) => (
                         Outcome::Error(format!("malformed envelope: {e}")),
-                        None,
+                        Response::default(),
                         Vec::new(),
                         None,
                         exec_wall,
@@ -493,7 +604,7 @@ impl Executor for QuickJsExecutor {
                 },
                 Err(e) => (
                     classify_with(exception_message(&c, e), expired),
-                    None,
+                    Response::default(),
                     Vec::new(),
                     None,
                     exec_wall,
@@ -503,7 +614,9 @@ impl Executor for QuickJsExecutor {
 
         InvocationResult {
             outcome,
-            content_type,
+            content_type: response.content_type,
+            status: response.status,
+            headers: response.headers,
             logs,
             stack,
             wall: wall0.elapsed(),

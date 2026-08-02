@@ -323,7 +323,21 @@ fn outcome_to_http(result: InvocationResult) -> Response {
                 }
                 .to_string()
             });
-            (StatusCode::OK, [(CONTENT_TYPE, content_type)], body).into_response()
+            let status =
+                StatusCode::from_u16(result.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
+            let mut response = (status, [(CONTENT_TYPE, content_type)], body).into_response();
+            // Applied after content-type so a handler can override it, and
+            // already vetted by the engine — nothing here can reframe the reply.
+            let out = response.headers_mut();
+            for (name, value) in &result.headers {
+                if let (Ok(name), Ok(value)) = (
+                    axum::http::HeaderName::try_from(name.as_str()),
+                    axum::http::HeaderValue::try_from(value.as_str()),
+                ) {
+                    out.insert(name, value);
+                }
+            }
+            response
         }
         Outcome::Terminated(reason) => err(StatusCode::TOO_MANY_REQUESTS, "limit_exceeded", reason),
         Outcome::Error(_) => err(

@@ -1337,3 +1337,57 @@ async fn an_unknown_device_code_reveals_nothing() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn a_function_can_set_its_status_and_headers_over_http() {
+    let t = boot().await;
+    push(
+        &t,
+        "accepted",
+        r#"export default async function handler(request, context) {
+            return context.json({ queued: true }, {
+                status: 202,
+                headers: { "x-request-id": "r-42", "cache-control": "no-store" },
+            });
+        }"#,
+    )
+    .await;
+    let r = t.client.post(t.data("/f/accepted")).send().await.unwrap();
+    assert_eq!(r.status(), 202);
+    assert_eq!(r.headers().get("x-request-id").unwrap(), "r-42");
+    assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+    // Framing stays the platform's business.
+    assert!(r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("application/json"));
+    assert_eq!(r.text().await.unwrap(), r#"{"queued":true}"#);
+}
+
+#[tokio::test]
+async fn a_refused_header_fails_the_call_rather_than_shipping_it() {
+    let t = boot().await;
+    push(
+        &t,
+        "sneaky",
+        r#"export default async function handler(request, context) {
+            return context.text("x", { headers: { "content-length": "0" } });
+        }"#,
+    )
+    .await;
+    let r = t.client.post(t.data("/f/sneaky")).send().await.unwrap();
+    assert_eq!(r.status(), 500);
+    // The caller learns nothing about why; the owner sees it in the history.
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "function_error");
+    let detail = rusted_server::analytics::recent(&t.pool, t.user_id, 5, 0, None, true).await;
+    for _ in 0..30 {
+        if !detail.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}

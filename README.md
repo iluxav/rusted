@@ -128,6 +128,19 @@ With `RUSTED_API_KEY` set, rusted looks up your actual plan in the background �
 
 Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline. To develop against a specific tier, set both: `--exec-ms 100 --outbound 2` is the Dev plan.
 
+## Controlling the response
+
+`context.json` and `context.text` take an optional second argument:
+
+```js
+return context.json({ queued: true }, {
+  status: 202,
+  headers: { "cache-control": "no-store", "x-request-id": id },
+});
+```
+
+Status must be 200–599. Headers that frame the response — `content-length`, `transfer-encoding`, `connection`, and friends — belong to the platform and are refused, as is any value containing a line break. A refused header fails the call rather than shipping a half-correct response.
+
 ## Using npm packages
 
 The runtime executes exactly one file — `import` is rejected at push time. `rusted run` and `rusted build` bundle for you, so npm packages just work:
