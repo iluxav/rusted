@@ -1,0 +1,9 @@
+{
+  "name": "test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "rusted run index.ts",
+    "deploy": "rusted push index.ts"
+  }
+}

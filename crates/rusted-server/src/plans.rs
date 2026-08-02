@@ -192,6 +192,17 @@ pub async fn subscribe(pool: &PgPool, user_id: Uuid, plan_id: Uuid) -> sqlx::Res
     tx.commit().await
 }
 
+/// The plans a user may select for themselves. Anything outside this list is
+/// internal and has to be granted deliberately in SQL — `checkout` takes its
+/// code from the URL, so without this any signed-in user could name a plan and
+/// receive it.
+pub const PUBLIC_PLAN_CODES: &[&str] = &["dev", "pro", "extra"];
+
+/// Whether `code` is a plan on offer, and so selectable at checkout.
+pub fn is_public(code: &str) -> bool {
+    PUBLIC_PLAN_CODES.contains(&code)
+}
+
 /// Fixed-window per-minute rate limiter, keyed by function name.
 #[derive(Default)]
 pub struct RateLimiter {

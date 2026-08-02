@@ -1394,3 +1394,43 @@ async fn a_refused_header_fails_the_call_rather_than_shipping_it() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
+
+/// The checkout route takes a plan code from the URL. Only the plans actually
+/// on offer may be selected that way — an internal plan must not be reachable
+/// by guessing its name, or any signed-in user could grant themselves one.
+#[tokio::test]
+async fn checkout_refuses_plans_that_are_not_on_offer() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+
+    let cache = rusted_server::plans::PlanCache::default();
+    let before = rusted_server::plans::effective_plan(&t.pool, &cache, Some(t.user_id)).await;
+
+    let r = t
+        .client
+        .post(format!(
+            "http://{}/console/checkout/unlimited",
+            t.handle.admin_addr
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        r.status().is_success() || r.status().is_redirection(),
+        "unexpected status {}",
+        r.status()
+    );
+
+    cache.clear();
+    let after = rusted_server::plans::effective_plan(&t.pool, &cache, Some(t.user_id)).await;
+    assert_eq!(
+        before.code, after.code,
+        "subscribed to '{}' by naming it in the URL",
+        after.code
+    );
+    assert_ne!(after.code, "unlimited");
+}
