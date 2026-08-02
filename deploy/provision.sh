@@ -11,7 +11,10 @@
 set -euo pipefail
 
 NAME="${RUSTED_SERVER_NAME:-rusted}"
-TYPE="${RUSTED_SERVER_TYPE:-cax11}"        # 2 vCPU ARM, 4 GB — matches our aarch64 builds
+# cx22 (Intel, x86_64) is available everywhere. cax11 (ARM) is cheaper but
+# EU-only and often sold out; both work, since releases cover both
+# architectures and the Dockerfile picks the right one.
+TYPE="${RUSTED_SERVER_TYPE:-cx22}"
 IMAGE="${RUSTED_SERVER_IMAGE:-ubuntu-24.04}"
 LOCATION="${RUSTED_SERVER_LOCATION:-fsn1}" # fsn1/nbg1/hel1 EU · ash/hil US · sin APAC
 
@@ -25,6 +28,24 @@ command -v hcloud >/dev/null || die "hcloud CLI not found — brew install hclou
 
 if hcloud server describe "$NAME" >/dev/null 2>&1; then
 	die "a server named $NAME already exists — delete it first, or set RUSTED_SERVER_NAME"
+fi
+
+# --- availability ------------------------------------------------------------
+# Hetzner sells out of individual types per location, and the ARM line isn't
+# offered outside the EU at all. Check before creating, so a sold-out type
+# reads as "here is what you can have" rather than an API error.
+available="$(hcloud server-type list -o noheader -o columns=name 2>/dev/null || true)"
+if [ -n "$available" ] && ! printf '%s\n' "$available" | grep -qx "$TYPE"; then
+	die "server type $TYPE does not exist; try: $(printf '%s ' $available)"
+fi
+
+if ! hcloud server-type describe "$TYPE" -o json 2>/dev/null |
+	grep -q "\"location\": *\"$LOCATION\""; then
+	echo "warning: $TYPE may not be offered in $LOCATION" >&2
+	echo "         locations for $TYPE:" >&2
+	hcloud server-type describe "$TYPE" -o json 2>/dev/null |
+		sed -n 's/.*"location": *"\([a-z0-9]*\)".*/           \1/p' | sort -u >&2 || true
+	echo "         set RUSTED_SERVER_LOCATION, or RUSTED_SERVER_TYPE to something offered there" >&2
 fi
 
 # --- ssh key -----------------------------------------------------------------
@@ -69,7 +90,7 @@ hcloud server create \
 ip="$(hcloud server ip "$NAME")"
 cat <<NEXT
 
-created. IPv4: $ip
+created. IPv4: $ip  ($TYPE in $LOCATION)
 
   1. Point rusted.sh at $ip in Cloudflare (A record, proxied)
   2. Wait for first boot to finish, then:

@@ -15,9 +15,32 @@ export HCLOUD_TOKEN=...          # read/write, in a Hetzner project used only fo
 ./provision.sh ~/.ssh/id_ed25519.pub
 ```
 
-That creates a **CAX11** (2 vCPU ARM, 4 GB, ~€3.8/mo — ARM because we publish
-`aarch64` builds and every image in the stack has one), attaches a firewall
-allowing only 22, 80 and 443, and boots it with `cloud-init.yaml`. The machine
+That creates a **CX22** (2 vCPU, 4 GB, ~€4.5/mo), attaches a firewall allowing
+only 22, 80 and 443, and boots it with `cloud-init.yaml`.
+
+### Picking a type
+
+Any of these run rusted comfortably — releases cover both architectures and the
+Dockerfile picks the right one, so the choice is purely price and availability:
+
+| Type | | ~cost | Where |
+|---|---|---|---|
+| `cx22` | 2 vCPU Intel, 4 GB | €4.5/mo | everywhere |
+| `cax11` | 2 vCPU ARM, 4 GB | €3.8/mo | EU only (fsn1, nbg1, hel1), often sold out |
+| `cpx11` | 2 vCPU AMD, 2 GB | €4.4/mo | everywhere; 2 GB is tight with Postgres alongside |
+
+```bash
+RUSTED_SERVER_TYPE=cax11 RUSTED_SERVER_LOCATION=hel1 ./provision.sh
+```
+
+Hetzner sells out of individual types per location, so the script checks before
+creating and tells you what's available rather than failing with an API error.
+To look for yourself:
+
+```bash
+hcloud server-type list
+hcloud datacenter list
+``` The machine
 arrives with Docker installed, root login and password auth disabled, `ufw` and
 `fail2ban` running, unattended security upgrades on, 2 GB of swap so a spike
 degrades instead of OOM-killing Postgres, and this repository cloned.
