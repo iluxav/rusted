@@ -1529,16 +1529,16 @@ async fn mcp_handshake_and_tool_listing() {
     .await;
     let tools = list["result"]["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 1, "one tool replaces a toolbelt: {list}");
-    assert_eq!(tools[0]["name"], "run");
+    assert_eq!(tools[0]["name"], "execute");
 }
 
 #[tokio::test]
-async fn mcp_run_executes_code_and_returns_logs() {
+async fn mcp_execute_runs_code_and_returns_logs() {
     let t = boot().await;
     let (_, res) = mcp(
         &t,
         serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-            "name":"run",
+            "name":"execute",
             "arguments":{
                 "code":"export default async function handler(request, context) { const { xs } = await request.json(); console.log('n=', xs.length); return context.json({ sum: xs.reduce((a,b)=>a+b,0) }); }",
                 "input":{"xs":[1,2,3,4]}
@@ -1557,12 +1557,12 @@ async fn mcp_run_executes_code_and_returns_logs() {
 /// A model can only correct code it gets feedback on, so a failing script is a
 /// tool result carrying the error — never a JSON-RPC protocol error.
 #[tokio::test]
-async fn mcp_run_reports_broken_code_as_a_result_the_model_can_read() {
+async fn mcp_execute_reports_broken_code_as_a_result_the_model_can_read() {
     let t = boot().await;
     let (_, res) = mcp(
         &t,
         serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
-            "name":"run",
+            "name":"execute",
             "arguments":{"code":"export default async function handler(r, c) { return c.json({ v: notDefinedAnywhere.x }); }"}}}),
     )
     .await;

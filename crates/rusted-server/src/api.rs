@@ -1135,14 +1135,17 @@ async fn verify(
 // tools whose schemas cost context before the conversation starts — an
 // abstraction from when models could not write code. A model that writes
 // JavaScript does not need a schema per capability; it needs `fetch` and
-// somewhere safe to run. `run` is that, and the sandbox is what makes handing
-// it to a model defensible.
+// somewhere safe to run. `execute` is that, and the sandbox is what makes
+// handing it to a model defensible.
+//
+// Named `execute`, not `run`, because `rusted run` is the CLI's local dev
+// server — the opposite of this, which runs on the server.
 
 const MCP_PROTOCOL: &str = "2025-06-18";
 
 fn mcp_tools() -> Value {
     json!([{
-        "name": "run",
+        "name": "execute",
         "description":
             "Execute JavaScript on rusted and return its result plus console output. \
              Write an ES module with `export default async function handler(request, context)`. \
@@ -1171,7 +1174,7 @@ fn mcp_tool_result(text: String, is_error: bool) -> Value {
     result
 }
 
-async fn mcp_run(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
+async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
     let Some(code) = args.get("code").and_then(|c| c.as_str()) else {
         return mcp_tool_result("`code` is required and must be a string".into(), true);
     };
@@ -1266,7 +1269,7 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match name {
-                "run" => ok(mcp_run(state, user_id, &args).await),
+                "execute" => ok(mcp_execute(state, user_id, &args).await),
                 other => ok(mcp_tool_result(format!("unknown tool: {other}"), true)),
             }
         }
