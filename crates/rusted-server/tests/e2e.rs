@@ -1434,3 +1434,59 @@ async fn checkout_refuses_plans_that_are_not_on_offer() {
     );
     assert_ne!(after.code, "unlimited");
 }
+
+/// The router's body limit must sit above the largest plan's script cap, or an
+/// oversized push is refused by the transport with "Payload Too Large" instead
+/// of by the plan check, which names the limit and how to raise it.
+#[tokio::test]
+async fn the_plan_refuses_oversized_scripts_not_the_router() {
+    let t = boot().await;
+
+    // Past the old 512KB transport ceiling, but inside Extra's 5MB: must deploy.
+    let ok_source = format!(
+        "const PAD = \"{}\";\nexport default async function handler(request, context) {{ return context.json({{ n: PAD.length }}); }}",
+        "x".repeat(700_000)
+    );
+    let r = t
+        .client
+        .post(t.admin("/api/functions"))
+        .header("authorization", format!("Bearer {}", t.key))
+        .json(&serde_json::json!({ "source": ok_source, "name": "big-but-allowed" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "700KB is within the plan and must not be refused by the router"
+    );
+
+    // Past the plan too: the refusal must come from the plan check, which says
+    // which plan allows what, rather than a bare 413 from the transport.
+    let too_big = format!(
+        "const PAD = \"{}\";\nexport default async function handler(request, context) {{ return context.json({{ n: PAD.length }}); }}",
+        "x".repeat(6_000_000)
+    );
+    let r = t
+        .client
+        .post(t.admin("/api/functions"))
+        .header("authorization", format!("Bearer {}", t.key))
+        .json(&serde_json::json!({ "source": too_big, "name": "too-big" }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    assert_ne!(
+        status, 413,
+        "rejected by the router, so the caller never learns which plan they need"
+    );
+    let body: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
+    assert_eq!(body["error"]["code"], "plan_limit", "body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("plan allows"),
+        "should name the plan's allowance: {body}"
+    );
+}

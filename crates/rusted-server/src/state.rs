@@ -13,8 +13,17 @@ use crate::auth::AuthCaches;
 use crate::plans::{PlanCache, RateLimiter};
 use crate::store::Store;
 
-/// Request bodies above this are rejected at the router with 413.
+/// Invocation payloads above this are rejected at the router with 413. This
+/// bounds what a caller can send to a function, not what you can deploy.
 pub const REQUEST_BODY_LIMIT: usize = 256 * 1024;
+
+/// Admin uploads carry the script inside JSON, which escapes and inflates it.
+///
+/// This has to stay above the largest plan's `max_script_bytes`, or the router
+/// rejects an oversized push with a bare "Payload Too Large" before the plan
+/// check can say which plan allows what. The transport should never be the
+/// thing that refuses a deploy.
+pub const ADMIN_BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// Invocation records kept per function.
 pub const RECORD_CAP: usize = 50;
 
