@@ -95,7 +95,7 @@ pub struct AppState {
 /// 8 MB keeps ~57x headroom over what was measured, and the swap the runbook
 /// provisions absorbs the case where many invocations do reach the ceiling at
 /// once — degrading rather than killing the box.
-const MEMORY_RESERVED_PER_SLOT: usize = 8 * 1024 * 1024;
+const MEMORY_RESERVED_PER_SLOT: usize = 4 * 1024 * 1024;
 
 /// How many invocations may be in flight at once.
 ///
@@ -125,15 +125,18 @@ pub fn worker_slots() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    // Room for waiting, since that is where the time goes.
-    let by_cpu = cores * 32;
+    // Room for waiting, since that is where the time goes — and since fetch
+    // became async, waiting costs a task and ~140 KB rather than a thread. On a
+    // 1-second upstream, 64 slots capped a 2-core box at 66 req/s with 565
+    // rejections; 256 reached 178 with none and no queueing at all.
+    let by_cpu = cores * 128;
     // But never more concurrent invocations than memory can carry. Where it
     // cannot be read, assume something modest rather than unbounded.
     let by_memory = usable_memory_bytes()
         .map(|bytes| (bytes / 2) / MEMORY_RESERVED_PER_SLOT)
         .unwrap_or(cores * 8);
     // Never fewer than cores: that is the floor for CPU-bound work.
-    by_cpu.min(by_memory).max(cores).clamp(4, 256)
+    by_cpu.min(by_memory).max(cores).clamp(4, 512)
 }
 
 /// Memory the OS reports as available, on the platforms where asking is cheap.
