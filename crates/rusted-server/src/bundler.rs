@@ -36,10 +36,28 @@ pub struct Bundled {
 pub async fn source_for(entry: &Path) -> Result<String, String> {
     let source = std::fs::read_to_string(entry)
         .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
-    if !needs_bundling(&source) {
+    if !should_bundle(entry, &source) {
         return Ok(source);
     }
     Ok(bundle(entry, false).await?.code)
+}
+
+/// The one place that decides whether a file needs the bundler. Deploying and
+/// `rusted run` both ask here: when they each decided for themselves, they
+/// disagreed about TypeScript and only the deploy path transpiled it.
+pub fn should_bundle(entry: &Path, source: &str) -> bool {
+    is_typescript(entry) || needs_bundling(source)
+}
+
+/// TypeScript always goes through the transpiler, imports or not: the engine
+/// runs JavaScript, and a lone `interface` is a syntax error to it. Keying this
+/// off the extension rather than the content is deliberate — deciding by
+/// looking for `interface` or a `:` would misread ordinary JavaScript.
+fn is_typescript(entry: &Path) -> bool {
+    entry
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e, "ts" | "tsx" | "mts" | "cts"))
 }
 
 /// Bundles `entry` into a single ES2020 ES module, entirely in memory.
@@ -89,4 +107,52 @@ pub async fn bundle(entry: &Path, with_sourcemap: bool) -> Result<Bundled, Strin
         code: chunk.code.clone(),
         sourcemap: chunk.map.as_ref().map(|map| map.to_json_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A .ts file with no imports still has to reach the transpiler: the engine
+    /// speaks JavaScript, and `interface` is a syntax error to it.
+    #[tokio::test]
+    async fn typescript_without_imports_is_still_transpiled() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("solo.ts");
+        std::fs::write(
+            &entry,
+            "interface Input { name: string }\n\
+             export default async function handler(request: Request, context: any): Promise<Response> {\n\
+             \x20 const input = await request.json() as Input;\n\
+             \x20 return context.json({ message: `Hello, ${input.name}` });\n\
+             }\n",
+        )
+        .unwrap();
+
+        let source = source_for(&entry).await.expect("should transpile");
+        assert!(
+            !source.contains("interface "),
+            "type declarations survived into the deployed source:\n{source}"
+        );
+        assert!(
+            !source.contains(": Input"),
+            "type annotations survived into the deployed source:\n{source}"
+        );
+        assert!(
+            source.contains("handler"),
+            "the handler was lost:\n{source}"
+        );
+    }
+
+    /// Plain JavaScript with no imports must not pay for a bundle it does not
+    /// need — that path is the fast one and should stay byte-for-byte.
+    #[tokio::test]
+    async fn plain_javascript_is_passed_through_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("plain.js");
+        let original = "export default async function handler(request, context) {\n  return context.json({ ok: true });\n}\n";
+        std::fs::write(&entry, original).unwrap();
+
+        assert_eq!(source_for(&entry).await.unwrap(), original);
+    }
 }
