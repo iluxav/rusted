@@ -1,0 +1,92 @@
+#cloud-config
+# Hetzner runs this on first boot, so the server arrives configured rather than
+# being fixed afterwards. Rebuilding is then one command, not archaeology.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+
+users:
+  - name: rusted
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+      # Replaced by provision.sh with the key you pass it.
+      - SSH_PUBLIC_KEY_PLACEHOLDER
+
+write_files:
+  # Keys only, no root logins. The Hetzner firewall already limits who can
+  # reach port 22; this is the second lock on the same door.
+  - path: /etc/ssh/sshd_config.d/10-rusted.conf
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      MaxAuthTries 3
+
+  # 4 GB is enough for Postgres and the server, but a burst shouldn't be able
+  # to OOM-kill the database.
+  - path: /etc/sysctl.d/60-rusted.conf
+    content: |
+      vm.swappiness=10
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+runcmd:
+  # Docker from its own repository: Ubuntu's package lags badly.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - >
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc]
+    https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable"
+    > /etc/apt/sources.list.d/docker.list
+  - apt-get update -y
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - usermod -aG docker rusted
+
+  # Swap so a memory spike degrades instead of killing Postgres.
+  - fallocate -l 2G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - sh -c 'echo "/swapfile none swap sw 0 0" >> /etc/fstab'
+  - sysctl -p /etc/sysctl.d/60-rusted.conf
+
+  # Defence in depth behind the Hetzner firewall.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+  - systemctl enable --now fail2ban
+  - systemctl restart ssh
+
+  # The stack, ready to configure.
+  - git clone https://github.com/iluxav/rusted.git /home/rusted/rusted
+  - chown -R rusted:rusted /home/rusted/rusted
+  - >
+    sudo -u rusted cp /home/rusted/rusted/deploy/.env.example
+    /home/rusted/rusted/deploy/.env
+
+final_message: |
+  rusted server ready in $UPTIME seconds.
+
+  Next, as the rusted user:
+    cd ~/rusted/deploy
+    $EDITOR .env                     # domain, password, GitHub OAuth
+    mkdir certs && $EDITOR certs/origin.pem certs/origin.key
+    docker compose up -d
