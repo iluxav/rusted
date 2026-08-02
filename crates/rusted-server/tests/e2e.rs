@@ -1528,8 +1528,12 @@ async fn mcp_handshake_and_tool_listing() {
     )
     .await;
     let tools = list["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 1, "one tool replaces a toolbelt: {list}");
-    assert_eq!(tools[0]["name"], "execute");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["execute", "deploy", "list", "delete"],
+        "the whole lifecycle, and nothing more: {list}"
+    );
 }
 
 #[tokio::test]
@@ -1977,4 +1981,92 @@ async fn an_unregistered_redirect_uri_is_refused() {
         .await
         .unwrap();
     assert_eq!(bad.status(), 400, "plain http off loopback must be refused");
+}
+
+/// Asked to "push a script and call its URL", a model could only offer to run
+/// code once and had to ask the human for a URL — because nothing exposed
+/// deploying. This is that round trip: publish, get an address, call it.
+#[tokio::test]
+async fn mcp_deploy_returns_a_url_that_answers() {
+    let t = boot().await;
+    let (_, res) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"deploy",
+            "arguments":{
+                "name":"greeter",
+                "methods":["GET","POST"],
+                "code":"export default async function handler(request, context) { return context.json({ hello: \"world\" }); }"
+            }}}),
+    )
+    .await;
+    assert_ne!(res["result"]["isError"], serde_json::json!(true), "{res}");
+    let payload: Value =
+        serde_json::from_str(res["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = payload["url"].as_str().expect("a url").to_string();
+    assert!(url.contains("/f/greeter"), "{payload}");
+
+    // The URL must actually answer, with no key.
+    let r = t.client.get(&url).send().await.unwrap();
+    assert_eq!(r.status(), 200, "the deployed URL should answer");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["hello"], "world");
+
+    // It shows up in the list...
+    let (_, listed) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                           "params":{"name":"list","arguments":{}}}),
+    )
+    .await;
+    let text = listed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("greeter"), "{text}");
+
+    // ...and deleting it takes the URL away.
+    let (_, deleted) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                           "params":{"name":"delete","arguments":{"name":"greeter"}}}),
+    )
+    .await;
+    assert_ne!(
+        deleted["result"]["isError"],
+        serde_json::json!(true),
+        "{deleted}"
+    );
+    let after = t.client.get(&url).send().await.unwrap();
+    assert_eq!(
+        after.status(),
+        404,
+        "a deleted function should stop answering"
+    );
+}
+
+/// Deleting is scoped to what you deployed. Saying "not found" rather than
+/// "forbidden" also avoids confirming that someone else's function exists.
+#[tokio::test]
+async fn mcp_delete_only_touches_your_own_functions() {
+    let t = boot().await;
+    push(&t, "someone-elses", GREET).await;
+    sqlx::query("UPDATE functions SET user_id = NULL WHERE name = 'someone-elses'")
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    // The cached record carries the owner, so the server has to be told —
+    // through the same NOTIFY the real system uses.
+    sqlx::query("SELECT pg_notify('rusted_invalidations', 'function:someone-elses')")
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (_, res) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                           "params":{"name":"delete","arguments":{"name":"someone-elses"}}}),
+    )
+    .await;
+    assert_eq!(res["result"]["isError"], serde_json::json!(true), "{res}");
+    let text = res["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("no function named"), "{text}");
 }
