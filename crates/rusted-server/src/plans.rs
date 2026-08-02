@@ -21,18 +21,28 @@ pub struct PlanLimits {
     pub exec_ms: u64,
     pub rate_per_min: i64,
     pub outbound_reqs: u32,
+    /// Invocations of one function allowed at once. Safe to raise: each gets
+    /// its own context, so this bounds capacity, not correctness.
+    #[serde(default = "one")]
+    pub concurrency: usize,
     pub analytics_days: i64,
+}
+
+/// Plan rows written before concurrency was a dimension.
+fn one() -> usize {
+    1
 }
 
 impl Default for PlanLimits {
     /// The Dev plan's numbers, used when the database has no plans seeded.
     fn default() -> Self {
         Self {
-            max_functions: 4,
+            max_functions: 5,
             max_script_bytes: 262_144,
-            exec_ms: 50,
+            exec_ms: 100,
             rate_per_min: 60,
-            outbound_reqs: 0,
+            outbound_reqs: 2,
+            concurrency: 2,
             analytics_days: 2,
         }
     }

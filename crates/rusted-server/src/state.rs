@@ -46,8 +46,10 @@ pub struct AppState {
     /// Require `Authorization: Bearer rk_live_…` on the data plane.
     pub require_auth: bool,
     pub temp_runs: Mutex<HashMap<String, TempRun>>,
-    /// Per-function locks enforcing concurrency 1.
-    pub fn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-function semaphores enforcing the plan's concurrency allowance.
+    /// Keyed by function; the permit count comes from the owner's plan, and a
+    /// changed allowance replaces the semaphore rather than resizing it.
+    pub fn_locks: Mutex<HashMap<String, (usize, Arc<tokio::sync::Semaphore>)>>,
     pub records: Mutex<HashMap<String, VecDeque<InvocationRecord>>>,
     pub executor: Arc<QuickJsExecutor>,
     pub limits: Limits,
@@ -70,9 +72,12 @@ impl AppState {
         debug: bool,
         require_auth: bool,
     ) -> Self {
+        // JS execution is CPU-bound, so more workers than cores buys nothing
+        // but context switching. This is the ceiling on real parallelism; a
+        // plan's per-function allowance can exceed it, and the excess queues.
         let workers = std::thread::available_parallelism()
-            .map(|n| n.get().min(4))
-            .unwrap_or(2);
+            .map(|n| n.get().clamp(2, 32))
+            .unwrap_or(4);
         Self {
             store,
             pool,

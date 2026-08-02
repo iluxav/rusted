@@ -77,7 +77,7 @@ fn limits_json(state: &AppState, plan: &crate::plans::Plan) -> serde_json::Value
         "max_functions": plan.limits.max_functions,
         "rate_per_min": plan.limits.rate_per_min,
         "outbound_reqs": plan.limits.outbound_reqs,
-        "concurrency": 1,
+        "concurrency": plan.limits.concurrency,
     })
 }
 
@@ -183,23 +183,34 @@ async fn execute_serialized(
     request: HttpRequest,
     limits: rusted_engine::Limits,
     owner: Option<uuid::Uuid>,
+    concurrency: usize,
 ) -> Result<InvocationResult, Response> {
-    let lock = {
+    let allowed = concurrency.max(1);
+    let gate = {
         let mut locks = state.fn_locks.lock().unwrap();
-        locks
+        let entry = locks
             .entry(key.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+            .or_insert_with(|| (allowed, Arc::new(tokio::sync::Semaphore::new(allowed))));
+        // A plan change means a different allowance; start a fresh semaphore
+        // rather than trying to resize one that has permits outstanding.
+        if entry.0 != allowed {
+            *entry = (allowed, Arc::new(tokio::sync::Semaphore::new(allowed)));
+        }
+        entry.1.clone()
     };
-    let _turn = tokio::time::timeout(Duration::from_millis(state.queue_wait_ms), lock.lock())
-        .await
-        .map_err(|_| {
-            err(
-                StatusCode::TOO_MANY_REQUESTS,
-                "busy",
-                "function is busy; concurrency is 1 per function",
-            )
-        })?;
+    let _turn = tokio::time::timeout(
+        Duration::from_millis(state.queue_wait_ms),
+        gate.acquire_owned(),
+    )
+    .await
+    .map_err(|_| {
+        err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "busy",
+            format!("function is busy; this plan allows {allowed} at once"),
+        )
+    })?
+    .expect("semaphore never closed");
     let result = execute_raw(state, source, request, limits).await?;
     debug_print(state, key, &result);
 
@@ -460,7 +471,17 @@ async fn serve_function(
             .into_response();
     }
     let request = to_engine_request(method.as_str(), &headers, query, params, body);
-    match execute_serialized(&state, &name, source, request, limits, owner).await {
+    match execute_serialized(
+        &state,
+        &name,
+        source,
+        request,
+        limits,
+        owner,
+        plan.limits.concurrency,
+    )
+    .await
+    {
         Ok(result) => outcome_to_http(result),
         Err(response) => response,
     }
@@ -490,7 +511,17 @@ async fn call_run(
     let key = format!("run:{id}");
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, None).await;
     let limits = limits_for_plan(&state, &plan.limits);
-    match execute_serialized(&state, &key, source, request, limits, None).await {
+    match execute_serialized(
+        &state,
+        &key,
+        source,
+        request,
+        limits,
+        None,
+        plan.limits.concurrency,
+    )
+    .await
+    {
         Ok(result) => outcome_to_http(result),
         Err(response) => response,
     }
@@ -933,7 +964,18 @@ async fn invoke(
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     let limits = limits_for_plan(&state, &plan.limits);
     let executed = match key {
-        Some(key) => execute_serialized(&state, &key, source, request, limits, Some(user_id)).await,
+        Some(key) => {
+            execute_serialized(
+                &state,
+                &key,
+                source,
+                request,
+                limits,
+                Some(user_id),
+                plan.limits.concurrency,
+            )
+            .await
+        }
         None => match execute_raw(&state, source, request, limits).await {
             Ok(result) => {
                 debug_print(&state, "ad-hoc", &result);

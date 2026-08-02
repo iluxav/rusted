@@ -395,29 +395,45 @@ async fn functions_survive_server_restart() {
 }
 
 #[tokio::test]
-async fn second_concurrent_request_gets_busy_429_when_queue_wait_is_tiny() {
+async fn calls_beyond_the_plans_concurrency_are_turned_away() {
     let dir = tempfile::tempdir().unwrap();
     let t = boot_with(dir, 10).await;
+    downgrade_to_dev(&t).await;
+    let dev = rusted_server::plans::latest_by_code(&t.pool, "dev")
+        .await
+        .unwrap()
+        .unwrap();
     push(
         &t,
         "spinner",
         r#"export default async function handler() { while (true) {} }"#,
     )
     .await;
-    let first = {
+
+    // Occupy every permit the plan grants, then ask for one more.
+    let mut running = Vec::new();
+    for _ in 0..dev.limits.concurrency {
         let client = t.client.clone();
         let url = t.data("/f/spinner");
-        tokio::spawn(async move { client.post(url).send().await.unwrap() })
-    };
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let second = t.client.post(t.data("/f/spinner")).send().await.unwrap();
-    assert_eq!(second.status(), 429);
-    let v: Value = second.json().await.unwrap();
+        running.push(tokio::spawn(async move {
+            client.post(url).send().await.unwrap()
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let extra = t.client.post(t.data("/f/spinner")).send().await.unwrap();
+    assert_eq!(extra.status(), 429);
+    let v: Value = extra.json().await.unwrap();
     assert_eq!(v["error"]["code"], "busy");
-    // The first request runs to its wall deadline and reports limit_exceeded.
-    let first = first.await.unwrap();
-    let v: Value = first.json().await.unwrap();
-    assert_eq!(v["error"]["code"], "limit_exceeded");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&dev.limits.concurrency.to_string()));
+
+    // The occupants run to their wall deadline and report the limit.
+    for handle in running {
+        let v: Value = handle.await.unwrap().json().await.unwrap();
+        assert_eq!(v["error"]["code"], "limit_exceeded");
+    }
 }
 
 #[tokio::test]
@@ -502,7 +518,7 @@ async fn sweeping_expired_runs_also_prunes_locks_and_records() {
     );
     state.fn_locks.lock().unwrap().insert(
         "run:dead".into(),
-        std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        (1, std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
     );
     state
         .records
@@ -551,8 +567,12 @@ async fn push_and_run_report_size_and_allocated_limits() {
     assert_eq!(v["limits"]["memory_bytes"], 32 * 1024 * 1024);
     assert_eq!(v["limits"]["request_body_bytes"], 256 * 1024);
     assert_eq!(v["limits"]["response_body_bytes"], 256 * 1024);
-    assert_eq!(v["limits"]["outbound_reqs"], 10);
-    assert_eq!(v["limits"]["concurrency"], 1);
+    let extra = rusted_server::plans::latest_by_code(&t.pool, "extra")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v["limits"]["outbound_reqs"], extra.limits.outbound_reqs);
+    assert_eq!(v["limits"]["concurrency"], extra.limits.concurrency);
 
     let r = t
         .admin_post("/api/runs", json!({ "source": GREET, "ttl_seconds": 30 }))
@@ -786,7 +806,11 @@ async fn require_auth_gates_the_data_plane() {
 async fn dev_plan_caps_function_count() {
     let t = boot().await;
     downgrade_to_dev(&t).await;
-    for i in 0..4 {
+    let dev = rusted_server::plans::latest_by_code(&t.pool, "dev")
+        .await
+        .unwrap()
+        .unwrap();
+    for i in 0..dev.limits.max_functions {
         let r = push(&t, &format!("fn-{i}"), GREET).await;
         assert_eq!(r.status(), 200, "function {i} should fit the Dev plan");
     }
@@ -1125,4 +1149,64 @@ async fn plan_endpoint_reports_the_callers_tier() {
 
     let r = t.client.get(t.admin("/api/plan")).send().await.unwrap();
     assert_eq!(r.status(), 401, "the plan is not public");
+}
+
+#[tokio::test]
+async fn a_plan_allows_parallel_calls_to_one_function() {
+    let t = boot().await; // Extra: 20 concurrent
+    push(
+        &t,
+        "busy",
+        r#"export default async function handler(request, context) {
+            const until = Date.now() + 120;
+            while (Date.now() < until) {}
+            return context.text("done");
+        }"#,
+    )
+    .await;
+
+    // Eight calls at once. Serialized at 120ms each that is ~960ms; in
+    // parallel it should finish in a fraction of that, and none may 429.
+    let started = std::time::Instant::now();
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let client = t.client.clone();
+        let url = t.data("/f/busy");
+        handles.push(tokio::spawn(async move {
+            client.post(url).send().await.unwrap().status()
+        }));
+    }
+    for handle in handles {
+        assert_eq!(handle.await.unwrap(), 200, "no call should be turned away");
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(900),
+        "calls should overlap, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_dev_plan_can_reach_the_internet() {
+    // The free tier has to be able to demonstrate fetch, or every example
+    // that calls an API starts at the paid tier.
+    let t = boot().await;
+    downgrade_to_dev(&t).await;
+    let plan = rusted_server::plans::latest_by_code(&t.pool, "dev")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        plan.limits.outbound_reqs >= 2,
+        "Dev should allow outbound calls, got {}",
+        plan.limits.outbound_reqs
+    );
+    assert!(
+        plan.limits.concurrency >= 2,
+        "Dev should allow parallel calls"
+    );
+    assert_eq!(
+        plan.version, 2,
+        "the newest Dev version is the generous one"
+    );
 }

@@ -107,7 +107,7 @@ It refuses to write a bundle that wouldn't deploy — no handler, or code that w
 
 ### Limits while developing
 
-Local runs get the most permissive plan's limits — 30s execution, 10 outbound calls — so nothing blocks you mid-thought. Each run then reports what it *would* cost:
+Local runs get the most permissive plan's limits — 30s execution, 25 outbound calls — so nothing blocks you mid-thought. Each run then reports what it *would* cost:
 
 ```
 ✓ 200 POST /convert/1   wall 1024ms · exec 1002ms
@@ -116,7 +116,7 @@ Local runs get the most permissive plan's limits — 30s execution, 10 outbound 
 
 With `RUSTED_API_KEY` set, rusted looks up your actual plan in the background — never blocking startup — and the warning names it directly: `over your Pro plan: 1000ms exec over 500ms`.
 
-Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline. To develop against a specific tier, set both: `--exec-ms 50 --outbound 0` is the Dev plan.
+Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline. To develop against a specific tier, set both: `--exec-ms 100 --outbound 2` is the Dev plan.
 
 ## Using npm packages
 
