@@ -70,6 +70,8 @@ pub struct AppState {
     /// load. Isolating execution keeps a runaway handler from making the server
     /// unreachable, while awaits still release the thread to other invocations.
     pub exec_runtime: Arc<ExecRuntime>,
+    /// Stops admitting invocations while the process is already using too much.
+    pub memory: Arc<crate::memory::MemoryGuard>,
     pub limits: Limits,
     /// Caps how many invocations run on worker threads at once.
     pub exec_slots: Arc<tokio::sync::Semaphore>,
@@ -86,16 +88,11 @@ pub struct AppState {
     pub debug: bool,
 }
 
-/// Memory set aside per slot when sizing them.
-///
-/// Deliberately below the engine's 32 MB heap ceiling. An invocation is
-/// entitled to that much, but reaching it is rare: 16 concurrent in-flight
-/// invocations grew the process by 2.2 MB, about 140 KB each. Reserving the
-/// ceiling would cap concurrency roughly 230x below what the machine can carry.
-/// 8 MB keeps ~57x headroom over what was measured, and the swap the runbook
-/// provisions absorbs the case where many invocations do reach the ceiling at
-/// once — degrading rather than killing the box.
-const MEMORY_RESERVED_PER_SLOT: usize = 4 * 1024 * 1024;
+/// Loose upper bound on in-flight invocations, so slots cannot be set absurdly
+/// high on a machine with a lot of RAM and a little CPU. Memory pressure is
+/// handled by [`crate::memory::MemoryGuard`] watching what is actually used;
+/// this only keeps the number sane.
+const MEMORY_PER_SLOT_HINT: usize = 1024 * 1024;
 
 /// How many invocations may be in flight at once.
 ///
@@ -130,18 +127,18 @@ pub fn worker_slots() -> usize {
     // 1-second upstream, 64 slots capped a 2-core box at 66 req/s with 565
     // rejections; 256 reached 178 with none and no queueing at all.
     let by_cpu = cores * 128;
-    // But never more concurrent invocations than memory can carry. Where it
-    // cannot be read, assume something modest rather than unbounded.
+    // A sanity bound, not the memory policy: reserving a fixed share per slot
+    // is wrong whichever number you pick, so the guard measures instead.
     let by_memory = usable_memory_bytes()
-        .map(|bytes| (bytes / 2) / MEMORY_RESERVED_PER_SLOT)
-        .unwrap_or(cores * 8);
+        .map(|bytes| (bytes / 2) / MEMORY_PER_SLOT_HINT)
+        .unwrap_or(cores * 32);
     // Never fewer than cores: that is the floor for CPU-bound work.
     by_cpu.min(by_memory).max(cores).clamp(4, 512)
 }
 
 /// Memory the OS reports as available, on the platforms where asking is cheap.
 /// `None` elsewhere, which falls back to a conservative slot count.
-fn usable_memory_bytes() -> Option<usize> {
+pub fn usable_memory_bytes() -> Option<usize> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     meminfo
         .lines()
@@ -204,6 +201,7 @@ impl AppState {
             fn_locks: Mutex::new(HashMap::new()),
             records: Mutex::new(HashMap::new()),
             executor: Arc::new(QuickJsExecutor::new()),
+            memory: Arc::new(crate::memory::MemoryGuard::new()),
             exec_runtime: Arc::new(ExecRuntime::new(
                 tokio::runtime::Builder::new_multi_thread()
                     // Sized by cores, not by slots: this bounds parallel

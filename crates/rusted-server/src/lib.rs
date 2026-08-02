@@ -9,6 +9,7 @@ pub mod auth;
 pub mod bundler;
 pub mod device;
 pub mod local;
+pub mod memory;
 pub mod plans;
 pub mod state;
 pub mod store;
