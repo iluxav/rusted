@@ -665,6 +665,171 @@ async fn inspect_source(
         .expect("inspect thread never panics")
 }
 
+/// Why a deploy was refused, carrying the code an API caller expects.
+pub struct DeployRefused {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl DeployRefused {
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// Deploys a function and describes what now exists at what URL.
+///
+/// Shared by the HTTP route and the MCP tool. Everything here is a decision —
+/// plan limits, name ownership, trigger validation — and two copies of it would
+/// drift, so there is one.
+pub async fn deploy_function(
+    state: &Arc<AppState>,
+    user_id: Uuid,
+    source: String,
+    name: Option<String>,
+    methods: Option<Vec<String>>,
+    path: Option<String>,
+    trigger_type: Option<String>,
+) -> Result<Value, DeployRefused> {
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    if source.len() as i64 > plan.limits.max_script_bytes {
+        return Err(DeployRefused::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "plan_limit",
+            format!(
+                "script is {} bytes; the {} plan allows {} — upgrade at /console/billing",
+                source.len(),
+                plan.name,
+                plan.limits.max_script_bytes
+            ),
+        ));
+    }
+
+    if let Some(t) = &trigger_type {
+        if t != "http" {
+            return Err(DeployRefused::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_trigger",
+                format!("trigger type {t} is not supported yet; only http"),
+            ));
+        }
+    }
+
+    let file_config = inspect_source(state, source.clone())
+        .await
+        .map_err(|e| DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e))?;
+
+    let Some(name) = name.or(file_config.name) else {
+        return Err(DeployRefused::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "missing_name",
+            "provide a name, or declare it in `export const config = { name: ... }`",
+        ));
+    };
+    if !valid_name(&name) {
+        return Err(DeployRefused::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_name",
+            "names are 1-64 chars of a-z, 0-9, '-', '_'",
+        ));
+    }
+
+    let replacing = matches!(state.store.owner(&name).await, Ok(Some(owner)) if owner == user_id);
+    if !replacing {
+        let owned = state.store.count_for_user(user_id).await.unwrap_or(0);
+        if owned >= plan.limits.max_functions {
+            return Err(DeployRefused::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "plan_limit",
+                format!(
+                    "the {} plan allows {} functions — delete one or upgrade at /console/billing",
+                    plan.name, plan.limits.max_functions
+                ),
+            ));
+        }
+        if let Ok(Some(_other)) = state.store.owner(&name).await {
+            return Err(DeployRefused::new(
+                StatusCode::CONFLICT,
+                "name_taken",
+                "another account already deployed a function with that name",
+            ));
+        }
+    }
+
+    // The file's own declaration stands in for anything the caller left out.
+    let methods = methods.or(file_config.methods);
+    let path = path.or(file_config.path);
+
+    // A push that names no trigger fields keeps the function's existing route;
+    // naming any of them replaces the whole trigger config.
+    let new_trigger = if methods.is_some() || path.is_some() {
+        let methods: Vec<String> = methods
+            .unwrap_or_else(|| vec!["POST".to_string()])
+            .iter()
+            .map(|m| m.to_uppercase())
+            .collect();
+        validate_trigger(&methods, &path).map_err(|e| {
+            DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_trigger", e)
+        })?;
+        Some(crate::store::HttpTrigger { methods, path })
+    } else {
+        None
+    };
+
+    let pushed = match new_trigger {
+        Some(trigger) => {
+            state
+                .store
+                .push_with_trigger(&name, &source, trigger, Some(user_id))
+                .await
+        }
+        None => state.store.push(&name, &source, Some(user_id)).await,
+    };
+    let (revision, trigger) = match pushed {
+        Ok(revision) => match state.store.get(&name).await {
+            Ok(Some(record)) => (revision, record.trigger),
+            Ok(None) => {
+                return Err(DeployRefused::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store_error",
+                    "the function vanished immediately after being written",
+                ))
+            }
+            Err(e) => {
+                return Err(DeployRefused::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store_error",
+                    e.to_string(),
+                ))
+            }
+        },
+        Err(e) => {
+            return Err(DeployRefused::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_error",
+                e.to_string(),
+            ))
+        }
+    };
+
+    let route = format!("/f/{}{}", name, trigger.path.as_deref().unwrap_or(""));
+    Ok(json!({
+        "name": name,
+        "revision": revision.rev,
+        "hash": revision.hash,
+        "size_bytes": source.len(),
+        "methods": trigger.methods,
+        "path": trigger.path,
+        "limits": limits_json(state, &plan),
+        "url": state.data_url(&route),
+    }))
+}
+
 async fn push_function(
     State(state): Shared,
     headers: HeaderMap,
@@ -674,125 +839,20 @@ async fn push_function(
         Ok(user_id) => user_id,
         Err(response) => return response,
     };
-    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
-    if body.source.len() as i64 > plan.limits.max_script_bytes {
-        return err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "plan_limit",
-            format!(
-                "script is {} bytes; the {} plan allows {} — upgrade at /console/billing",
-                body.source.len(),
-                plan.name,
-                plan.limits.max_script_bytes
-            ),
-        );
-    }
-    if let Some(t) = &body.trigger_type {
-        if t != "http" {
-            return err(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "unsupported_trigger",
-                format!("trigger type {t} is not supported yet; only http"),
-            );
-        }
-    }
-    // Compile check + read `export const config` from the file in one pass.
-    let file_config = match inspect_source(&state, body.source.clone()).await {
-        Ok(cfg) => cfg,
-        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e),
-    };
-    // Explicit request fields express fresher intent than the file config.
-    let Some(name) = body.name.clone().or(file_config.name) else {
-        return err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "missing_name",
-            "provide --name or declare it in `export const config = { name: ... }`",
-        );
-    };
-    if !valid_name(&name) {
-        return err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_name",
-            "names are 1-64 chars of a-z, 0-9, '-', '_'",
-        );
-    }
-    // Replacing an existing function doesn't consume another slot.
-    let replacing = matches!(state.store.owner(&name).await, Ok(Some(owner)) if owner == user_id);
-    if !replacing {
-        let owned = state.store.count_for_user(user_id).await.unwrap_or(0);
-        if owned >= plan.limits.max_functions {
-            return err(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "plan_limit",
-                format!(
-                    "you have {owned} functions; the {} plan allows {} — upgrade at /console/billing",
-                    plan.name, plan.limits.max_functions
-                ),
-            );
-        }
-        if let Ok(Some(other)) = state.store.owner(&name).await {
-            let _ = other;
-            return err(
-                StatusCode::CONFLICT,
-                "name_taken",
-                "another account already deployed a function with that name",
-            );
-        }
-    }
-    let methods = body.methods.clone().or(file_config.methods);
-    let path = body.path.clone().or(file_config.path);
-    // A push that names no trigger fields (anywhere) keeps the function's
-    // existing route; naming any of them replaces the whole trigger config.
-    let new_trigger = if methods.is_some() || path.is_some() {
-        let methods: Vec<String> = methods
-            .unwrap_or_else(|| vec!["POST".to_string()])
-            .iter()
-            .map(|m| m.to_uppercase())
-            .collect();
-        if let Err(e) = validate_trigger(&methods, &path) {
-            return err(StatusCode::UNPROCESSABLE_ENTITY, "invalid_trigger", e);
-        }
-        Some(crate::store::HttpTrigger { methods, path })
-    } else {
-        None
-    };
-    let pushed = match new_trigger {
-        Some(trigger) => {
-            state
-                .store
-                .push_with_trigger(&name, &body.source, trigger, Some(user_id))
-                .await
-        }
-        None => state.store.push(&name, &body.source, Some(user_id)).await,
-    };
-    let pushed = match pushed {
-        Ok(revision) => match state.store.get(&name).await {
-            Ok(Some(record)) => Ok((revision, record.trigger)),
-            Ok(None) => Err(sqlx::Error::RowNotFound),
-            Err(e) => Err(e),
-        },
-        Err(e) => Err(e),
-    };
-    match pushed {
-        Ok((revision, trigger)) => {
-            let route = format!("/f/{}{}", name, trigger.path.as_deref().unwrap_or(""));
-            Json(json!({
-                "name": name,
-                "revision": revision.rev,
-                "hash": revision.hash,
-                "size_bytes": body.source.len(),
-                "methods": trigger.methods,
-                "path": trigger.path,
-                "limits": limits_json(&state, &plan),
-                "url": state.data_url(&route),
-            }))
-            .into_response()
-        }
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        ),
+    let methods = body.methods.clone().filter(|m| !m.is_empty());
+    match deploy_function(
+        &state,
+        user_id,
+        body.source,
+        body.name,
+        methods,
+        body.path,
+        body.trigger_type,
+    )
+    .await
+    {
+        Ok(value) => Json(value).into_response(),
+        Err(refused) => err(refused.status, refused.code, refused.message),
     }
 }
 
@@ -1186,19 +1246,21 @@ async fn verify(
 const MCP_PROTOCOL: &str = "2025-06-18";
 
 fn mcp_tools() -> Value {
-    json!([{
+    json!([
+    {
         "name": "execute",
         "description":
-            "Run JavaScript on a remote sandbox and get back its result and console output. \
+            "Run JavaScript once on a remote sandbox and get back its result and console \
+             output. Nothing is saved; use `deploy` for code that should stay reachable.\
              \n\nUse this to work with data without pulling it into context: fetch, filter, \
              aggregate or reshape at the source and return only the answer. A response too \
              large to read is fine here — return the few fields you actually need.\
              \n\nWrite one ES module:\n\
              export default async function handler(request, context) {\n\
-             \u{0020}const input = await request.json();   // whatever you passed as `input`\n\
-             \u{0020}const r = await fetch('https://api.example.com/thing');\n\
-             \u{0020}const data = await r.json();\n\
-             \u{0020}return context.json({ answer: data.items.length });\n\
+             \u{0020} const input = await request.json();   // whatever you passed as `input`\n\
+             \u{0020} const r = await fetch('https://api.example.com/thing');\n\
+             \u{0020} const data = await r.json();\n\
+             \u{0020} return context.json({ answer: data.items.length });\n\
              }\
              \n\nAvailable: fetch (http/https, text and JSON only), console.log/warn/error, \
              and the ECMAScript standard library — JSON, RegExp, Date, Math, Map, Set, \
@@ -1221,7 +1283,64 @@ fn mcp_tools() -> Value {
             },
             "required": ["code"]
         }
-    }])
+    },
+    {
+        "name": "deploy",
+        "description":
+            "Publish JavaScript at a public HTTPS URL and return that URL. The function \
+             stays live until deleted, and anyone can call it — no key required.\
+             \n\nReach for this when something needs an address rather than an answer: a \
+             webhook endpoint, an API for someone else to call, a tool another agent can \
+             use, or a callback URL for a service that will POST back to you. Deploying \
+             is how you get an inbound URL you would otherwise have no way to obtain.\
+             \n\nThe handler is written exactly as for `execute`, with the same sandbox \
+             and the same limits. It runs per request, so `request.json()` is whatever the \
+             caller sent.\
+             \n\nDeploying the same name again replaces it and keeps the URL. The reply \
+             includes the URL, which methods it answers, and the revision number.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": { "type": "string", "description": "The ES module to publish." },
+                "name": {
+                    "type": "string",
+                    "description": "1-64 chars of a-z, 0-9, '-', '_'. Becomes part of the URL. Optional if the code declares `export const config = { name }`."
+                },
+                "methods": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "HTTP methods it answers, e.g. [\"GET\",\"POST\"]. Defaults to POST."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional route nested under the function, e.g. '/users/{id}'. Captures arrive in request.params."
+                }
+            },
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "list",
+        "description":
+            "List the functions deployed on this account, with their URLs and methods. \
+             Use it to find something deployed earlier, or to check what exists before \
+             choosing a name.",
+        "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+        "name": "delete",
+        "description":
+            "Remove a deployed function so its URL stops answering. Plans cap how many \
+             functions an account may keep, so delete what is no longer needed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "The function to remove." }
+            },
+            "required": ["name"]
+        }
+    }
+    ])
 }
 
 /// Tool failures come back as results, not JSON-RPC errors: that is how the
@@ -1309,6 +1428,87 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
     }
 }
 
+async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
+    let Some(code) = args.get("code").and_then(|c| c.as_str()) else {
+        return mcp_tool_result("`code` is required and must be a string".into(), true);
+    };
+    let name = args
+        .get("name")
+        .and_then(|n| n.as_str())
+        .map(|n| n.to_string());
+    let methods = args.get("methods").and_then(|m| m.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+    });
+    let path = args
+        .get("path")
+        .and_then(|p| p.as_str())
+        .map(|p| p.to_string());
+
+    match deploy_function(state, user_id, code.to_string(), name, methods, path, None).await {
+        Ok(value) => {
+            // The URL is the reason to deploy, so lead with it and say plainly
+            // that it is callable now.
+            let url = value["url"].as_str().unwrap_or("").to_string();
+            let methods = value["methods"].clone();
+            mcp_tool_result(
+                json!({
+                    "url": url,
+                    "name": value["name"],
+                    "methods": methods,
+                    "revision": value["revision"],
+                    "note": "live now, callable by anyone, no key needed",
+                })
+                .to_string(),
+                false,
+            )
+        }
+        Err(refused) => mcp_tool_result(
+            json!({ "error": refused.message, "kind": refused.code }).to_string(),
+            true,
+        ),
+    }
+}
+
+async fn mcp_list(state: &Arc<AppState>, user_id: Uuid) -> Value {
+    let names = match state.store.names_for_user(user_id).await {
+        Ok(names) => names,
+        Err(e) => return mcp_tool_result(format!("could not list functions: {e}"), true),
+    };
+    let mut functions = Vec::new();
+    for name in names {
+        if let Ok(Some(record)) = state.store.get(&name).await {
+            let route = format!(
+                "/f/{}{}",
+                name,
+                record.trigger.path.as_deref().unwrap_or("")
+            );
+            functions.push(json!({
+                "name": name,
+                "url": state.data_url(&route),
+                "methods": record.trigger.methods,
+            }));
+        }
+    }
+    mcp_tool_result(json!({ "functions": functions }).to_string(), false)
+}
+
+async fn mcp_delete(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
+    let Some(name) = args.get("name").and_then(|n| n.as_str()) else {
+        return mcp_tool_result("`name` is required and must be a string".into(), true);
+    };
+    // Ownership, not existence: a function someone else deployed is not this
+    // caller's to remove, and saying so would leak that it exists.
+    if !owns(state, name, user_id).await {
+        return mcp_tool_result(format!("you have no function named '{name}'"), true);
+    }
+    match state.store.delete(name).await {
+        Ok(_) => mcp_tool_result(json!({ "deleted": name }).to_string(), false),
+        Err(e) => mcp_tool_result(format!("could not delete '{name}': {e}"), true),
+    }
+}
+
 /// One JSON-RPC message. `None` means it was a notification and wants no reply.
 async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned()?;
@@ -1330,6 +1530,9 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match name {
                 "execute" => ok(mcp_execute(state, user_id, &args).await),
+                "deploy" => ok(mcp_deploy(state, user_id, &args).await),
+                "list" => ok(mcp_list(state, user_id).await),
+                "delete" => ok(mcp_delete(state, user_id, &args).await),
                 other => ok(mcp_tool_result(format!("unknown tool: {other}"), true)),
             }
         }
