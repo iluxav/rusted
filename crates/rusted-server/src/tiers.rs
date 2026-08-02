@@ -17,22 +17,22 @@ pub const TIERS: &[Tier] = &[
     Tier {
         code: "dev",
         name: "Dev",
-        exec_ms: 50,
-        outbound_reqs: 0,
+        exec_ms: 100,
+        outbound_reqs: 2,
         max_script_bytes: 262_144,
     },
     Tier {
         code: "pro",
         name: "Pro",
         exec_ms: 500,
-        outbound_reqs: 2,
+        outbound_reqs: 10,
         max_script_bytes: 1_048_576,
     },
     Tier {
         code: "extra",
         name: "Extra",
         exec_ms: 30_000,
-        outbound_reqs: 10,
+        outbound_reqs: 25,
         max_script_bytes: 5_242_880,
     },
 ];
@@ -138,15 +138,18 @@ mod tier_advisories {
 
     #[test]
     fn without_a_plan_it_names_the_cheapest_tier_that_fits() {
+        let dev = super::by_code("dev").unwrap();
+        let pro = super::by_code("pro").unwrap();
+        // Comfortably past Dev, comfortably inside Pro, whatever those are.
         let usage = Usage {
-            exec_ms: 300,
-            outbound_reqs: 1,
+            exec_ms: (dev.exec_ms + pro.exec_ms) / 2,
+            outbound_reqs: 0,
             script_bytes: 1024,
         };
-        let advisory = warning(&usage, None).expect("300ms exceeds Dev");
-        assert!(advisory.contains("Pro"), "{advisory}");
+        let advisory = warning(&usage, None).expect("over Dev");
+        assert!(advisory.contains(pro.name), "{advisory}");
         assert!(
-            advisory.contains("50ms"),
+            advisory.contains(&format!("{}ms", dev.exec_ms)),
             "should say what Dev allows: {advisory}"
         );
     }
@@ -165,14 +168,23 @@ mod tier_advisories {
     }
 
     #[test]
-    fn fetch_on_the_free_tier_is_called_out_plainly() {
-        let usage = Usage {
+    fn the_free_tier_allows_fetch_but_says_when_you_pass_it() {
+        let dev = super::by_code("dev").unwrap();
+        // The free tier must be able to demonstrate fetch at all.
+        assert!(dev.outbound_reqs > 0, "Dev should allow outbound calls");
+        let within = Usage {
             exec_ms: 10,
-            outbound_reqs: 2,
+            outbound_reqs: dev.outbound_reqs,
             script_bytes: 1024,
         };
-        let advisory = warning(&usage, Some("dev")).expect("Dev allows no fetch");
-        assert!(advisory.contains("none allowed"), "{advisory}");
+        assert_eq!(warning(&within, Some("dev")), None);
+
+        let over = Usage {
+            outbound_reqs: dev.outbound_reqs + 1,
+            ..within
+        };
+        let advisory = warning(&over, Some("dev")).expect("one past the allowance");
+        assert!(advisory.contains("fetch calls over"), "{advisory}");
     }
 
     #[test]

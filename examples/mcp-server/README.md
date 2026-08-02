@@ -44,6 +44,8 @@ a `context.json(body, { status, headers })` would close both.
 ## Keep in mind
 
 - **Execution budget.** These tools run in ~0.05 ms, well inside the Dev plan's
-  50 ms. A tool that calls an API needs `fetch`, which means Pro or above.
-- **Concurrency is 1 per function.** Calls queue rather than overlap, so a slow
-  tool becomes the bottleneck for every client.
+  100 ms. A tool that calls an API needs `fetch`, which the free tier allows
+  (2 calls per invocation).
+- **Concurrency.** Agents fan tool calls out in parallel; each plan sets how
+  many run at once (Dev 2, Pro 5, Extra 20). Beyond that, calls queue and then
+  get a `busy` response.
