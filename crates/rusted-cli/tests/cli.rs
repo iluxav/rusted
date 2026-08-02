@@ -63,6 +63,10 @@ impl Harness {
         path.to_string_lossy().into_owned()
     }
 
+    fn dir_path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+
     fn rusted(&self) -> Command {
         let mut cmd = Command::cargo_bin("rusted").unwrap();
         cmd.arg("--admin").arg(&self.admin);
@@ -902,4 +906,57 @@ fn build_refuses_a_bundle_that_would_not_deploy() {
         !dir.path().join("dist").exists(),
         "a failed build should write nothing"
     );
+}
+
+#[test]
+fn push_bundles_a_source_file_with_imports() {
+    let h = boot();
+    std::fs::write(
+        h.dir_path().join("greeting.js"),
+        "export const hello = () => \"from a module\";",
+    )
+    .unwrap();
+    let script = h.script(
+        "entry.js",
+        r#"import { hello } from "./greeting.js";
+export const config = { name: "bundled-push" };
+export default async function handler(request, context) { return context.text(hello()); }"#,
+    );
+
+    // Previously this failed: the server has no way to resolve "./greeting.js".
+    let out = h
+        .rusted()
+        .args(["push", &script, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["name"], "bundled-push");
+
+    let response = reqwest::blocking::Client::new()
+        .post(v["url"].as_str().unwrap())
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().unwrap(), "from a module");
+
+    // The stored source is the bundle, so nothing unresolved reaches the server.
+    let pulled = h.rusted().args(["pull", "bundled-push"]).assert().success();
+    let pulled = String::from_utf8(pulled.get_output().stdout.clone()).unwrap();
+    assert!(pulled.contains("from a module"));
+    assert!(!pulled.contains("from \"./greeting.js\""));
+}
+
+#[test]
+fn push_leaves_an_import_free_file_alone() {
+    let h = boot();
+    let source = r#"export const config = { name: "plain-push" };
+export default async function handler(request, context) { return context.text("as written"); }"#;
+    let script = h.script("plain.js", source);
+    h.rusted().args(["push", &script]).assert().success();
+    let pulled = h.rusted().args(["pull", "plain-push"]).assert().success();
+    let pulled = String::from_utf8(pulled.get_output().stdout.clone()).unwrap();
+    assert_eq!(pulled.trim(), source, "no imports means nothing to bundle");
 }

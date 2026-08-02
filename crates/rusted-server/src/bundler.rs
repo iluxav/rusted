@@ -13,10 +13,33 @@ use rolldown::{
 };
 use rolldown_common::Output;
 
+/// A file with `import` statements can't run as-is — the runtime resolves no
+/// modules — so it gets bundled first.
+pub fn needs_bundling(source: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        (line.starts_with("import ") || line.starts_with("import{") || line.starts_with("import("))
+            && !line.starts_with("import.meta")
+    }) || source.contains("} from \"")
+        || source.contains("} from '")
+}
+
 pub struct Bundled {
     pub code: String,
     /// The source map as JSON, used to map stack frames back to your files.
     pub sourcemap: Option<String>,
+}
+
+/// The source to deploy for `entry`: bundled when it has imports, read as-is
+/// otherwise. Deploying goes through the same pipeline as developing, so what
+/// runs in `rusted run` is what lands on the server.
+pub async fn source_for(entry: &Path) -> Result<String, String> {
+    let source = std::fs::read_to_string(entry)
+        .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
+    if !needs_bundling(&source) {
+        return Ok(source);
+    }
+    Ok(bundle(entry, false).await?.code)
 }
 
 /// Bundles `entry` into a single ES2020 ES module, entirely in memory.

@@ -57,17 +57,6 @@ struct Pipeline {
     note: Option<String>,
 }
 
-/// A file with `import` statements can't run as-is — the runtime resolves no
-/// modules — so it gets bundled first.
-fn needs_bundling(source: &str) -> bool {
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        (line.starts_with("import ") || line.starts_with("import{") || line.starts_with("import("))
-            && !line.starts_with("import.meta")
-    }) || source.contains("} from \"")
-        || source.contains("} from '")
-}
-
 fn resolve_pipeline(config: &LocalConfig) -> Result<Pipeline, String> {
     // An explicit --build wins: your pipeline, your rules.
     if let Some(build) = &config.build {
@@ -84,7 +73,7 @@ fn resolve_pipeline(config: &LocalConfig) -> Result<Pipeline, String> {
     }
     let source = std::fs::read_to_string(&config.entry)
         .map_err(|e| format!("cannot read {}: {e}", config.entry.display()))?;
-    if !needs_bundling(&source) {
+    if !crate::bundler::needs_bundling(&source) {
         return Ok(Pipeline {
             serve_path: config.entry.clone(),
             source: Source::File,
