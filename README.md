@@ -2,6 +2,8 @@
 
 A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint in seconds, executed by QuickJS inside a restricted Rust runtime.
 
+`rusted becomes the MCP server that lets agents write their own tools`
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iluxav/rusted/main/install.sh | sh
 ```
@@ -88,11 +90,11 @@ Every command takes `--json` for stable machine-readable output.
 
 ## What's here
 
-| Path | Purpose |
-|---|---|
-| `crates/rusted-engine` | QuickJS executor: uncatchable wall-clock interrupt, heap cap, output cap, structured `console` logs, fresh context per invocation |
+| Path                   | Purpose                                                                                                                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/rusted-engine` | QuickJS executor: uncatchable wall-clock interrupt, heap cap, output cap, structured `console` logs, fresh context per invocation                                            |
 | `crates/rusted-server` | Orchestrator: data API (`/f/<name>`, `/r/<id>`), admin API for the CLI, content-addressed Postgres store with immutable revisions, per-function concurrency 1, temp-run TTLs |
-| `crates/rusted-cli` | The single `rusted` binary |
+| `crates/rusted-cli`    | The single `rusted` binary                                                                                                                                                   |
 
 The engine choice (QuickJS over Boa) came out of a measured spike — cold start, throughput, memory, and whether hostile code can actually be stopped. QuickJS won on all four, decisively on the last: it can interrupt a runaway script uncatchably and cap its heap, which Boa cannot.
 
@@ -125,7 +127,7 @@ It refuses to write a bundle that wouldn't deploy — no handler, or code that w
 
 ### Limits while developing
 
-Local runs get the most permissive plan's limits — 30s execution, 25 outbound calls — so nothing blocks you mid-thought. Each run then reports what it *would* cost:
+Local runs get the most permissive plan's limits — 30s execution, 25 outbound calls — so nothing blocks you mid-thought. Each run then reports what it _would_ cost:
 
 ```
 ✓ 200 POST /convert/1   wall 1024ms · exec 1002ms
@@ -141,10 +143,13 @@ Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (
 `context.json` and `context.text` take an optional second argument:
 
 ```js
-return context.json({ queued: true }, {
-  status: 202,
-  headers: { "cache-control": "no-store", "x-request-id": id },
-});
+return context.json(
+  { queued: true },
+  {
+    status: 202,
+    headers: { "cache-control": "no-store", "x-request-id": id },
+  },
+);
 ```
 
 Status must be 200–599. Headers that frame the response — `content-length`, `transfer-encoding`, `connection`, and friends — belong to the platform and are refused, as is any value containing a line break. A refused header fails the call rather than shipping a half-correct response.

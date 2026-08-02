@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::state::{
-    now_epoch, AppState, InvocationRecord, TempRun, RECORD_CAP, REQUEST_BODY_LIMIT,
+    now_epoch, AppState, InvocationRecord, TempRun, ADMIN_BODY_LIMIT, RECORD_CAP,
+    REQUEST_BODY_LIMIT,
 };
 
 const DEFAULT_RUN_TTL_SECS: u64 = 120;
@@ -1143,7 +1144,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         // no credential yet. Both are rate limited and every code expires.
         .route("/api/device/code", post(device_start))
         .route("/api/device/token", post(device_poll))
-        .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT * 2))
+        .layer(DefaultBodyLimit::max(ADMIN_BODY_LIMIT))
         .layer(axum::middleware::from_fn(envelope_errors))
         .with_state(state)
 }
