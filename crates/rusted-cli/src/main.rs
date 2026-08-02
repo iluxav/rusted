@@ -162,6 +162,12 @@ enum Cmd {
     Delete { name: String },
     /// Show recent invocations of a function with their console output
     Logs { name: String },
+    /// Write TypeScript declarations for `request`, `context`, and the globals
+    Types {
+        /// Where to write them (default: rusted.d.ts)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
 }
 
 impl Cli {
@@ -457,6 +463,25 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 None,
             )?;
             emit(&cli, &v, |_| format!("deleted {name}"))
+        }
+        Cmd::Types { ref out } => {
+            // Shipped inside the binary, so the declarations always describe the
+            // runtime this CLI actually has rather than whatever a registry last
+            // published.
+            const DECLARATIONS: &str = include_str!("../../rusted-engine/rusted.d.ts");
+            let path = out.clone().unwrap_or_else(|| PathBuf::from("rusted.d.ts"));
+            std::fs::write(&path, DECLARATIONS)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            println!("wrote {} ({} bytes)", path.display(), DECLARATIONS.len());
+            println!(
+                "\nreference it from your handler:\n  \
+                 /// <reference path=\"./{}\" />\n\n\
+                 or list it in tsconfig \"include\". Set \"lib\": [\"ES2020\"] and\n\
+                 leave out \"DOM\" — this runtime's fetch and console are smaller\n\
+                 than a browser's, and DOM would promise methods it lacks.",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            Ok(())
         }
         Cmd::Logs { ref name } => {
             let v = api(&cli, Method::GET, &format!("/api/functions/{name}"), None)?;

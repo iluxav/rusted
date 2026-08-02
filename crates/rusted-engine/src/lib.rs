@@ -669,3 +669,49 @@ impl Executor for QuickJsExecutor {
         })
     }
 }
+
+#[cfg(test)]
+mod type_declarations {
+    /// The declarations shipped by `rusted types`.
+    const DECLARATIONS: &str = include_str!("../rusted.d.ts");
+
+    /// Members of an object literal in [`GLUE`], e.g. `const request = { … }`.
+    fn members_of(binding: &str) -> Vec<String> {
+        let start = super::GLUE
+            .find(&format!("const {binding} = {{"))
+            .unwrap_or_else(|| panic!("GLUE no longer defines `{binding}`"));
+        let body = &super::GLUE[start..];
+        let end = body.find("\n  };").expect("unterminated object literal");
+        body[..end]
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let line = line.trim();
+                let name = line.split(':').next()?.trim();
+                (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                    .then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    /// The harmful direction is declarations promising something the runtime
+    /// does not have: that typechecks and then fails in production.
+    #[test]
+    fn declarations_cover_everything_the_runtime_exposes() {
+        for (binding, interface) in [("request", "Request"), ("context", "Context")] {
+            let members = members_of(binding);
+            assert!(
+                !members.is_empty(),
+                "parsed no members for `{binding}` — the GLUE shape changed"
+            );
+            for member in members {
+                assert!(
+                    DECLARATIONS.contains(&format!("{member}("))
+                        || DECLARATIONS.contains(&format!("{member}:")),
+                    "runtime exposes `{binding}.{member}` but Rusted.{interface} \
+                     in rusted.d.ts does not declare it"
+                );
+            }
+        }
+    }
+}
