@@ -218,22 +218,45 @@ impl OutboundBudget {
             Err(e) => return FetchResponse::refused(format!("request failed: {e}")),
         };
         let status = response.status().as_u16();
-        let headers = response
+        let headers: std::collections::BTreeMap<String, String> = response
             .headers()
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_lowercase(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
+            // A header value that is not readable text is dropped rather than
+            // coerced: absent is honest, mojibake is not.
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_lowercase(), value.to_string()))
             })
             .collect();
-        let body = response
+        // Read bytes, then convert deliberately. `read_to_string().unwrap_or_default()`
+        // turned a binary response into an empty string, so a handler fetching an
+        // image saw "" and could not tell that from a genuinely empty body.
+        let raw = match response
             .body_mut()
             .with_config()
             .limit(self.policy.max_response_bytes as u64)
-            .read_to_string()
-            .unwrap_or_default();
+            .read_to_vec()
+        {
+            Ok(raw) => raw,
+            Err(e) => return FetchResponse::refused(format!("reading the response failed: {e}")),
+        };
+        let body = match String::from_utf8(raw) {
+            Ok(body) => body,
+            Err(e) => {
+                let ct = headers
+                    .get("content-type")
+                    .map(|v| format!(" (content-type: {v})"))
+                    .unwrap_or_default();
+                return FetchResponse::refused(format!(
+                    "the response is not valid UTF-8 text{ct}: {} bytes, first bad byte at \
+                     offset {}. fetch returns text, so binary responses cannot be read — \
+                     ask the upstream for a text or JSON representation.",
+                    e.as_bytes().len(),
+                    e.utf8_error().valid_up_to(),
+                ));
+            }
+        };
         FetchResponse {
             ok: (200..300).contains(&status),
             status,

@@ -438,20 +438,38 @@ async fn dispatch(
             }
         },
     };
+    // Same refusal as the deployed server: a body that is not UTF-8 is rejected
+    // rather than coerced, so `rusted run` cannot accept locally what the server
+    // would turn away. See `api::to_engine_request` for why coercion is wrong.
+    let body = match String::from_utf8(body.to_vec()) {
+        Ok(body) => body,
+        Err(e) => {
+            let at = e.utf8_error().valid_up_to();
+            return problem(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!(
+                    "request body is not valid UTF-8 (first bad byte at offset {at} of {}). \
+                     Functions receive the body as text, so binary payloads cannot be passed \
+                     through unchanged — send them base64-encoded inside JSON instead.",
+                    e.as_bytes().len()
+                ),
+            );
+        }
+    };
     let request = HttpRequest {
         method: method.as_str().to_string(),
         headers: headers
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_string(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_string(), value.to_string()))
             })
             .collect(),
         query: query.into_iter().collect(),
         params,
-        body: String::from_utf8_lossy(&body).into_owned(),
+        body,
     };
 
     let executor = state.executor.clone();

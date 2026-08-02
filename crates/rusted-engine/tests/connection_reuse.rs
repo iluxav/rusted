@@ -92,3 +92,34 @@ fn the_pool_survives_between_invocations() {
          {within_invocation:.1}ms within one invocation) — the pool dies with the budget"
     );
 }
+
+/// A binary response used to be swallowed: `read_to_string().unwrap_or_default()`
+/// turns invalid UTF-8 into an empty string, so a handler fetching an image saw
+/// `""` and had no way to tell that from a genuinely empty body.
+#[test]
+#[ignore = "hits the network; run explicitly"]
+fn a_binary_response_body_is_reported_not_silently_emptied() {
+    let budget = OutboundBudget::new(policy(4));
+    let r = budget.perform(FetchRequest {
+        url: "https://www.google.com/favicon.ico".into(),
+        method: None,
+        headers: Default::default(),
+        body: None,
+    });
+    eprintln!(
+        "BINARY status={} body_len={} error={:?}",
+        r.status,
+        r.body.len(),
+        r.error
+    );
+    assert!(
+        r.error.is_some(),
+        "a body that is not text must be reported, got {} bytes of body and no error",
+        r.body.len()
+    );
+    let msg = r.error.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("utf-8") || msg.to_lowercase().contains("text"),
+        "the handler needs to know why: {msg}"
+    );
+}
