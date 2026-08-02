@@ -56,6 +56,16 @@ export default async function handler(request, context) { ... }
 
 Explicit flags override the file config. Unknown config keys fail verify — typos can't deploy silently. Being real code (not comments), the config survives bundling.
 
+## Signing in
+
+```bash
+rusted login
+```
+
+Prints a short code, you approve it once in a browser, and the CLI stores the key it's granted in `~/.config/rusted/credentials.json` (owner-readable only). Nothing to copy, and the key it mints appears in the console's **API keys** page like any other — revoke it there if you lose the machine.
+
+Resolution order is `--api-key` → `RUSTED_API_KEY` → that file, so CI keeps using an environment variable and needs no browser.
+
 ## Console, auth, and API keys
 
 The web console lives on the admin port (http://127.0.0.1:7412). Sign-in is real GitHub OAuth: create an OAuth app at github.com/settings/developers with callback `http://127.0.0.1:7412/auth/github/callback`, then start the server with `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` set (the login page shows these instructions until you do).

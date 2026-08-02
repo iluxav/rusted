@@ -56,6 +56,7 @@ pub struct AppState {
     /// Caps how many invocations run on worker threads at once.
     pub exec_slots: Arc<tokio::sync::Semaphore>,
     pub data_addr: OnceLock<SocketAddr>,
+    pub admin_addr: OnceLock<SocketAddr>,
     pub invoke_seq: AtomicU64,
     /// How long a queued invocation waits for its function's turn before 429.
     pub queue_wait_ms: u64,
@@ -93,10 +94,19 @@ impl AppState {
             limits: Limits::default(),
             exec_slots: Arc::new(tokio::sync::Semaphore::new(workers)),
             data_addr: OnceLock::new(),
+            admin_addr: OnceLock::new(),
             invoke_seq: AtomicU64::new(0),
             queue_wait_ms,
             debug,
         }
+    }
+
+    /// Where a human goes to finish something the CLI started.
+    pub fn console_url(&self, path: &str) -> String {
+        format!(
+            "http://{}{path}",
+            self.admin_addr.get().expect("admin_addr set at startup")
+        )
     }
 
     pub fn data_url(&self, path: &str) -> String {

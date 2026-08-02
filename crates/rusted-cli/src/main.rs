@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+
+mod credentials;
 use reqwest::blocking::Client;
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -88,6 +90,10 @@ enum Cmd {
         #[arg(long)]
         outbound: Option<u32>,
     },
+    /// Sign in — approve once in a browser, no key to copy
+    Login,
+    /// Forget the stored credential for this server
+    Logout,
     /// Bundle a function into a single deployable file
     Build {
         /// Your handler; imports are bundled in
@@ -127,6 +133,83 @@ enum Cmd {
     Delete { name: String },
     /// Show recent invocations of a function with their console output
     Logs { name: String },
+}
+
+impl Cli {
+    /// A flag beats the environment, which beats what `rusted login` stored.
+    fn key(&self) -> Option<String> {
+        self.api_key
+            .clone()
+            .or_else(|| credentials::get(&self.admin))
+    }
+}
+
+/// The device flow: the browser work happens on the human's side, and the CLI
+/// only ever sees the key it was granted.
+fn login(cli: &Cli) -> Result<(), String> {
+    let admin = cli.admin.trim_end_matches('/').to_string();
+    let label = format!(
+        "cli on {}",
+        hostname().unwrap_or_else(|| "this machine".to_string())
+    );
+    let client = Client::new();
+    let start: Value = client
+        .post(format!("{admin}/api/device/code"))
+        .json(&json!({ "label": label }))
+        .send()
+        .map_err(|e| format!("cannot reach rusted at {admin}: {e}"))?
+        .json()
+        .map_err(|e| format!("unexpected response: {e}"))?;
+
+    let (Some(device_code), Some(user_code), Some(uri)) = (
+        start["device_code"].as_str(),
+        start["user_code"].as_str(),
+        start["verification_uri"].as_str(),
+    ) else {
+        return Err(format!(
+            "this server does not support `rusted login`: {start}"
+        ));
+    };
+    let interval = start["interval"].as_u64().unwrap_or(2);
+
+    println!("open {uri} and enter\n");
+    println!("    {user_code}\n");
+    println!("waiting…");
+
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(start["expires_in"].as_u64().unwrap_or(600));
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+        let response = client
+            .post(format!("{admin}/api/device/token"))
+            .json(&json!({ "device_code": device_code }))
+            .send()
+            .map_err(|e| format!("cannot reach rusted at {admin}: {e}"))?;
+        let body: Value = response.json().unwrap_or_else(|_| json!({}));
+        if let Some(key) = body["api_key"].as_str() {
+            let path = credentials::save(&admin, key)?;
+            println!("\nsigned in — key stored in {}", path.display());
+            return Ok(());
+        }
+        match body["error"]["code"].as_str() {
+            Some("authorization_pending") => continue,
+            Some("access_denied") => return Err("request declined".to_string()),
+            Some("expired_token") => {
+                return Err("that code expired — run `rusted login` again".to_string())
+            }
+            _ => return Err(format!("sign-in failed: {body}")),
+        }
+    }
+    Err("timed out waiting for approval".to_string())
+}
+
+fn hostname() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
 }
 
 fn main() {
@@ -210,6 +293,16 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             cli.admin.clone(),
             cli.api_key.clone(),
         ),
+        Cmd::Login => login(&cli),
+        Cmd::Logout => {
+            let admin = cli.admin.trim_end_matches('/');
+            if credentials::forget(admin)? {
+                println!("signed out of {admin}");
+            } else {
+                println!("no stored credential for {admin}");
+            }
+            Ok(())
+        }
         Cmd::Build {
             ref file,
             ref out,
@@ -370,7 +463,7 @@ fn read_script(path: &PathBuf) -> Result<String, String> {
 fn api(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<Value, String> {
     let url = format!("{}{path}", cli.admin.trim_end_matches('/'));
     let mut request = Client::new().request(method, &url);
-    if let Some(key) = &cli.api_key {
+    if let Some(key) = cli.key() {
         request = request.bearer_auth(key);
     }
     if let Some(body) = body {
@@ -388,12 +481,8 @@ fn api(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<Val
     if status.is_success() {
         return Ok(value);
     }
-    if status == reqwest::StatusCode::UNAUTHORIZED && cli.api_key.is_none() {
-        return Err(
-            "no API key: create one at http://127.0.0.1:7412/console/keys, then add\n\
-             RUSTED_API_KEY=rk_live_… to your .env"
-                .to_string(),
-        );
+    if status == reqwest::StatusCode::UNAUTHORIZED && cli.key().is_none() {
+        return Err("not signed in — run `rusted login`".to_string());
     }
     Err(value.to_string())
 }

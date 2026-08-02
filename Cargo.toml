@@ -10,7 +10,7 @@ members = [
 rquickjs = "0.12.2"
 cpu-time = "1.0"
 askama = "0.16"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros", "uuid", "time"] }
 rand = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 dotenvy = "0.15"

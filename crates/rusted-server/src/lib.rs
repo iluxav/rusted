@@ -7,6 +7,7 @@ pub mod analytics;
 pub mod api;
 pub mod auth;
 pub mod bundler;
+pub mod device;
 pub mod local;
 pub mod plans;
 pub mod state;
@@ -90,6 +91,10 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .data_addr
         .set(data_addr)
         .expect("data_addr set exactly once");
+    state
+        .admin_addr
+        .set(admin_addr)
+        .expect("admin_addr set exactly once");
 
     let data_app = api::data_router(state.clone());
     let admin_app =

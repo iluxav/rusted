@@ -965,6 +965,8 @@ async fn every_console_page_renders() {
         "/console/invocations",
         "/console/invocations?function=greet&errors=1",
         "/console/invocations?page=2",
+        "/device",
+        "/device?code=ZZZZ-ZZZZ",
     ] {
         let r = t
             .client
@@ -1209,4 +1211,129 @@ async fn the_dev_plan_can_reach_the_internet() {
         plan.version, 2,
         "the newest Dev version is the generous one"
     );
+}
+
+#[tokio::test]
+async fn device_flow_grants_a_key_once_a_human_approves() {
+    let t = boot().await;
+
+    // The client has no credential yet — that's the point of this flow.
+    let start: Value = t
+        .client
+        .post(t.admin("/api/device/code"))
+        .json(&json!({ "label": "cli on laptop" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let device_code = start["device_code"].as_str().unwrap().to_string();
+    let user_code = start["user_code"].as_str().unwrap().to_string();
+    assert!(start["verification_uri"]
+        .as_str()
+        .unwrap()
+        .ends_with("/device"));
+
+    let poll = |code: String| {
+        let client = t.client.clone();
+        let url = t.admin("/api/device/token");
+        async move {
+            client
+                .post(url)
+                .json(&json!({ "device_code": code }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Before approval, polling says exactly that.
+    let v: Value = poll(device_code.clone()).await.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "authorization_pending");
+
+    // A human approves it in the console.
+    assert!(
+        rusted_server::device::decide(&t.pool, &user_code, t.user_id, true)
+            .await
+            .unwrap()
+    );
+
+    let v: Value = poll(device_code.clone()).await.json().await.unwrap();
+    let key = v["api_key"].as_str().expect("a key after approval");
+    assert!(key.starts_with("rk_live_"));
+
+    // The granted key really works.
+    let r = t
+        .client
+        .get(t.admin("/api/functions"))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // And the code cannot be redeemed twice.
+    let v: Value = poll(device_code).await.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "expired_token");
+}
+
+#[tokio::test]
+async fn a_declined_device_request_grants_nothing() {
+    let t = boot().await;
+    let start: Value = t
+        .client
+        .post(t.admin("/api/device/code"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_code = start["user_code"].as_str().unwrap().to_string();
+
+    assert!(
+        rusted_server::device::decide(&t.pool, &user_code, t.user_id, false)
+            .await
+            .unwrap()
+    );
+    let v: Value = t
+        .client
+        .post(t.admin("/api/device/token"))
+        .json(&json!({ "device_code": start["device_code"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["error"]["code"], "access_denied");
+
+    // A decided request is no longer pending, so it can't be flipped later.
+    assert!(
+        !rusted_server::device::decide(&t.pool, &user_code, t.user_id, true)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_device_code_reveals_nothing() {
+    let t = boot().await;
+    let v: Value = t
+        .client
+        .post(t.admin("/api/device/token"))
+        .json(&json!({ "device_code": "not-a-real-code" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["error"]["code"], "expired_token");
+    assert!(rusted_server::device::lookup(&t.pool, "ZZZZ-ZZZZ")
+        .await
+        .unwrap()
+        .is_none());
 }

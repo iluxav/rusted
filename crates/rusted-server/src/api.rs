@@ -1015,6 +1015,74 @@ struct VerifyBody {
     source: String,
 }
 
+#[derive(Deserialize)]
+struct DeviceStart {
+    /// Names the key this becomes, so it's recognisable in the console.
+    #[serde(default)]
+    label: Option<String>,
+}
+
+async fn device_start(State(state): Shared, Json(body): Json<DeviceStart>) -> Response {
+    // A shared bucket: this endpoint mints rows for anyone who asks.
+    if state.rate_limiter.check("device-code", 60).is_err() {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many sign-in attempts; try again shortly",
+        );
+    }
+    let label = body
+        .label
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| "cli".to_string());
+    let label: String = label.chars().filter(|c| !c.is_control()).take(48).collect();
+    match crate::device::start(&state.pool, &label).await {
+        Ok(pending) => Json(json!({
+            "device_code": pending.device_code,
+            "user_code": pending.user_code,
+            "verification_uri": state.console_url("/device"),
+            "expires_in": crate::device::EXPIRY.as_secs(),
+            "interval": crate::device::POLL_INTERVAL,
+        }))
+        .into_response(),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            e.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct DevicePoll {
+    device_code: String,
+}
+
+async fn device_poll(State(state): Shared, Json(body): Json<DevicePoll>) -> Response {
+    match crate::device::poll(&state.pool, &body.device_code).await {
+        // RFC 8628 names these; the CLI keeps polling on the first.
+        Ok(crate::device::Poll::Pending) => err(
+            StatusCode::BAD_REQUEST,
+            "authorization_pending",
+            "waiting for approval",
+        ),
+        Ok(crate::device::Poll::Denied) => {
+            err(StatusCode::BAD_REQUEST, "access_denied", "request declined")
+        }
+        Ok(crate::device::Poll::Expired) => err(
+            StatusCode::BAD_REQUEST,
+            "expired_token",
+            "that code has expired — run the command again",
+        ),
+        Ok(crate::device::Poll::Approved(key)) => Json(json!({ "api_key": key })).into_response(),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            e.to_string(),
+        ),
+    }
+}
+
 /// The caller's plan. Local development resolves this in the background so it
 /// can say "over your Pro plan" instead of guessing.
 async fn current_plan(State(state): Shared, headers: HeaderMap) -> Response {
@@ -1057,6 +1125,10 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/api/invoke", post(invoke))
         .route("/api/verify", post(verify))
         .route("/api/plan", get(current_plan))
+        // Unauthenticated by necessity: a client starting the device flow has
+        // no credential yet. Both are rate limited and every code expires.
+        .route("/api/device/code", post(device_start))
+        .route("/api/device/token", post(device_poll))
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT * 2))
         .layer(axum::middleware::from_fn(envelope_errors))
         .with_state(state)
