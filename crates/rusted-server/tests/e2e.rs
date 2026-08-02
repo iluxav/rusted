@@ -1609,3 +1609,75 @@ async fn mcp_requires_a_key() {
         "arbitrary code execution must be authenticated"
     );
 }
+
+// --- binary bodies ------------------------------------------------------------
+
+/// `from_utf8_lossy` does not reject invalid bytes, it replaces each one with
+/// U+FFFD. A PNG posted to a function arrived as mojibake with no error at all:
+/// 1024 random bytes became 967 characters, 409 of them replacements. Silent
+/// corruption is worse than a refusal, because nothing tells the caller.
+#[tokio::test]
+async fn a_body_that_is_not_utf8_is_refused_rather_than_mangled() {
+    let t = boot().await;
+    // Echoes what it received, so corruption would be visible in the response.
+    push(
+        &t,
+        "echo",
+        r#"export default async function handler(request, context) {
+            return context.json({ length: request.body.length });
+        }"#,
+    )
+    .await;
+
+    // A real PNG signature: 0x89 and 0x1A are not valid UTF-8 lead bytes.
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    ];
+    let r = t
+        .client
+        .post(t.data("/f/echo"))
+        .body(png)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(r.status(), 400, "binary must not be silently accepted");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "invalid_body", "{v}");
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("UTF-8"), "the caller needs to know why: {msg}");
+}
+
+/// The refusal must be precise: valid UTF-8 that happens to be multi-byte is
+/// ordinary text and has to keep working byte-for-byte.
+#[tokio::test]
+async fn multibyte_utf8_still_round_trips_intact() {
+    let t = boot().await;
+    push(
+        &t,
+        "echo",
+        r#"export default async function handler(request, context) {
+            const body = await request.json();
+            return context.json({ back: body.text });
+        }"#,
+    )
+    .await;
+
+    let text = "שלום · 你好 · emoji 🚀 · naïve café";
+    let r = t
+        .client
+        .post(t.data("/f/echo"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "text": text }).to_string())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(
+        v["back"].as_str().unwrap(),
+        text,
+        "multi-byte UTF-8 must survive unchanged"
+    );
+}

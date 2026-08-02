@@ -377,28 +377,52 @@ async fn envelope_errors(
     err(status, code, status.canonical_reason().unwrap_or("error"))
 }
 
+/// Builds the engine's view of a request, or explains why it cannot.
+///
+/// The body is refused rather than coerced. `from_utf8_lossy` does not reject
+/// invalid bytes — it replaces each one with U+FFFD, so a PNG posted here used
+/// to arrive as mojibake with no error: 1024 random bytes became 967 characters,
+/// 409 of them replacements. A handler cannot detect that, and neither can the
+/// caller. Refusing is the only honest answer while the engine speaks strings.
+///
+/// Header values are dropped rather than refused. A non-ASCII header value is
+/// non-conformant to begin with, and one odd header should not sink an
+/// otherwise valid request — but it must not be silently mangled either, so an
+/// unreadable value is absent rather than corrupted.
 fn to_engine_request(
     method: &str,
     headers: &HeaderMap,
     query: HashMap<String, String>,
     params: BTreeMap<String, String>,
     body: Bytes,
-) -> HttpRequest {
-    HttpRequest {
+) -> Result<HttpRequest, Box<Response>> {
+    let body = String::from_utf8(body.to_vec()).map_err(|e| {
+        let at = e.utf8_error().valid_up_to();
+        Box::new(err(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            format!(
+                "request body is not valid UTF-8 (first bad byte at offset {at} of {}). \
+                 Functions receive the body as text, so binary payloads cannot be passed \
+                 through unchanged — send them base64-encoded inside JSON instead.",
+                e.as_bytes().len()
+            ),
+        ))
+    })?;
+    Ok(HttpRequest {
         method: method.to_string(),
         headers: headers
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_string(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_string(), value.to_string()))
             })
             .collect(),
         query: query.into_iter().collect::<BTreeMap<_, _>>(),
         params,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    }
+        body,
+    })
 }
 
 // ----------------------------------------------------------------- data API
@@ -485,7 +509,10 @@ async fn serve_function(
         )
             .into_response();
     }
-    let request = to_engine_request(method.as_str(), &headers, query, params, body);
+    let request = match to_engine_request(method.as_str(), &headers, query, params, body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
     match execute_serialized(
         &state,
         &name,
@@ -522,7 +549,10 @@ async fn call_run(
             None => return err(StatusCode::NOT_FOUND, "not_found", "no such run"),
         }
     };
-    let request = to_engine_request("POST", &headers, query, BTreeMap::new(), body);
+    let request = match to_engine_request("POST", &headers, query, BTreeMap::new(), body) {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
     let key = format!("run:{id}");
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, None).await;
     let limits = limits_for_plan(&state, &plan.limits);
