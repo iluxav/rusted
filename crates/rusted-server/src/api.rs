@@ -1189,12 +1189,24 @@ fn mcp_tools() -> Value {
     json!([{
         "name": "execute",
         "description":
-            "Execute JavaScript on rusted and return its result plus console output. \
-             Write an ES module with `export default async function handler(request, context)`. \
-             Read the input with `await request.json()` and reply with `context.json(value)`. \
-             `fetch` is available for outbound HTTP. Run code close to the data and return only \
-             what you need, so large payloads never enter your context. Execution is sandboxed \
-             and time- and memory-capped; there is no filesystem and no process access.",
+            "Run JavaScript on a remote sandbox and get back its result and console output. \
+             \n\nUse this to work with data without pulling it into context: fetch, filter, \
+             aggregate or reshape at the source and return only the answer. A response too \
+             large to read is fine here — return the few fields you actually need.\
+             \n\nWrite one ES module:\n\
+             export default async function handler(request, context) {\n\
+             \u{0020}const input = await request.json();   // whatever you passed as `input`\n\
+             \u{0020}const r = await fetch('https://api.example.com/thing');\n\
+             \u{0020}const data = await r.json();\n\
+             \u{0020}return context.json({ answer: data.items.length });\n\
+             }\
+             \n\nAvailable: fetch (http/https, text and JSON only), console.log/warn/error, \
+             and standard ES2020 — JSON, RegExp, Date, Math, Intl.\
+             \n\nNot available: import (send self-contained code; nothing is resolved at \
+             runtime), node built-ins, the filesystem, processes, and addresses on private \
+             networks. Execution is time- and memory-capped, so an endless loop is stopped \
+             rather than hanging. Failures come back as the error message and stack, which \
+             you can read and correct.",
         "inputSchema": {
             "type": "object",
             "properties": {
