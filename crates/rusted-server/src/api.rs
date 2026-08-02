@@ -1201,12 +1201,18 @@ fn mcp_tools() -> Value {
              \u{0020}return context.json({ answer: data.items.length });\n\
              }\
              \n\nAvailable: fetch (http/https, text and JSON only), console.log/warn/error, \
-             and standard ES2020 — JSON, RegExp, Date, Math, Intl.\
-             \n\nNot available: import (send self-contained code; nothing is resolved at \
-             runtime), node built-ins, the filesystem, processes, and addresses on private \
-             networks. Execution is time- and memory-capped, so an endless loop is stopped \
-             rather than hanging. Failures come back as the error message and stack, which \
-             you can read and correct.",
+             and the ECMAScript standard library — JSON, RegExp, Date, Math, Map, Set, \
+             Promise, BigInt, Proxy, Reflect, btoa/atob.\
+             \n\nNot available, so do it by hand: URL and URLSearchParams (parse with \
+             string operations or a regex), setTimeout and timers of any kind, crypto, \
+             TextEncoder/TextDecoder, Intl, Buffer, Blob, FormData, AbortController, and \
+             the Headers/Request/Response classes — `fetch` takes and returns plain \
+             objects here.\
+             \n\nAlso not available: import — nothing is resolved at runtime, so send \
+             self-contained code — node built-ins, the filesystem, processes, and addresses \
+             on private networks. Execution is time- and memory-capped, so an endless loop \
+             is stopped rather than hanging. Failures come back as the error message and \
+             stack, which you can read and correct.",
         "inputSchema": {
             "type": "object",
             "properties": {
