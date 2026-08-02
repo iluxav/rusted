@@ -77,23 +77,34 @@ pub struct AppState {
     pub debug: bool,
 }
 
-/// Heap ceiling one invocation may reach. Slots are bounded so that this many
-/// concurrent invocations cannot exhaust the machine.
-const HEAP_PER_INVOCATION: usize = 32 * 1024 * 1024;
+/// Memory set aside per slot when sizing them.
+///
+/// Deliberately below the engine's 32 MB heap ceiling. An invocation is
+/// entitled to that much, but reaching it is rare: 16 concurrent in-flight
+/// invocations grew the process by 2.2 MB, about 140 KB each. Reserving the
+/// ceiling would cap concurrency roughly 230x below what the machine can carry.
+/// 8 MB keeps ~57x headroom over what was measured, and the swap the runbook
+/// provisions absorbs the case where many invocations do reach the ceiling at
+/// once — degrading rather than killing the box.
+const MEMORY_RESERVED_PER_SLOT: usize = 8 * 1024 * 1024;
 
 /// How many invocations may be in flight at once.
 ///
 /// Sizing this from core count treats every handler as CPU-bound, which the
 /// interesting ones are not: a handler awaiting `fetch` holds its slot while
-/// using no CPU at all. Measured on a 1-vCPU server, a handler waiting 73ms on
-/// an API used 8ms of CPU and the server topped out at 29 requests/second with
-/// two thirds of the CPU idle — while the same box served 588/s of CPU-bound
-/// JavaScript and 703/s of plain HTTP. The semaphore, not the hardware, was
-/// the ceiling.
+/// using no CPU at all. Measured on a 2-core server, one waiting on a 1-second
+/// API used 2.52ms of CPU per invocation and the server topped out at 15
+/// requests/second — rejecting traffic with 85% of the CPU idle.
 ///
-/// So slots are sized for waiting, and bounded by memory rather than cores,
-/// because memory is what concurrent invocations genuinely compete for.
-/// `RUSTED_WORKERS` overrides it for a box that knows better.
+/// Raising slots costs nothing when handlers are CPU-bound. Across 16, 32, 64
+/// and 128 slots, a no-fetch handler held steady at 858-941 req/s with p99
+/// between 124ms and 138ms — noise — while the slow-upstream handler went from
+/// 16 req/s (and 272 rejections) to 59 with none. The OS scheduler handles
+/// contention better than admission control does.
+///
+/// So slots are sized for waiting and bounded by memory, with core count as a
+/// floor so CPU-bound work is never worse off than before. `RUSTED_WORKERS`
+/// overrides it for a box that knows better.
 pub fn worker_slots() -> usize {
     if let Some(explicit) = std::env::var("RUSTED_WORKERS")
         .ok()
@@ -106,15 +117,14 @@ pub fn worker_slots() -> usize {
         .map(|n| n.get())
         .unwrap_or(2);
     // Room for waiting, since that is where the time goes.
-    let by_cpu = cores * 8;
-    // But never more concurrent invocations than the heap could feed. Where
-    // memory cannot be read, assume something modest rather than unbounded.
+    let by_cpu = cores * 32;
+    // But never more concurrent invocations than memory can carry. Where it
+    // cannot be read, assume something modest rather than unbounded.
     let by_memory = usable_memory_bytes()
-        .map(|bytes| (bytes / 2) / HEAP_PER_INVOCATION)
-        .unwrap_or(cores * 4);
-    // Never fewer than cores: that was the old sizing, and it is the floor for
-    // CPU-bound work regardless of what memory says.
-    by_cpu.min(by_memory).max(cores).clamp(4, 64)
+        .map(|bytes| (bytes / 2) / MEMORY_RESERVED_PER_SLOT)
+        .unwrap_or(cores * 8);
+    // Never fewer than cores: that is the floor for CPU-bound work.
+    by_cpu.min(by_memory).max(cores).clamp(4, 256)
 }
 
 /// Memory the OS reports as available, on the platforms where asking is cheap.
