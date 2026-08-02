@@ -33,6 +33,7 @@ export default async function handler(request, context) {
 EOF
 
 rusted push greet.js --name greet        # → http://127.0.0.1:7411/f/greet
+                                         # (imports are bundled on the way)
 curl -X POST http://127.0.0.1:7411/f/greet -d '{"name":"Ada"}'
 # {"message":"Hello, Ada"}
 
@@ -148,9 +149,10 @@ The runtime executes exactly one file — `import` is rejected at push time. `ru
 ```bash
 npm install yaml          # install what you import
 rusted run index.js       # develop against it
-rusted build index.js     # → dist/index.js
-rusted push dist/index.js --name my-fn
+rusted push index.js      # deploy it — bundled on the way
 ```
+
+`rusted build index.js` writes `dist/index.js` if you want the artifact itself, for CI or inspection.
 
 Bundling targets a neutral platform, so a dependency reaching for a Node builtin (`fs`, `http`, …) fails at build time rather than at runtime — those don't exist here. Pure-JS libraries work; keep an eye on bundle size, since source-size limits are part of the platform's design.
 

@@ -1,7 +1,7 @@
 //! The `rusted` binary: `serve` embeds the server; every other subcommand is a
 //! thin client of its admin API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -239,7 +239,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             ref methods,
             ref path,
         } => {
-            let source = read_script(file)?;
+            let source = deployable_source(file)?;
             let mut payload = json!({ "source": source, "type": trigger_type });
             if let Some(name) = name {
                 payload["name"] = json!(name);
@@ -309,7 +309,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             sourcemap,
         } => build_bundle(file.clone(), out.clone(), sourcemap),
         Cmd::Preview { ref file, ttl } => {
-            let source = read_script(file)?;
+            let source = deployable_source(file)?;
             let mut body = json!({ "source": source });
             if let Some(ttl) = ttl {
                 body["ttl_seconds"] = json!(ttl);
@@ -351,7 +351,8 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             }
         }
         Cmd::Verify { ref file } => {
-            let source = read_script(file)?;
+            // Check what would deploy, not the source before bundling.
+            let source = deployable_source(file)?;
             let v = api(
                 &cli,
                 Method::POST,
@@ -454,8 +455,14 @@ fn dispatch(cli: Cli) -> Result<(), String> {
     }
 }
 
-fn read_script(path: &PathBuf) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+/// What actually gets deployed: bundled when the file has imports, so `push`
+/// takes the same source `run` does rather than demanding a built artifact.
+fn deployable_source(path: &Path) -> Result<String, String> {
+    if !path.exists() {
+        return Err(format!("cannot read {}: no such file", path.display()));
+    }
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    rt.block_on(rusted_server::bundler::source_for(path))
 }
 
 /// Calls the admin API; non-2xx responses become Err with the server's JSON
