@@ -7,12 +7,44 @@ Caddy is the only container with published ports. rusted itself is reachable
 only on the compose network — a server whose job is executing other people's
 code should not be the thing facing the internet.
 
+## Creating the server
+
+```bash
+brew install hcloud
+export HCLOUD_TOKEN=...          # read/write, in a Hetzner project used only for rusted
+./provision.sh ~/.ssh/id_ed25519.pub
+```
+
+That creates a **CAX11** (2 vCPU ARM, 4 GB, ~€3.8/mo — ARM because we publish
+`aarch64` builds and every image in the stack has one), attaches a firewall
+allowing only 22, 80 and 443, and boots it with `cloud-init.yaml`. The machine
+arrives with Docker installed, root login and password auth disabled, `ufw` and
+`fail2ban` running, unattended security upgrades on, 2 GB of swap so a spike
+degrades instead of OOM-killing Postgres, and this repository cloned.
+
+SSH is restricted to the address you provisioned from. Widen it when that
+changes:
+
+```bash
+hcloud firewall add-rule rusted-fw --direction in --protocol tcp --port 22 --source-ips <your-ip>/32
+```
+
+Once traffic is proxied through Cloudflare, narrowing 80/443 to [Cloudflare's
+ranges](https://www.cloudflare.com/ips/) stops anyone reaching your origin
+directly and bypassing the edge.
+
+Turn on Hetzner's backups too — separate from `pg_dump`, and worth the ~€0.8:
+
+```bash
+hcloud server enable-backup rusted
+```
+
 ## First deploy
 
 ```bash
-# on the server
-git clone https://github.com/iluxav/rusted.git && cd rusted/deploy
-cp .env.example .env && $EDITOR .env     # domain, password, GitHub OAuth
+ssh rusted@<ip>
+cd ~/rusted/deploy
+$EDITOR .env                             # domain, password, GitHub OAuth
 ```
 
 ### Certificate
