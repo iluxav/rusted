@@ -475,9 +475,10 @@ async fn dispatch(
     let executor = state.executor.clone();
     let limits = state.limits.clone();
     let script_bytes = source.len();
-    let result = tokio::task::spawn_blocking(move || executor.execute(&source, &request, &limits))
-        .await
-        .expect("executor thread never panics");
+    // The same async path the deployed server uses, so what you see locally is
+    // what happens in production — including fetches overlapping rather than
+    // holding the thread.
+    let result = executor.execute_async(&source, &request, &limits).await;
 
     let stack = result
         .stack

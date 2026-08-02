@@ -169,11 +169,14 @@ async fn execute_raw(
     .expect("semaphore never closed");
 
     let executor = state.executor.clone();
-    Ok(
-        tokio::task::spawn_blocking(move || executor.execute(&source, &request, &limits))
-            .await
-            .expect("executor thread never panics"),
-    )
+    // Handed to the execution runtime rather than run here: JavaScript between
+    // await points blocks whichever thread drives it, and that must not be a
+    // thread serving HTTP.
+    Ok(state
+        .exec_runtime
+        .spawn(async move { executor.execute_async(&source, &request, &limits).await })
+        .await
+        .expect("executor task never panics"))
 }
 
 /// Runs `source` with concurrency 1 per `key` and records the invocation.

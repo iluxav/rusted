@@ -61,6 +61,15 @@ pub struct AppState {
     pub fn_locks: Mutex<HashMap<String, (usize, Arc<tokio::sync::Semaphore>)>>,
     pub records: Mutex<HashMap<String, VecDeque<InvocationRecord>>>,
     pub executor: Arc<QuickJsExecutor>,
+    /// Where handlers run.
+    ///
+    /// Separate from the runtime serving HTTP on purpose. Between await points
+    /// JavaScript executes synchronously, so a CPU-heavy handler occupies
+    /// whatever thread is driving it — and on the HTTP runtime that would be a
+    /// worker that should be answering requests, including the 429s that shed
+    /// load. Isolating execution keeps a runaway handler from making the server
+    /// unreachable, while awaits still release the thread to other invocations.
+    pub exec_runtime: Arc<ExecRuntime>,
     pub limits: Limits,
     /// Caps how many invocations run on worker threads at once.
     pub exec_slots: Arc<tokio::sync::Semaphore>,
@@ -139,6 +148,36 @@ fn usable_memory_bytes() -> Option<usize> {
         .map(|kb| kb * 1024)
 }
 
+/// Owns the execution runtime and shuts it down without blocking.
+///
+/// Dropping a tokio runtime waits for its threads, which panics if it happens
+/// inside another runtime — and `AppState` is routinely dropped from async
+/// code, including at the end of every test. Shutting down in the background
+/// gives up that wait, which is what a process that is finishing anyway wants.
+pub struct ExecRuntime(Option<tokio::runtime::Runtime>);
+
+impl ExecRuntime {
+    fn new(runtime: tokio::runtime::Runtime) -> Self {
+        Self(Some(runtime))
+    }
+
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.0.as_ref().expect("runtime is alive").spawn(future)
+    }
+}
+
+impl Drop for ExecRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl AppState {
     pub fn new(
         store: Store,
@@ -162,6 +201,21 @@ impl AppState {
             fn_locks: Mutex::new(HashMap::new()),
             records: Mutex::new(HashMap::new()),
             executor: Arc::new(QuickJsExecutor::new()),
+            exec_runtime: Arc::new(ExecRuntime::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    // Sized by cores, not by slots: this bounds parallel
+                    // *execution*, while slots bound how many invocations may be
+                    // in flight, most of them waiting on the network.
+                    .worker_threads(
+                        std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(2),
+                    )
+                    .thread_name("rusted-exec")
+                    .enable_all()
+                    .build()
+                    .expect("execution runtime"),
+            )),
             limits: Limits::default(),
             exec_slots: Arc::new(tokio::sync::Semaphore::new(workers)),
             data_addr: OnceLock::new(),
