@@ -9,6 +9,35 @@ code should not be the thing facing the internet.
 
 ## Creating the server
 
+Two scripts, same result — pick your provider. Everything after this section is
+identical either way.
+
+### DigitalOcean
+
+```bash
+brew install doctl && doctl auth init
+./provision-do.sh ~/.ssh/id_ed25519.pub
+```
+
+Creates an `s-1vcpu-2gb` droplet ($12/mo) in `fra1` with a firewall allowing
+only 22, 80 and 443. That size is comfortable for demos and light traffic; one
+vCPU becomes the limit when several CPU-heavy functions run at once, since
+executing JavaScript is CPU-bound with no I/O to hide behind.
+
+Growing later is a reboot, and reversible:
+
+```bash
+doctl compute droplet-action power-off rusted --wait
+doctl compute droplet-action resize rusted --size s-2vcpu-4gb --wait
+doctl compute droplet-action power-on rusted --wait
+```
+
+CPU and RAM resize both ways. Adding `--resize-disk` grows the disk as well and
+**cannot be undone** — the droplet can never shrink again, so leave it off
+unless you actually need the space.
+
+### Hetzner
+
 ```bash
 brew install hcloud
 export HCLOUD_TOKEN=...          # read/write, in a Hetzner project used only for rusted
