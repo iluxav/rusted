@@ -63,6 +63,7 @@ pub fn router(state: WebState) -> Router {
         .route("/auth/github", get(auth_github))
         .route("/auth/github/callback", get(auth_github_callback))
         .route("/logout", get(logout))
+        .route("/device", get(device_page).post(device_decide))
         .route("/console", get(console_home))
         .route("/console/dashboard", get(page_dashboard))
         .route("/console/invocations", get(page_invocations))
@@ -201,15 +202,25 @@ async fn auth_github_callback(
         Ok(token) => token,
         Err(e) => return login_error(&format!("creating your session failed: {e}")),
     };
+    let next = cookie_value(&headers, "rusted_after_login")
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .unwrap_or("/console")
+        .to_string();
     (
-        [(
-            SET_COOKIE,
-            format!(
-                "{}={session}; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax",
-                auth::SESSION_COOKIE
+        [
+            (
+                SET_COOKIE,
+                format!(
+                    "{}={session}; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax",
+                    auth::SESSION_COOKIE
+                ),
             ),
-        )],
-        Redirect::to("/console"),
+            (
+                SET_COOKIE,
+                "rusted_after_login=; Path=/; Max-Age=0".to_string(),
+            ),
+        ],
+        Redirect::to(&next),
     )
         .into_response()
 }
@@ -237,7 +248,92 @@ async fn logout(State(state): State<WebState>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
+// ------------------------------------------------------------ device sign-in
+
+#[derive(Deserialize)]
+struct DeviceQuery {
+    #[serde(default)]
+    code: String,
+}
+
+/// Signing in first means the approval screen always knows who is approving.
+fn device_login_redirect(code: &str) -> Response {
+    Redirect::to(&format!("/login?next=/device%3Fcode%3D{code}")).into_response()
+}
+
+async fn device_page(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<DeviceQuery>,
+) -> Response {
+    if current_user(&state, &headers).await.is_none() {
+        return device_login_redirect(&query.code);
+    }
+    let code = query.code.trim().to_uppercase();
+    let step = if code.is_empty() {
+        DeviceState::Prompt
+    } else {
+        match crate::device::lookup(&state.0.app.pool, &code).await {
+            Ok(Some(request)) => DeviceState::Confirm(request.label),
+            _ => DeviceState::Unknown,
+        }
+    };
+    Html(
+        DeviceT { state: step, code }
+            .render()
+            .expect("device renders"),
+    )
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct DeviceDecision {
+    user_code: String,
+    decision: String,
+}
+
+async fn device_decide(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Form(form): Form<DeviceDecision>,
+) -> Response {
+    let code = form.user_code.trim().to_uppercase();
+    let Some(user) = current_user(&state, &headers).await else {
+        return device_login_redirect(&code);
+    };
+    // Only the confirmation screen posts a decision: entering a code is a GET
+    // that shows what is being asked for, so nobody grants access by reflex.
+    let approve = form.decision == "approve";
+    let step = match crate::device::decide(&state.0.app.pool, &code, user.id, approve).await {
+        Ok(true) if approve => DeviceState::Approved,
+        Ok(true) => DeviceState::Denied,
+        _ => DeviceState::Unknown,
+    };
+    Html(
+        DeviceT { state: step, code }
+            .render()
+            .expect("device renders"),
+    )
+    .into_response()
+}
+
 // ------------------------------------------------------------------- templates
+
+/// Which step of connecting a device the human is looking at.
+pub enum DeviceState {
+    Prompt,
+    Confirm(String),
+    Approved,
+    Denied,
+    Unknown,
+}
+
+#[derive(Template)]
+#[template(path = "device.html")]
+struct DeviceT {
+    state: DeviceState,
+    code: String,
+}
 
 #[derive(Template)]
 #[template(path = "landing.html")]
@@ -399,21 +495,39 @@ async fn landing() -> Html<String> {
     Html(LandingT.render().expect("landing renders"))
 }
 
-async fn login(State(state): State<WebState>) -> Html<String> {
+#[derive(Deserialize)]
+struct LoginQuery {
+    #[serde(default)]
+    next: Option<String>,
+}
+
+async fn login(State(state): State<WebState>, Query(query): Query<LoginQuery>) -> Response {
     let callback_url = state
         .0
         .oauth
         .as_ref()
         .map(|o| o.callback_url.clone())
         .unwrap_or_else(|| "http://127.0.0.1:7412/auth/github/callback".to_string());
-    Html(
-        LoginT {
-            configured: state.0.oauth.is_some(),
-            callback_url,
+    // Remembered across the round trip to GitHub so sign-in returns the human
+    // to whatever they were doing.
+    let cookie = match query.next.as_deref().filter(|n| n.starts_with('/')) {
+        Some(next) => {
+            format!("rusted_after_login={next}; Path=/; HttpOnly; Max-Age=600; SameSite=Lax")
         }
-        .render()
-        .expect("login renders"),
+        None => "rusted_after_login=; Path=/; Max-Age=0".to_string(),
+    };
+    (
+        [(SET_COOKIE, cookie)],
+        Html(
+            LoginT {
+                configured: state.0.oauth.is_some(),
+                callback_url,
+            }
+            .render()
+            .expect("login renders"),
+        ),
     )
+        .into_response()
 }
 
 /// Resolves the signed-in user or produces the redirect to /login.

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Connect a device — rusted{% endblock %}
+{% block body %}
+<div class="flex min-h-full items-center justify-center px-5 py-12">
+  <div class="w-full max-w-md">
+    <a href="/console" class="mb-9 flex items-center justify-center gap-2.5 font-display text-xl font-bold tracking-[-0.04em] text-cream">
+      <span class="flex h-8 w-8 items-center justify-center rounded-md border border-ember/30 bg-ember/10 font-mono text-sm text-ember">r_</span>
+      rusted
+    </a>
+
+    <div class="surface rounded-2xl p-7 sm:p-8">
+      {% match state %}
+      {% when DeviceState::Prompt %}
+      <p class="eyebrow mb-3">Connect a device</p>
+      <h1 class="page-title text-[1.6rem]">Enter the code</h1>
+      <p class="mt-3 text-sm leading-relaxed text-clay">Type the code shown in your terminal.</p>
+      <!-- GET, not POST: entering a code shows what it wants, it never grants. -->
+      <form method="get" action="/device" class="mt-7 space-y-4">
+        <input name="code" value="{{ code }}" autofocus autocomplete="off" spellcheck="false"
+               placeholder="XXXX-XXXX"
+               class="field w-full px-4 py-3 text-center font-mono text-lg uppercase tracking-[0.3em] text-cream">
+        <button class="btn-primary w-full justify-center py-3 text-sm">Continue</button>
+      </form>
+
+      {% when DeviceState::Confirm with (label) %}
+      <p class="eyebrow mb-3">Connect a device</p>
+      <h1 class="page-title text-[1.6rem]">Allow <span class="font-mono text-[1.3rem] text-ember">{{ label }}</span>?</h1>
+      <p class="mt-3 text-sm leading-relaxed text-clay">
+        It will get an API key that can deploy, invoke, and delete your functions. You can revoke it any time from
+        <a href="/console/keys" class="text-ember hover:text-ember-soft">API keys</a>.
+      </p>
+      <div class="mt-6 rounded-lg border border-copper/20 bg-rust-950 px-4 py-3 text-center font-mono text-base tracking-[0.3em] text-cream">{{ code }}</div>
+      <form method="post" action="/device" class="mt-7 flex gap-3">
+        <input type="hidden" name="user_code" value="{{ code }}">
+        <button name="decision" value="deny" class="btn-ghost flex-1 justify-center py-3 text-sm">Not me</button>
+        <button name="decision" value="approve" class="btn-primary flex-1 justify-center py-3 text-sm">Allow</button>
+      </form>
+
+      {% when DeviceState::Approved %}
+      <p class="eyebrow mb-3">Connected</p>
+      <h1 class="page-title text-[1.6rem]">You're all set.</h1>
+      <p class="mt-3 text-sm leading-relaxed text-clay">Your terminal has the key. You can close this tab.</p>
+      <a href="/console" class="btn-primary mt-7 w-full justify-center py-3 text-sm">Open the console</a>
+
+      {% when DeviceState::Denied %}
+      <p class="eyebrow mb-3">Declined</p>
+      <h1 class="page-title text-[1.6rem]">Nothing was shared.</h1>
+      <p class="mt-3 text-sm leading-relaxed text-clay">No key was created. If that wasn't you, nothing more is needed.</p>
+
+      {% when DeviceState::Unknown %}
+      <p class="eyebrow mb-3">Connect a device</p>
+      <h1 class="page-title text-[1.6rem]">That code didn't work.</h1>
+      <p class="mt-3 text-sm leading-relaxed text-clay">Codes expire after ten minutes and can only be used once. Run the command again for a fresh one.</p>
+      <a href="/device" class="btn-ghost mt-7 w-full justify-center py-3 text-sm">Try another code</a>
+      {% endmatch %}
+    </div>
+  </div>
+</div>
+{% endblock %}
