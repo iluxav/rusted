@@ -511,3 +511,30 @@ fn responses_without_an_init_are_unchanged() {
     assert_eq!(r.status, None, "no status means the platform's default");
     assert!(r.headers.is_empty());
 }
+
+/// Exhausting the heap with many small objects, rather than one big string,
+/// leaves QuickJS unable to allocate even the Error it wants to throw — the
+/// caught value comes back as `null`. Reporting that verbatim tells a
+/// developer nothing about what went wrong.
+#[test]
+fn memory_exhaustion_by_small_objects_says_it_was_memory() {
+    let src = r#"export default async function handler() {
+        const a = [];
+        for (let i = 0; i < 5000000; i++) a.push({ id: i, name: "n" + i, ok: i % 2 === 0 });
+        return String(a.length);
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    match &r.outcome {
+        Outcome::Terminated(reason) => {
+            assert!(
+                reason.to_lowercase().contains("memory"),
+                "should name memory as the cause, got: {reason}"
+            );
+            assert!(
+                !reason.contains("null"),
+                "should not surface a bare null, got: {reason}"
+            );
+        }
+        o => panic!("expected Terminated for an out-of-memory run, got {o:?}"),
+    }
+}

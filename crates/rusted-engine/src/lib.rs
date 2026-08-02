@@ -386,6 +386,24 @@ fn classify(msg: String) -> Outcome {
     classify_with(msg, false)
 }
 
+/// A failure QuickJS could not describe: no message and no stack.
+///
+/// Exhausting the heap leaves nothing to build an `Error` with, so the thrown
+/// value arrives as a bare `null` and the cause is lost. Reporting that
+/// verbatim gives a developer nothing to act on.
+///
+/// Asking the allocator afterwards does not work — unwinding frees the heap
+/// before the outcome is inspected, and it reads ~110 KB of 32 MB. A tracking
+/// allocator would give a true high-water mark, but that means `unsafe` code on
+/// every allocation in a runtime that executes other people's scripts, which is
+/// too much risk for an error message.
+///
+/// So this matches the signature. Throwing a non-`Error` value produces the
+/// same shape, which the wording acknowledges rather than papering over.
+fn is_valueless_failure(msg: &str, stack: Option<&String>) -> bool {
+    stack.is_none() && matches!(msg.trim(), "null" | "undefined" | "")
+}
+
 fn classify_with(msg: String, expired: bool) -> Outcome {
     let lower = msg.to_lowercase();
     // rquickjs reports an unsettled promise as a "dead lock". After the
@@ -611,6 +629,20 @@ impl Executor for QuickJsExecutor {
                 ),
             }
         });
+
+        // A failure with neither message nor stack is what running out of heap
+        // looks like from here.
+        let outcome = match &outcome {
+            Outcome::Error(msg) if is_valueless_failure(msg, stack.as_ref()) => {
+                Outcome::Terminated(format!(
+                    "memory limit: the handler failed with no error value, which is what \
+                     exceeding the {} MB heap looks like (throwing a non-Error value is \
+                     indistinguishable from here)",
+                    limits.memory_bytes / (1024 * 1024)
+                ))
+            }
+            _ => outcome,
+        };
 
         InvocationResult {
             outcome,
