@@ -989,3 +989,56 @@ fn an_unreachable_server_says_how_to_point_somewhere_else() {
         .failure()
         .stderr(predicates::str::contains("RUSTED_ADMIN"));
 }
+
+// --- scaffolding ---------------------------------------------------------------
+
+#[test]
+fn new_scaffolds_a_project_that_builds() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["new", "greet"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let root = dir.path().join("greet");
+    for f in ["index.ts", "rusted.d.ts", "tsconfig.json", "package.json"] {
+        assert!(root.join(f).is_file(), "{f} was not created");
+    }
+
+    // The scaffold is the first thing a new user runs; it has to actually work.
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["build", "index.ts", "-o", "dist/index.js"])
+        .current_dir(&root)
+        .assert()
+        .success();
+    assert!(root.join("dist/index.js").is_file());
+
+    // And the name it declares should match the folder they asked for.
+    let source = std::fs::read_to_string(root.join("index.ts")).unwrap();
+    assert!(source.contains("greet"), "config does not name the project");
+}
+
+#[test]
+fn new_refuses_to_overwrite_existing_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("taken");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::write(existing.join("index.ts"), "// mine").unwrap();
+
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["new", "taken"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("exists"));
+
+    // Whatever was there must survive.
+    assert_eq!(
+        std::fs::read_to_string(existing.join("index.ts")).unwrap(),
+        "// mine"
+    );
+}
