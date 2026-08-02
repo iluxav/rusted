@@ -443,3 +443,71 @@ fn a_promise_that_never_settles_reads_as_a_timeout() {
         o => panic!("expected Terminated, got {o:?}"),
     }
 }
+
+#[test]
+fn a_handler_can_choose_its_status_and_headers() {
+    let src = r#"export default async function handler(request, context) {
+        return context.json({ queued: true }, {
+            status: 202,
+            headers: { "mcp-session-id": "abc123", "Cache-Control": "no-store" },
+        });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(success(&r.outcome), r#"{"queued":true}"#);
+    assert_eq!(r.status, Some(202));
+    // Names are normalised, so casing in the handler doesn't matter.
+    assert_eq!(r.headers.get("mcp-session-id").unwrap(), "abc123");
+    assert_eq!(r.headers.get("cache-control").unwrap(), "no-store");
+}
+
+#[test]
+fn framing_headers_cannot_be_overridden() {
+    for header in ["content-length", "Transfer-Encoding", "connection"] {
+        let src = format!(
+            r#"export default async function handler(request, context) {{
+                return context.text("x", {{ headers: {{ "{header}": "0" }} }});
+            }}"#
+        );
+        let r = exec().execute(&src, &HttpRequest::post_json("{}"), &Limits::default());
+        match &r.outcome {
+            Outcome::Error(message) => {
+                assert!(message.contains("cannot be overridden"), "{message}")
+            }
+            o => panic!("{header} should be refused, got {o:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_header_value_cannot_smuggle_a_second_header() {
+    let src = r#"export default async function handler(request, context) {
+        return context.text("x", { headers: { "x-note": "ok\r\nx-injected: yes" } });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    match &r.outcome {
+        Outcome::Error(message) => assert!(message.contains("line break"), "{message}"),
+        o => panic!("expected refusal, got {o:?}"),
+    }
+}
+
+#[test]
+fn an_impossible_status_is_reported_rather_than_ignored() {
+    let src = r#"export default async function handler(request, context) {
+        return context.text("x", { status: 999 });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    match &r.outcome {
+        Outcome::Error(message) => assert!(message.contains("999"), "{message}"),
+        o => panic!("expected an error naming the status, got {o:?}"),
+    }
+}
+
+#[test]
+fn responses_without_an_init_are_unchanged() {
+    let src = r#"export default async function handler(request, context) {
+        return context.json({ ok: true });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(r.status, None, "no status means the platform's default");
+    assert!(r.headers.is_empty());
+}

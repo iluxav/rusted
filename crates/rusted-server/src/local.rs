@@ -493,9 +493,10 @@ async fn dispatch(
 
     // Unlike the deployed data plane, local dev returns the real error: the
     // only caller is the developer who wrote it.
-    match result.outcome {
+    match &result.outcome {
         Outcome::Success(body) => {
-            let content_type = result.content_type.unwrap_or_else(|| {
+            let body = body.clone();
+            let content_type = result.content_type.clone().unwrap_or_else(|| {
                 if serde_json::from_str::<serde_json::Value>(&body).is_ok() {
                     "application/json"
                 } else {
@@ -503,7 +504,19 @@ async fn dispatch(
                 }
                 .to_string()
             });
-            (StatusCode::OK, [(CONTENT_TYPE, content_type)], body).into_response()
+            let status =
+                StatusCode::from_u16(result.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
+            let mut response = (status, [(CONTENT_TYPE, content_type)], body).into_response();
+            let out = response.headers_mut();
+            for (name, value) in &result.headers {
+                if let (Ok(name), Ok(value)) = (
+                    axum::http::HeaderName::try_from(name.as_str()),
+                    axum::http::HeaderValue::try_from(value.as_str()),
+                ) {
+                    out.insert(name, value);
+                }
+            }
+            response
         }
         Outcome::Terminated(reason) => (
             StatusCode::TOO_MANY_REQUESTS,
