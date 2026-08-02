@@ -153,6 +153,15 @@ async fn execute_raw(
     request: HttpRequest,
     limits: rusted_engine::Limits,
 ) -> Result<InvocationResult, Response> {
+    // Before queueing for a slot: if the process is already using more memory
+    // than it should, another invocation makes that worse rather than better.
+    if !state.memory.has_headroom() {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "memory_pressure",
+            "the server is using too much memory to start another invocation; retry shortly",
+        ));
+    }
     let slots = state.exec_slots.clone();
     let _slot = tokio::time::timeout(
         Duration::from_millis(state.queue_wait_ms),
