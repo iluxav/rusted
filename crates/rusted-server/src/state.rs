@@ -77,6 +77,58 @@ pub struct AppState {
     pub debug: bool,
 }
 
+/// Heap ceiling one invocation may reach. Slots are bounded so that this many
+/// concurrent invocations cannot exhaust the machine.
+const HEAP_PER_INVOCATION: usize = 32 * 1024 * 1024;
+
+/// How many invocations may be in flight at once.
+///
+/// Sizing this from core count treats every handler as CPU-bound, which the
+/// interesting ones are not: a handler awaiting `fetch` holds its slot while
+/// using no CPU at all. Measured on a 1-vCPU server, a handler waiting 73ms on
+/// an API used 8ms of CPU and the server topped out at 29 requests/second with
+/// two thirds of the CPU idle — while the same box served 588/s of CPU-bound
+/// JavaScript and 703/s of plain HTTP. The semaphore, not the hardware, was
+/// the ceiling.
+///
+/// So slots are sized for waiting, and bounded by memory rather than cores,
+/// because memory is what concurrent invocations genuinely compete for.
+/// `RUSTED_WORKERS` overrides it for a box that knows better.
+pub fn worker_slots() -> usize {
+    if let Some(explicit) = std::env::var("RUSTED_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        return explicit;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    // Room for waiting, since that is where the time goes.
+    let by_cpu = cores * 8;
+    // But never more concurrent invocations than the heap could feed. Where
+    // memory cannot be read, assume something modest rather than unbounded.
+    let by_memory = usable_memory_bytes()
+        .map(|bytes| (bytes / 2) / HEAP_PER_INVOCATION)
+        .unwrap_or(cores * 4);
+    // Never fewer than cores: that was the old sizing, and it is the floor for
+    // CPU-bound work regardless of what memory says.
+    by_cpu.min(by_memory).max(cores).clamp(4, 64)
+}
+
+/// Memory the OS reports as available, on the platforms where asking is cheap.
+/// `None` elsewhere, which falls back to a conservative slot count.
+fn usable_memory_bytes() -> Option<usize> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kb| kb.parse::<usize>().ok())
+        .map(|kb| kb * 1024)
+}
+
 impl AppState {
     pub fn new(
         store: Store,
@@ -87,12 +139,7 @@ impl AppState {
         require_auth: bool,
         public_url: Option<String>,
     ) -> Self {
-        // JS execution is CPU-bound, so more workers than cores buys nothing
-        // but context switching. This is the ceiling on real parallelism; a
-        // plan's per-function allowance can exceed it, and the excess queues.
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get().clamp(2, 32))
-            .unwrap_or(4);
+        let workers = worker_slots();
         Self {
             store,
             pool,
@@ -142,4 +189,40 @@ pub fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod worker_slot_tests {
+    use super::*;
+
+    /// One test, because these all read the same environment variable and
+    /// cargo runs tests in parallel — separate tests would race each other.
+    #[test]
+    fn worker_slots_are_sized_for_waiting_and_overridable() {
+        std::env::remove_var("RUSTED_WORKERS");
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
+        let slots = worker_slots();
+
+        // A handler awaiting fetch holds a slot while using no CPU, so there
+        // must be meaningfully more slots than cores.
+        assert!(slots >= 4, "too few slots: {slots}");
+        assert!(
+            slots > cores || slots == 64,
+            "slots ({slots}) should exceed cores ({cores}) unless clamped"
+        );
+
+        // The override exists so a box can be tuned without a release.
+        std::env::set_var("RUSTED_WORKERS", "17");
+        assert_eq!(worker_slots(), 17);
+
+        // Nonsense falls through to the default rather than leaving the server
+        // with zero slots and refusing everything.
+        for bad in ["0", "-3", "banana", ""] {
+            std::env::set_var("RUSTED_WORKERS", bad);
+            assert!(worker_slots() >= 4, "'{bad}' left too few slots");
+        }
+        std::env::remove_var("RUSTED_WORKERS");
+    }
 }
