@@ -8,6 +8,8 @@ repository = "https://github.com/iluxav/rusted"
 
 [dependencies]
 rquickjs = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
 cpu-time = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
