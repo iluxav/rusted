@@ -109,6 +109,42 @@ Migrations apply on start. `RUSTED_VERSION` is pinned deliberately: an
 unattended `latest` is how a deployment changes without anyone deciding it
 should.
 
+## Reaching the database
+
+Postgres is published to the server's loopback only, so nothing external can
+see it and no firewall port is needed. Tunnel over the SSH you already have:
+
+```bash
+ssh -N -L 5432:localhost:5432 rusted@<ip>
+```
+
+Leave that running and connect locally as if the database were on your machine:
+
+```bash
+psql postgres://rusted:<POSTGRES_PASSWORD>@127.0.0.1:5432/rusted
+```
+
+TablePlus, DataGrip, and pgAdmin all speak SSH tunnelling natively — point them
+at `localhost:5432` over `rusted@<ip>` and skip the manual tunnel.
+
+For a quick look without any of that:
+
+```bash
+ssh rusted@<ip> 'cd rusted/deploy && docker compose exec -T db psql -U rusted rusted -c "select count(*) from functions"'
+```
+
+**Don't open 5432 in the firewall.** It buys you nothing the tunnel doesn't
+already give you, and it puts password-authenticated Postgres in front of the
+whole internet. If you genuinely need direct access — a managed BI tool, say —
+restrict it to that single source and require TLS:
+
+```bash
+hcloud firewall add-rule rusted-fw --direction in --protocol tcp --port 5432 --source-ips <their-ip>/32
+```
+
+and publish the port on `0.0.0.0` rather than loopback. Treat that as a
+deliberate exception, not the default.
+
 ## Backups
 
 Everything that matters is in Postgres — functions, keys, users, invocations.
