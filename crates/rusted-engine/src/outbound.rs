@@ -71,6 +71,15 @@ impl FetchResponse {
     }
 }
 
+/// How outbound requests identify themselves.
+///
+/// Not cosmetic: reqwest sends no User-Agent by default and ureq sends its own,
+/// so without this the two paths were refused by different services — httpbingo
+/// answered the blocking client and returned 402 to the async one. An explicit,
+/// identical identity keeps them interchangeable, and is politer than anonymous
+/// traffic.
+const USER_AGENT: &str = concat!("rusted/", env!("CARGO_PKG_VERSION"));
+
 /// One agent for the whole process, so its connection pool outlives any single
 /// invocation. A budget is built per invocation, so an agent owned by a budget
 /// would hand every handler a cold pool and a fresh TLS handshake per call —
@@ -269,7 +278,9 @@ impl OutboundBudget {
 
 /// http(s) only, and never to loopback/private/link-local addresses — a
 /// handler must not be able to reach the host's own network.
-fn vet_url(url: &str) -> Result<(), String> {
+/// Host and port a URL will actually connect to, with the scheme checked.
+/// Split out from resolution so the blocking and async paths share one parser.
+fn authority_of(url: &str) -> Result<(String, u16), String> {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return Err("only http and https URLs can be fetched".into());
@@ -287,11 +298,144 @@ fn vet_url(url: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("the URL has no host".into());
     }
-    let addresses: Vec<IpAddr> = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("cannot resolve {host}: {e}"))?
-        .map(|addr| addr.ip())
-        .collect();
+    Ok((host.to_string(), port))
+}
+
+/// One reqwest client for the process, mirroring the blocking agent: its pool
+/// outlives any single invocation, so a handler doing one fetch does not pay a
+/// TLS handshake per request.
+fn pooled_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                // Redirects are resolved by us, so every hop goes back through
+                // the guards rather than being followed blind.
+                .redirect(reqwest::redirect::Policy::none())
+                .pool_max_idle_per_host(8)
+                .user_agent(USER_AGENT)
+                .build()
+                .expect("reqwest client builds")
+        })
+        .clone()
+}
+
+impl OutboundBudget {
+    /// The async twin of [`OutboundBudget::perform`]. Same quota, same deadline,
+    /// same guards — but awaiting rather than blocking, so the worker thread is
+    /// free while the network is busy.
+    pub async fn perform_async(&self, request: FetchRequest) -> FetchResponse {
+        if self.policy.max_requests == 0 {
+            return FetchResponse::refused(
+                "fetch is not available on this plan — upgrade to enable outbound requests",
+            );
+        }
+        let used = self.used.fetch_add(1, Ordering::Relaxed);
+        if used >= self.policy.max_requests {
+            return FetchResponse::refused(format!(
+                "outbound request limit reached ({} per execution on this plan)",
+                self.policy.max_requests
+            ));
+        }
+        let Some(timeout) = self.effective_timeout() else {
+            return FetchResponse::refused(
+                "execution deadline reached before this fetch could start",
+            );
+        };
+        if let Err(reason) = vet_url_async(&request.url).await {
+            return FetchResponse::refused(reason);
+        }
+        let method = request
+            .method
+            .unwrap_or_else(|| "GET".into())
+            .to_uppercase();
+        if !matches!(
+            method.as_str(),
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"
+        ) {
+            return FetchResponse::refused(format!("unsupported method: {method}"));
+        }
+        let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+            return FetchResponse::refused(format!("unsupported method: {method}"));
+        };
+
+        let mut builder = pooled_client()
+            .request(method, &request.url)
+            .timeout(timeout);
+        for (k, v) in &request.headers {
+            builder = builder.header(k, v);
+        }
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+        }
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(e) => return FetchResponse::refused(format!("request failed: {e}")),
+        };
+
+        let status = response.status().as_u16();
+        let headers: std::collections::BTreeMap<String, String> = response
+            .headers()
+            .iter()
+            // A header value that is not readable text is dropped rather than
+            // coerced: absent is honest, mojibake is not.
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|value| (k.as_str().to_lowercase(), value.to_string()))
+            })
+            .collect();
+
+        // Streamed with a cap rather than buffered whole: an upstream must not
+        // be able to make us hold more than the plan allows.
+        let mut raw: Vec<u8> = Vec::new();
+        let mut response = response;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let room = self.policy.max_response_bytes.saturating_sub(raw.len());
+                    if room == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return FetchResponse::refused(format!("reading the response failed: {e}"))
+                }
+            }
+        }
+
+        let body = match String::from_utf8(raw) {
+            Ok(body) => body,
+            Err(e) => {
+                let ct = headers
+                    .get("content-type")
+                    .map(|v| format!(" (content-type: {v})"))
+                    .unwrap_or_default();
+                return FetchResponse::refused(format!(
+                    "the response is not valid UTF-8 text{ct}: {} bytes, first bad byte at \
+                     offset {}. fetch returns text, so binary responses cannot be read — \
+                     ask the upstream for a text or JSON representation.",
+                    e.as_bytes().len(),
+                    e.utf8_error().valid_up_to(),
+                ));
+            }
+        };
+
+        FetchResponse {
+            ok: (200..300).contains(&status),
+            status,
+            headers,
+            body,
+            error: None,
+        }
+    }
+}
+
+/// The verdict on a set of resolved addresses. Shared by both paths so a change
+/// to what counts as private cannot apply to only one of them.
+fn vet_addresses(host: &str, addresses: &[IpAddr]) -> Result<(), String> {
     if addresses.is_empty() {
         return Err(format!("cannot resolve {host}"));
     }
@@ -299,6 +443,27 @@ fn vet_url(url: &str) -> Result<(), String> {
         return Err(format!("{host} resolves to a private address"));
     }
     Ok(())
+}
+
+fn vet_url(url: &str) -> Result<(), String> {
+    let (host, port) = authority_of(url)?;
+    let addresses: Vec<IpAddr> = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve {host}: {e}"))?
+        .map(|addr| addr.ip())
+        .collect();
+    vet_addresses(&host, &addresses)
+}
+
+/// Same guard, resolving without blocking the executor.
+async fn vet_url_async(url: &str) -> Result<(), String> {
+    let (host, port) = authority_of(url)?;
+    let addresses: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| format!("cannot resolve {host}: {e}"))?
+        .map(|addr| addr.ip())
+        .collect();
+    vet_addresses(&host, &addresses)
 }
 
 fn is_private(ip: &IpAddr) -> bool {
