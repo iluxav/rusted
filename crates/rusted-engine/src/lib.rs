@@ -4,11 +4,16 @@
 //! console logs. QuickJS was chosen over Boa by measurement — see the README.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
-use rquickjs::{Context, Ctx, Function, Module, Promise, Runtime, Value};
+use rquickjs::{
+    AsyncContext, AsyncRuntime, Context, Ctx, Function, Module, Promise, Runtime, Value,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -130,7 +135,7 @@ pub trait Executor: Send + Sync {
 /// captured. Log entries are capped at 100 × 1KB.
 const FETCH_PRELUDE: &str = r#"(() => {
   globalThis.fetch = async (url, init) => {
-    const raw = globalThis.__rustedFetch(JSON.stringify({
+    const raw = await globalThis.__rustedFetch(JSON.stringify({
       url: String(url),
       method: init && init.method,
       headers: (init && init.headers) || {},
@@ -404,6 +409,74 @@ fn is_valueless_failure(msg: &str, stack: Option<&String>) -> bool {
     stack.is_none() && matches!(msg.trim(), "null" | "undefined" | "")
 }
 
+/// Turns a settled handler into an outcome.
+///
+/// Shared by the blocking and async executors on purpose: this is where the
+/// output cap, header vetting and rejection classification live, and two copies
+/// would drift. Callers hand in `Ok(envelope_json)` or `Err(message)`, having
+/// already turned any engine error into text.
+#[allow(clippy::type_complexity)]
+fn outcome_from_envelope(
+    finished: Result<String, String>,
+    expired: bool,
+    limits: &Limits,
+) -> (Outcome, Response, Vec<LogEntry>, Option<String>) {
+    let envelope_json = match finished {
+        Ok(envelope_json) => envelope_json,
+        Err(message) => {
+            return (
+                classify_with(message, expired),
+                Response::default(),
+                Vec::new(),
+                None,
+            )
+        }
+    };
+    match serde_json::from_str::<Envelope>(&envelope_json) {
+        Ok(env) if env.ok => {
+            if env.response.len() > limits.max_output_bytes {
+                return (
+                    Outcome::Terminated(format!(
+                        "output limit: {} > {} bytes",
+                        env.response.len(),
+                        limits.max_output_bytes
+                    )),
+                    Response::default(),
+                    env.logs,
+                    None,
+                );
+            }
+            match vet_response(env.status, env.headers) {
+                Ok((status, headers)) => (
+                    Outcome::Success(env.response),
+                    Response {
+                        content_type: env.content_type,
+                        status,
+                        headers,
+                    },
+                    env.logs,
+                    None,
+                ),
+                Err(message) => (Outcome::Error(message), Response::default(), env.logs, None),
+            }
+        }
+        // Rejections also classify: an uncatchable stack overflow surfaces here
+        // as a rejection, and it is a limit, not a bug.
+        Ok(env) => (
+            classify_with(env.error, expired),
+            Response::default(),
+            env.logs,
+            env.stack,
+        ),
+        Err(e) => (
+            Outcome::Error(format!("malformed envelope: {e}")),
+            Response::default(),
+            Vec::new(),
+            None,
+        ),
+    }
+}
+
 fn classify_with(msg: String, expired: bool) -> Outcome {
     let lower = msg.to_lowercase();
     // rquickjs reports an unsettled promise as a "dead lock". After the
@@ -431,6 +504,95 @@ fn classify_with(msg: String, expired: bool) -> Outcome {
 /// interrupt inside a promise job leaves that promise unsettled, and the
 /// engine can only tell that apart from a genuinely stuck promise by asking
 /// whether the deadline passed.
+/// Sums the CPU actually burned by a future.
+///
+/// `ThreadTime` measures the calling thread, and an async task may be polled on
+/// a different thread each time — so timing the whole future would attribute
+/// other tasks' work to this one, or miss its own. Each individual `poll` does
+/// run start-to-finish on one thread, so measuring per poll and summing is
+/// correct where measuring once is not.
+struct CpuMetered<F> {
+    inner: F,
+    cpu: Duration,
+}
+
+impl<F: Future> Future for CpuMetered<F> {
+    type Output = (F::Output, Duration);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        // Safety: neither field is moved; `inner` is only projected in place.
+        let this = unsafe { self.get_unchecked_mut() };
+        let started = cpu_time::ThreadTime::now();
+        let polled = unsafe { Pin::new_unchecked(&mut this.inner) }.poll(cx);
+        this.cpu += started.elapsed();
+        match polled {
+            Poll::Ready(out) => Poll::Ready((out, this.cpu)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn cpu_metered<F: Future>(inner: F) -> CpuMetered<F> {
+    CpuMetered {
+        inner,
+        cpu: Duration::ZERO,
+    }
+}
+
+/// The async twin of [`restricted_runtime`], with the same three limits. They
+/// are set through the async API but mean exactly the same thing; the spike in
+/// `tests/async_spike.rs` pins that they still fire.
+async fn restricted_async_runtime(limits: &Limits) -> (AsyncRuntime, Arc<AtomicBool>) {
+    let rt = AsyncRuntime::new().expect("quickjs runtime");
+    rt.set_memory_limit(limits.memory_bytes).await;
+    rt.set_max_stack_size(256 * 1024).await;
+    let deadline = Instant::now() + Duration::from_millis(limits.wall_ms);
+    let expired = Arc::new(AtomicBool::new(false));
+    let flag = expired.clone();
+    rt.set_interrupt_handler(Some(Box::new(move || {
+        if Instant::now() >= deadline {
+            flag.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    })))
+    .await;
+    (rt, expired)
+}
+
+/// `fetch` that suspends instead of blocking. The JavaScript is identical —
+/// `FETCH_PRELUDE` awaits either way — but here the worker thread is released
+/// while the network is busy.
+fn install_fetch_async<'js>(
+    ctx: &Ctx<'js>,
+    budget: Arc<outbound::OutboundBudget>,
+) -> Result<(), String> {
+    let native = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |payload: String| {
+            let budget = budget.clone();
+            async move {
+                let request: outbound::FetchRequest = match serde_json::from_str(&payload) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        return serde_json::json!({ "error": format!("bad fetch arguments: {e}") })
+                            .to_string()
+                    }
+                };
+                serde_json::to_string(&budget.perform_async(request).await).unwrap_or_else(|e| {
+                    serde_json::json!({ "error": format!("fetch failed: {e}") }).to_string()
+                })
+            }
+        }),
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedFetch", native)
+        .map_err(|e| exception_message(ctx, e))?;
+    ctx.eval::<(), _>(FETCH_PRELUDE)
+        .map_err(|e| exception_message(ctx, e))
+}
+
 fn restricted_runtime(limits: &Limits) -> (Runtime, Arc<AtomicBool>) {
     let rt = Runtime::new().expect("quickjs runtime");
     rt.set_memory_limit(limits.memory_bytes);
@@ -508,6 +670,116 @@ fn load_handler<'js>(
     load_module(ctx, source, bytecode).map(|(_, handler)| handler)
 }
 
+impl QuickJsExecutor {
+    /// Runs a handler without holding the worker thread while it waits.
+    ///
+    /// Same limits, same guards, same envelope handling as [`Executor::execute`]
+    /// — the difference is only that `fetch` suspends instead of blocking. That
+    /// matters because a blocking fetch runs no bytecode, so QuickJS's interrupt
+    /// cannot fire and the slot is held for the whole round trip: a handler
+    /// awaiting a 1-second API capped a 2-core server at 15 requests a second
+    /// with 85% of the CPU idle.
+    pub async fn execute_async(
+        &self,
+        source: &str,
+        request: &HttpRequest,
+        limits: &Limits,
+    ) -> InvocationResult {
+        let wall0 = Instant::now();
+        let (rt, expired) = restricted_async_runtime(limits).await;
+        let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
+        let request_json = serde_json::to_string(request).expect("serialize request");
+        let bytecode = self.bytecode_for(source).ok();
+        // Fetches share the invocation's budget, so exec_ms bounds total wall
+        // time and not merely the JavaScript.
+        let deadline = wall0 + Duration::from_millis(limits.wall_ms);
+        let budget = Arc::new(outbound::OutboundBudget::with_deadline(
+            limits.outbound.clone(),
+            deadline,
+        ));
+
+        let body = ctx.async_with(async |c| {
+            let zero = Duration::ZERO;
+            if let Err(msg) = install_fetch_async(&c, budget.clone()) {
+                return (
+                    Outcome::Error(msg),
+                    Response::default(),
+                    Vec::new(),
+                    None,
+                    zero,
+                );
+            }
+            let handler = match load_handler(&c, source, bytecode.as_deref().map(|b| b.as_slice()))
+            {
+                Ok(handler) => handler,
+                Err(msg) => return (classify(msg), Response::default(), Vec::new(), None, zero),
+            };
+            let glue: Function = match c.eval(GLUE) {
+                Ok(glue) => glue,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    )
+                }
+            };
+            let exec0 = Instant::now();
+            let promise: Promise = match glue.call((handler, request_json.as_str())) {
+                Ok(promise) => promise,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        exec0.elapsed(),
+                    )
+                }
+            };
+            let finished = promise
+                .into_future::<String>()
+                .await
+                .map_err(|e| exception_message(&c, e));
+            let exec_wall = exec0.elapsed();
+            let expired = expired.load(Ordering::Relaxed);
+            let (outcome, response, logs, stack) = outcome_from_envelope(finished, expired, limits);
+            (outcome, response, logs, stack, exec_wall)
+        });
+
+        let ((outcome, response, logs, stack, exec_wall), cpu) = cpu_metered(body).await;
+
+        // A failure with neither message nor stack is what running out of heap
+        // looks like from here.
+        let outcome = match &outcome {
+            Outcome::Error(msg) if is_valueless_failure(msg, stack.as_ref()) => {
+                Outcome::Terminated(format!(
+                    "memory limit: the handler failed with no error value, which is what \
+                     exceeding the {} MB heap looks like (throwing a non-Error value is \
+                     indistinguishable from here)",
+                    limits.memory_bytes / (1024 * 1024)
+                ))
+            }
+            _ => outcome,
+        };
+
+        InvocationResult {
+            outcome,
+            content_type: response.content_type,
+            status: response.status,
+            headers: response.headers,
+            logs,
+            stack,
+            wall: wall0.elapsed(),
+            cpu,
+            exec_wall,
+            outbound_used: budget.used(),
+        }
+    }
+}
+
 impl Executor for QuickJsExecutor {
     fn execute(&self, source: &str, request: &HttpRequest, limits: &Limits) -> InvocationResult {
         let wall0 = Instant::now();
@@ -572,69 +844,9 @@ impl Executor for QuickJsExecutor {
             let finished = promise.finish::<String>();
             let exec_wall = exec0.elapsed();
             let expired = expired.load(Ordering::Relaxed);
-            match finished {
-                Ok(envelope_json) => match serde_json::from_str::<Envelope>(&envelope_json) {
-                    Ok(env) if env.ok => {
-                        if env.response.len() > limits.max_output_bytes {
-                            (
-                                Outcome::Terminated(format!(
-                                    "output limit: {} > {} bytes",
-                                    env.response.len(),
-                                    limits.max_output_bytes
-                                )),
-                                Response::default(),
-                                env.logs,
-                                None,
-                                exec_wall,
-                            )
-                        } else {
-                            match vet_response(env.status, env.headers) {
-                                Ok((status, headers)) => (
-                                    Outcome::Success(env.response),
-                                    Response {
-                                        content_type: env.content_type,
-                                        status,
-                                        headers,
-                                    },
-                                    env.logs,
-                                    None,
-                                    exec_wall,
-                                ),
-                                Err(message) => (
-                                    Outcome::Error(message),
-                                    Response::default(),
-                                    env.logs,
-                                    None,
-                                    exec_wall,
-                                ),
-                            }
-                        }
-                    }
-                    // Rejections also classify: an uncatchable stack overflow
-                    // surfaces here as a rejection, and it is a limit, not a bug.
-                    Ok(env) => (
-                        classify_with(env.error, expired),
-                        Response::default(),
-                        env.logs,
-                        env.stack,
-                        exec_wall,
-                    ),
-                    Err(e) => (
-                        Outcome::Error(format!("malformed envelope: {e}")),
-                        Response::default(),
-                        Vec::new(),
-                        None,
-                        exec_wall,
-                    ),
-                },
-                Err(e) => (
-                    classify_with(exception_message(&c, e), expired),
-                    Response::default(),
-                    Vec::new(),
-                    None,
-                    exec_wall,
-                ),
-            }
+            let finished = finished.map_err(|e| exception_message(&c, e));
+            let (outcome, response, logs, stack) = outcome_from_envelope(finished, expired, limits);
+            (outcome, response, logs, stack, exec_wall)
         });
 
         // A failure with neither message nor stack is what running out of heap
