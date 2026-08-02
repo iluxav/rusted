@@ -53,6 +53,12 @@ enum Cmd {
         /// Require Authorization: Bearer <api key> on function endpoints
         #[arg(long)]
         require_auth: bool,
+        /// Interface to listen on; behind a reverse proxy leave this alone
+        #[arg(long, env = "RUSTED_HOST", default_value = "127.0.0.1")]
+        host: String,
+        /// The origin callers reach this server on, e.g. https://rusted.sh
+        #[arg(long, env = "PUBLIC_URL")]
+        public_url: Option<String>,
     },
     /// Deploy a persistent function
     Push {
@@ -231,7 +237,17 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             debug,
             ref database_url,
             require_auth,
-        } => serve(port, admin_port, debug, database_url.clone(), require_auth),
+            ref host,
+            ref public_url,
+        } => serve(
+            port,
+            admin_port,
+            debug,
+            database_url.clone(),
+            require_auth,
+            host.clone(),
+            public_url.clone(),
+        ),
         Cmd::Push {
             ref file,
             ref name,
@@ -592,12 +608,15 @@ fn run_local(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve(
     port: u16,
     admin_port: u16,
     debug: bool,
     database_url: String,
     require_auth: bool,
+    host: String,
+    public_url: Option<String>,
 ) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
@@ -608,6 +627,8 @@ fn serve(
             debug,
             database_url,
             require_auth,
+            host,
+            public_url,
         })
         .await
         .map_err(|e| format!("failed to start server: {e}"))?;

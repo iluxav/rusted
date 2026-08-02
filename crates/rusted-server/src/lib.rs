@@ -39,6 +39,12 @@ pub struct ServerConfig {
     pub database_url: String,
     /// Require `Authorization: Bearer rk_live_…` on the data plane.
     pub require_auth: bool,
+    /// Interface to listen on. Loopback by default: exposing a server that
+    /// runs untrusted code should be a decision, not an accident.
+    pub host: String,
+    /// The origin callers reach this server on, when that isn't the bound
+    /// socket — behind a proxy, every URL we print comes from here.
+    pub public_url: Option<String>,
 }
 
 /// A running server. Both listeners stop when this is dropped.
@@ -81,10 +87,12 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         config.queue_wait_ms,
         config.debug,
         config.require_auth,
+        config.public_url.clone(),
     ));
 
-    let data_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.data_port)).await?;
-    let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
+    let host = config.host.as_str();
+    let data_listener = tokio::net::TcpListener::bind((host, config.data_port)).await?;
+    let admin_listener = tokio::net::TcpListener::bind((host, config.admin_port)).await?;
     let data_addr = data_listener.local_addr()?;
     let admin_addr = admin_listener.local_addr()?;
     state

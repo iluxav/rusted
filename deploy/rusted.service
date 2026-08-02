@@ -1,0 +1,34 @@
+# systemd unit for running rusted without Docker.
+# Expects the binary at /usr/local/bin/rusted and config in /etc/rusted/env.
+
+[Unit]
+Description=rusted microfunction server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rusted
+Group=rusted
+EnvironmentFile=/etc/rusted/env
+ExecStart=/usr/local/bin/rusted serve --port 7411 --admin-port 7412
+Restart=always
+RestartSec=2
+
+# It executes other people's code: give it as little of the machine as it can
+# do its job with.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target
