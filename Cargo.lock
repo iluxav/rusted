@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-engine"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "cpu-time",
  "hex",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-server"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "askama",
  "axum",
