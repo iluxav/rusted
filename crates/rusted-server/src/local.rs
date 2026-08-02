@@ -73,7 +73,7 @@ fn resolve_pipeline(config: &LocalConfig) -> Result<Pipeline, String> {
     }
     let source = std::fs::read_to_string(&config.entry)
         .map_err(|e| format!("cannot read {}: {e}", config.entry.display()))?;
-    if !crate::bundler::needs_bundling(&source) {
+    if !crate::bundler::should_bundle(&config.entry, &source) {
         return Ok(Pipeline {
             serve_path: config.entry.clone(),
             source: Source::File,
