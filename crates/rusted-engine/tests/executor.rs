@@ -538,3 +538,22 @@ fn memory_exhaustion_by_small_objects_says_it_was_memory() {
         o => panic!("expected Terminated for an out-of-memory run, got {o:?}"),
     }
 }
+
+/// An agent sending ad-hoc code will reach for `import` out of habit. Saying
+/// only that the module could not be loaded tells it nothing to do differently,
+/// so it tries another package. The message has to teach the constraint.
+#[test]
+fn an_unresolvable_import_explains_the_constraint() {
+    let src = r#"import { z } from "zod";
+export default async function handler(request, context) { return context.json({}); }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    let message = match &r.outcome {
+        Outcome::Error(m) => m.clone(),
+        o => panic!("expected an error, got {o:?}"),
+    };
+    assert!(message.contains("zod"), "should name the module: {message}");
+    assert!(
+        message.contains("self-contained") || message.contains("inline"),
+        "should say what to do instead: {message}"
+    );
+}

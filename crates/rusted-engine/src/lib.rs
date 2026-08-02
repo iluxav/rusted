@@ -489,6 +489,17 @@ fn classify_with(msg: String, expired: bool) -> Outcome {
             "the handler never finished: it awaited a promise that never settles".to_string()
         });
     }
+    // The engine resolves no modules, so an `import` fails with a bare "could
+    // not load module". That names the symptom and not the rule, and a caller
+    // sending ad-hoc code — an agent, usually — just tries another package.
+    // Deployed functions never see this: the CLI bundles imports away first.
+    if lower.contains("could not load module") {
+        return Outcome::Error(format!(
+            "{msg} — imports are not resolved at runtime. Send self-contained code \
+             with the dependency inlined, or deploy with `rusted push`, which bundles \
+             imports first. Node built-ins (node:fs, node:crypto) do not exist here at all."
+        ));
+    }
     if expired || lower.contains("interrupted") {
         Outcome::Terminated(format!("wall deadline: {msg}"))
     } else if lower.contains("out of memory") {
