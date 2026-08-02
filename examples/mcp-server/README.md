@@ -15,6 +15,13 @@ curl -X POST http://127.0.0.1:7400/f/mcp -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+Or connect a real client:
+
+```bash
+claude mcp add --transport http rusted-demo http://127.0.0.1:7400/f/mcp
+npx @modelcontextprotocol/inspector --cli http://127.0.0.1:7400/f/mcp --transport http --method tools/list
+```
+
 ## Why this works
 
 MCP's Streamable HTTP transport lets a server answer a POST with a single
@@ -26,6 +33,12 @@ stateless tool server needs nothing more.
 so the whole useful surface of a tool provider fits. Tool failures come back as
 results with `isError: true` rather than protocol errors, which is what lets a
 model see what went wrong and try again.
+
+This was checked against the official SDK client rather than assumed: the MCP
+inspector connects, negotiates `initialize`, lists these tools, and calls them,
+with no stream involved. A client's `GET` for the optional server-initiated
+stream gets a `405`, which is what the spec prescribes for a server that
+doesn't offer one — so nothing waits on a stream that will never open.
 
 ## What doesn't work yet
 
