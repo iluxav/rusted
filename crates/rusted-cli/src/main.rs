@@ -186,9 +186,10 @@ enum InboxCmd {
     /// Create one and print the URL to hand out
     New {
         name: String,
-        /// How long it lives, from creation — never extended by activity
-        #[arg(long, default_value_t = 300)]
-        ttl: i64,
+        /// How long it lives, from creation — never extended by activity.
+        /// Plain seconds, or a suffix: 90s, 2m, 1h.
+        #[arg(long, default_value = "5m")]
+        ttl: String,
         /// "append" keeps every message; "upsert" keeps only the latest
         #[arg(long, default_value = "append")]
         store: String,
@@ -211,6 +212,26 @@ impl Cli {
             .clone()
             .or_else(|| credentials::get(&self.admin))
     }
+}
+
+/// Accepts `300`, `90s`, `2m` or `1h`.
+///
+/// A TTL is the one number here a human types by hand, and thinking in seconds
+/// for anything over a minute is a small, avoidable tax.
+fn parse_duration(raw: &str) -> Result<i64, String> {
+    let raw = raw.trim();
+    let (digits, multiplier) = match raw.chars().last() {
+        Some('s') => (&raw[..raw.len() - 1], 1),
+        Some('m') => (&raw[..raw.len() - 1], 60),
+        Some('h') => (&raw[..raw.len() - 1], 3600),
+        _ => (raw, 1),
+    };
+    digits
+        .parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .map(|n| n * multiplier)
+        .ok_or_else(|| format!("cannot read '{raw}' as a duration — try 90s, 2m or 1h"))
 }
 
 /// Declarations for `request`, `context`, and the globals. Shipped inside the
@@ -629,13 +650,14 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 store,
                 drain,
             } => {
+                let seconds = parse_duration(ttl)?;
                 let v = api(
                     &cli,
                     Method::POST,
                     "/api/inboxes",
                     Some(json!({
                         "name": name,
-                        "ttl_seconds": ttl,
+                        "ttl_seconds": seconds,
                         "store": store,
                         "drain": drain,
                     })),

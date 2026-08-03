@@ -232,11 +232,27 @@ pub async fn delete(state: &AppState, user_id: Uuid, name: &str) -> Result<bool,
     Ok(done.rows_affected() > 0)
 }
 
-/// Removes what has expired. Called on the same sweep as everything else.
-pub async fn sweep(state: &AppState) {
-    let _ = sqlx::query("DELETE FROM inboxes WHERE expires_at < now()")
+/// Deletes what has expired, on a loop.
+///
+/// Not cosmetic. Reads already filter on `expires_at`, so an unswept inbox is
+/// invisible — but the messages are still there, and they hold whatever a
+/// webhook sent: card metadata, an authorization code, someone's email. The TTL
+/// is a promise that the payload stops existing, not that it stops being
+/// listed, and only this keeps it.
+pub async fn sweeper(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        sweep_once(&state).await;
+    }
+}
+
+/// One pass. Messages go with the inbox through the foreign key cascade.
+pub async fn sweep_once(state: &AppState) -> u64 {
+    sqlx::query("DELETE FROM inboxes WHERE expires_at < now()")
         .execute(&state.pool)
-        .await;
+        .await
+        .map(|done| done.rows_affected())
+        .unwrap_or(0)
 }
 
 // ------------------------------------------------------------- public write

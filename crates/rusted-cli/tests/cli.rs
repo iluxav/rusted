@@ -1042,3 +1042,16 @@ fn new_refuses_to_overwrite_existing_work() {
         "// mine"
     );
 }
+
+#[test]
+fn ttl_reads_plain_seconds_and_suffixes() {
+    // A rejected duration must say what a good one looks like, since this is
+    // the one value a human types by hand.
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["inbox", "new", "x", "--ttl", "banana"])
+        .env_remove("RUSTED_ADMIN")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("90s"));
+}
