@@ -26,14 +26,22 @@
 
       {% if plan.current %}
       <div class="btn-ghost mt-6 w-full cursor-default justify-center py-2.5 text-center text-sm opacity-50">Your plan</div>
-      {% else %}
+      {% else if plan.selectable %}
       <a href="/console/checkout/{{ plan.code }}" class="btn-primary mt-6 w-full justify-center py-2.5 text-sm">
         {% if plan.price_cents == 0 %}Switch to {{ plan.name }}{% else %}Upgrade to {{ plan.name }}{% endif %}
       </a>
+      {% else %}
+      <div class="btn-ghost mt-6 w-full cursor-not-allowed justify-center py-2.5 text-center text-sm opacity-40" aria-disabled="true">
+        Not yet available
+      </div>
       {% endif %}
     </div>
     {% endfor %}
   </div>
 
+  {% if can_switch %}
   <p class="mt-8 font-mono text-[11px] text-clay/70">Payments are emulated — checkout mimics Stripe and no card is charged.</p>
+  {% else %}
+  <p class="mt-8 font-mono text-[11px] text-clay/70">Paid plans aren't open yet. Everyone starts on Dev, which runs real workloads — <a href="https://github.com/iluxav/rusted" class="text-copper transition-colors hover:text-ember">self-host</a> if you need more today.</p>
+  {% endif %}
 </div>

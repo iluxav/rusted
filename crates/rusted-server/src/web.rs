@@ -447,6 +447,8 @@ struct KeyCreatedT {
 
 pub struct PlanCard {
     code: String,
+    /// Whether this card offers a working button.
+    selectable: bool,
     name: String,
     version: i32,
     price: String,
@@ -466,6 +468,10 @@ pub struct PlanCard {
 struct BillingT {
     current_name: String,
     plans: Vec<PlanCard>,
+    /// Whether this person may switch plans at all. Off, the cards still show
+    /// what each tier offers — that is the point of a pricing page — but say
+    /// so instead of offering a button that would be refused.
+    can_switch: bool,
 }
 
 #[derive(Template)]
@@ -1039,7 +1045,7 @@ fn human_ms(ms: u64) -> String {
     }
 }
 
-fn card(plan: &crate::plans::Plan, current: bool) -> PlanCard {
+fn card(plan: &crate::plans::Plan, current: bool, can_switch: bool) -> PlanCard {
     let l = &plan.limits;
     PlanCard {
         code: plan.code.clone(),
@@ -1053,6 +1059,9 @@ fn card(plan: &crate::plans::Plan, current: bool) -> PlanCard {
             "/mo".to_string()
         },
         current,
+        // A free tier is the default anyway, so switching to it changes
+        // nothing anyone would pay for; the paid ones are what need gating.
+        selectable: can_switch || plan.price_cents == 0,
         max_functions: l.max_functions.to_string(),
         max_script: human_bytes(l.max_script_bytes),
         exec: human_ms(l.exec_ms),
@@ -1078,16 +1087,28 @@ async fn page_billing(State(state): State<WebState>, headers: HeaderMap) -> Resp
     let app = &state.0.app;
     let current = crate::plans::effective_plan(&app.pool, &app.plan_cache, Some(user.id)).await;
     let catalog = crate::plans::catalog(&app.pool).await.unwrap_or_default();
+    let can_switch = crate::plans::may_change_plan(&user.login);
     let inner = BillingT {
         current_name: current.name.clone(),
         plans: catalog
             .iter()
-            .map(|plan| card(plan, plan.id == current.id))
+            .map(|plan| card(plan, plan.id == current.id, can_switch))
             .collect(),
+        can_switch,
     }
     .render()
     .expect("billing renders");
     console_page(&state, &headers, &user, "billing", inner).await
+}
+
+/// Whether this person may select this plan.
+///
+/// The code arrives in the URL, so an internal plan must not be reachable by
+/// guessing its name, and a hidden button is not a control — checkout takes no
+/// payment, so without the allowlist any signed-in account could hand itself
+/// the top tier by POSTing the path directly.
+fn may_select(login: &str, code: &str) -> bool {
+    crate::plans::is_public(code) && crate::plans::may_change_plan(login)
 }
 
 async fn page_checkout(
@@ -1099,6 +1120,9 @@ async fn page_checkout(
         Ok(user) => user,
         Err(redirect) => return redirect,
     };
+    if !may_select(&user.login, &code) {
+        return Redirect::to("/console/billing").into_response();
+    }
     let Ok(Some(plan)) = crate::plans::latest_by_code(&state.0.app.pool, &code).await else {
         return Redirect::to("/console/billing").into_response();
     };
@@ -1137,9 +1161,7 @@ async fn confirm_checkout(
         Ok(user) => user,
         Err(redirect) => return redirect,
     };
-    // The code comes from the URL, so an internal plan must not be reachable by
-    // guessing its name.
-    if !crate::plans::is_public(&code) {
+    if !may_select(&user.login, &code) {
         return Redirect::to("/console/billing").into_response();
     }
     let Ok(Some(plan)) = crate::plans::latest_by_code(&state.0.app.pool, &code).await else {

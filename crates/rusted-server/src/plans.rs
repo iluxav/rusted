@@ -146,16 +146,50 @@ pub async fn effective_plan(pool: &PgPool, cache: &PlanCache, user_id: Option<Uu
 }
 
 /// Newest version of every plan, cheapest first — the billing page's catalog.
+/// The plans on offer, newest version of each.
+///
+/// Internal plans are excluded rather than filtered by the caller. They carry a
+/// price of zero, so anything listing every code renders them as free tiers —
+/// which is exactly how `unlimited` and `loadtest` ended up on the public
+/// billing page.
 pub async fn catalog(pool: &PgPool) -> sqlx::Result<Vec<Plan>> {
     let rows = sqlx::query(
         "SELECT DISTINCT ON (code) id, code, version, name, price_cents, limits
-         FROM plans ORDER BY code, version DESC",
+         FROM plans WHERE code = ANY($1) ORDER BY code, version DESC",
     )
+    .bind(PUBLIC_PLAN_CODES)
     .fetch_all(pool)
     .await?;
     let mut plans: Vec<Plan> = rows.iter().map(plan_from_row).collect();
     plans.sort_by_key(|p| p.price_cents);
     Ok(plans)
+}
+
+/// Who may change their own plan.
+///
+/// Checkout takes no payment — it mimics Stripe — so on a public deployment any
+/// signed-in person could hand themselves the top tier. Until that is real
+/// money, switching is limited to an allowlist.
+///
+/// Keyed on GitHub login, because that is the only identity stored: sign-in
+/// asks for `read:user`, which does not include an email address, so the one
+/// shown at checkout is derived from the login rather than known.
+/// `RUSTED_BILLING_ALLOWLIST=iluxav,someone-else`, empty by default.
+pub fn may_change_plan(login: &str) -> bool {
+    allowlisted(
+        &std::env::var("RUSTED_BILLING_ALLOWLIST").unwrap_or_default(),
+        login,
+    )
+}
+
+/// Split out from the environment lookup so it can be tested without mutating
+/// process-wide state from a parallel test.
+fn allowlisted(raw: &str, login: &str) -> bool {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        // GitHub logins are case-insensitive, so `Iluxav` is the same account.
+        .any(|entry| entry.eq_ignore_ascii_case(login))
 }
 
 pub async fn latest_by_code(pool: &PgPool, code: &str) -> sqlx::Result<Option<Plan>> {
@@ -231,5 +265,39 @@ impl RateLimiter {
 
     pub fn forget(&self, key: &str) {
         self.windows.lock().unwrap().remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_allowlist_lets_nobody_change_plan() {
+        assert!(!allowlisted("", "iluxav"));
+    }
+
+    #[test]
+    fn allowlist_matches_login_ignoring_case_and_spacing() {
+        assert!(allowlisted("iluxav", "iluxav"));
+        assert!(allowlisted(" alice , iluxav ,bob", "iluxav"));
+        assert!(allowlisted("Iluxav", "iluxav"));
+        assert!(!allowlisted("alice,bob", "iluxav"));
+    }
+
+    #[test]
+    fn empty_entries_match_nobody() {
+        // A trailing comma leaves an empty entry, which must not match the
+        // empty login an unauthenticated path could produce.
+        assert!(!allowlisted("alice,,", ""));
+        assert!(!allowlisted(" , ", "iluxav"));
+    }
+
+    #[test]
+    fn internal_plans_are_not_public() {
+        assert!(is_public("dev"));
+        assert!(is_public("extra"));
+        assert!(!is_public("unlimited"));
+        assert!(!is_public("loadtest"));
     }
 }
