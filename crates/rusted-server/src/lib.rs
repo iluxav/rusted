@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 pub mod analytics;
 pub mod api;
+pub mod assets;
 pub mod auth;
 pub mod bundler;
 pub mod device;

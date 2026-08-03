@@ -59,6 +59,7 @@ impl WebState {
 
 pub fn router(state: WebState) -> Router {
     Router::new()
+        .merge(crate::assets::router())
         .route("/", get(landing))
         .route("/login", get(login))
         .route(
