@@ -45,12 +45,33 @@ declare namespace Rusted {
 		readonly __rustedResponse: true;
 	}
 
+	/** Reading what has arrived at one of your inboxes. */
+	interface Inbox {
+		/**
+		 * Messages waiting at `name`, oldest first. Each is the parsed JSON a
+		 * sender posted, or the raw string if it was not JSON.
+		 *
+		 * Throws if the inbox has expired, been drained, or never existed —
+		 * those are one case on purpose, so a name reveals nothing.
+		 *
+		 * Scoped to whoever deployed the function, not to what is asked for:
+		 * naming another account's inbox finds nothing.
+		 */
+		get<T = unknown>(name: string): Promise<T[]>;
+	}
+
 	/** Helpers for building a response. */
 	interface Context {
 		/** `application/json`. */
 		json(body: unknown, init?: ResponseInit): Response;
 		/** `text/plain; charset=utf-8`. */
 		text(body: string, init?: ResponseInit): Response;
+		/**
+		 * Present on a deployed function. Absent when running somewhere the
+		 * host lends no services — `rusted run` locally, for instance — so a
+		 * handler that needs it fails saying so rather than finding nothing.
+		 */
+		inbox?: Inbox;
 	}
 
 	/** `export const config = { … }` — read at deploy time. */

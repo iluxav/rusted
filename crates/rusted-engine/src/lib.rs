@@ -153,6 +153,18 @@ const FETCH_PRELUDE: &str = r#"(() => {
   };
 })()"#;
 
+/// `context.inbox` is attached by the glue; this defines what it calls.
+const INBOX_PRELUDE: &str = r#"(() => {
+  globalThis.__rustedInbox = {
+    get: async (name) => {
+      const raw = await globalThis.__rustedInboxGet(String(name));
+      const r = JSON.parse(raw);
+      if (r.error) throw new Error(r.error);
+      return r.messages;
+    },
+  };
+})()"#;
+
 const CONSOLE_PRELUDE: &str = r#"(() => {
   const logs = [];
   const fmt = (a) => { try { return typeof a === "string" ? a : JSON.stringify(a); } catch (_) { return String(a); } };
@@ -190,6 +202,9 @@ const GLUE: &str = r#"(handler, requestJson) => {
   const context = {
     json: (o, init) => respond(JSON.stringify(o), "application/json", init),
     text: (s, init) => respond(String(s), "text/plain; charset=utf-8", init),
+    // Absent when the host lends no services — reading it then is a clearer
+    // failure than a function that silently finds nothing.
+    inbox: globalThis.__rustedInbox,
   };
   return Promise.resolve(handler(request, context)).then(
     (r) => {
@@ -515,6 +530,25 @@ fn classify_with(msg: String, expired: bool) -> Outcome {
 /// interrupt inside a promise job leaves that promise unsettled, and the
 /// engine can only tell that apart from a genuinely stuck promise by asking
 /// whether the deadline passed.
+/// Things the host lends a handler beyond the network.
+///
+/// The engine deliberately reaches nothing on its own — no filesystem, no
+/// database, no process — so anything more than `fetch` has to be handed in.
+/// Passing a trait rather than a connection keeps it that way: the engine can
+/// call this and nothing else, and the implementation decides whose data it is
+/// allowed to see.
+pub trait HostServices: Send + Sync {
+    /// Messages waiting in one of the owner's inboxes, as a JSON string.
+    ///
+    /// Scoping is the caller's job: the implementation is built per invocation
+    /// with the function owner baked in, so a handler cannot name its way into
+    /// somebody else's inbox.
+    fn inbox_get(
+        &self,
+        name: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>>;
+}
+
 /// Sums the CPU actually burned by a future.
 ///
 /// `ThreadTime` measures the calling thread, and an async task may be polled on
@@ -548,6 +582,29 @@ fn cpu_metered<F: Future>(inner: F) -> CpuMetered<F> {
         inner,
         cpu: Duration::ZERO,
     }
+}
+
+/// Attaches `context.inbox` when the host offers it. Without services the
+/// global is never defined, so a handler that reaches for it fails saying so.
+fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Result<(), String> {
+    let native = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |name: String| {
+            let services = services.clone();
+            async move {
+                match services.inbox_get(name).await {
+                    Ok(messages) => format!("{{\"messages\":{messages}}}"),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                }
+            }
+        }),
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedInboxGet", native)
+        .map_err(|e| exception_message(ctx, e))?;
+    ctx.eval::<(), _>(INBOX_PRELUDE)
+        .map_err(|e| exception_message(ctx, e))
 }
 
 /// The async twin of [`restricted_runtime`], with the same three limits. They
@@ -696,6 +753,20 @@ impl QuickJsExecutor {
         request: &HttpRequest,
         limits: &Limits,
     ) -> InvocationResult {
+        self.execute_with_services(source, request, limits, None)
+            .await
+    }
+
+    /// As [`Self::execute_async`], with whatever the host chooses to lend the
+    /// handler. `None` means only `fetch`, which is what tests and local
+    /// development get.
+    pub async fn execute_with_services(
+        &self,
+        source: &str,
+        request: &HttpRequest,
+        limits: &Limits,
+        services: Option<Arc<dyn HostServices>>,
+    ) -> InvocationResult {
         let wall0 = Instant::now();
         let (rt, expired) = restricted_async_runtime(limits).await;
         let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
@@ -719,6 +790,17 @@ impl QuickJsExecutor {
                     None,
                     zero,
                 );
+            }
+            if let Some(services) = services.clone() {
+                if let Err(msg) = install_services(&c, services) {
+                    return (
+                        Outcome::Error(msg),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    );
+                }
             }
             let handler = match load_handler(&c, source, bytecode.as_deref().map(|b| b.as_slice()))
             {
@@ -967,9 +1049,13 @@ mod type_declarations {
                 "parsed no members for `{binding}` — the GLUE shape changed"
             );
             for member in members {
+                // Declared as a method, a property, or an optional property —
+                // all three count.
+                let declared = DECLARATIONS.contains(&format!("{member}("))
+                    || DECLARATIONS.contains(&format!("{member}:"))
+                    || DECLARATIONS.contains(&format!("{member}?:"));
                 assert!(
-                    DECLARATIONS.contains(&format!("{member}("))
-                        || DECLARATIONS.contains(&format!("{member}:")),
+                    declared,
                     "runtime exposes `{binding}.{member}` but Rusted.{interface} \
                      in rusted.d.ts does not declare it"
                 );

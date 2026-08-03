@@ -152,6 +152,7 @@ async fn execute_raw(
     source: String,
     request: HttpRequest,
     limits: rusted_engine::Limits,
+    owner: Option<Uuid>,
 ) -> Result<InvocationResult, Response> {
     // Before queueing for a slot: if the process is already using more memory
     // than it should, another invocation makes that worse rather than better.
@@ -178,12 +179,23 @@ async fn execute_raw(
     .expect("semaphore never closed");
 
     let executor = state.executor.clone();
+    // Scoped to the function's owner, taken from the stored record rather than
+    // anything the caller sent, so a handler cannot reach another account's
+    // inboxes. Anonymous functions get no services at all.
+    let services: Option<Arc<dyn rusted_engine::HostServices>> = owner.map(|user_id| {
+        Arc::new(crate::inbox::OwnerScopedInbox::new(state.clone(), user_id))
+            as Arc<dyn rusted_engine::HostServices>
+    });
     // Handed to the execution runtime rather than run here: JavaScript between
     // await points blocks whichever thread drives it, and that must not be a
     // thread serving HTTP.
     Ok(state
         .exec_runtime
-        .spawn(async move { executor.execute_async(&source, &request, &limits).await })
+        .spawn(async move {
+            executor
+                .execute_with_services(&source, &request, &limits, services)
+                .await
+        })
         .await
         .expect("executor task never panics"))
 }
@@ -224,7 +236,7 @@ async fn execute_serialized(
         )
     })?
     .expect("semaphore never closed");
-    let result = execute_raw(state, source, request, limits).await?;
+    let result = execute_raw(state, source, request, limits, owner).await?;
     debug_print(state, key, &result);
 
     let record = InvocationRecord {
@@ -1093,7 +1105,7 @@ async fn invoke(
             )
             .await
         }
-        None => match execute_raw(&state, source, request, limits).await {
+        None => match execute_raw(&state, source, request, limits, Some(user_id)).await {
             Ok(result) => {
                 debug_print(&state, "ad-hoc", &result);
                 Ok(result)
@@ -1436,6 +1448,7 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
         code.to_string(),
         HttpRequest::post_json(input),
         limits,
+        Some(user_id),
     )
     .await
     {
