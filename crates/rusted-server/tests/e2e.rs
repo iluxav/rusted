@@ -2294,3 +2294,123 @@ async fn the_public_endpoint_is_bounded() {
         .unwrap();
     assert_eq!(nowhere.status(), 410);
 }
+
+/// Memory is a cache, not the store. A message has to be in Postgres the
+/// moment it is accepted, or a restart would lose someone's OAuth code and
+/// they would see a hang with no explanation.
+#[tokio::test]
+async fn a_received_message_is_durable_immediately() {
+    let t = boot().await;
+    let (_, created) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"inbox_create","arguments":{"name":"durable","ttl_seconds":120}}}),
+    )
+    .await;
+    let info: Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = info["url"].as_str().unwrap().to_string();
+
+    reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({ "code": "keep-me" }))
+        .send()
+        .await
+        .unwrap();
+
+    // Straight to the database, bypassing the server and its memory entirely.
+    let stored: String = sqlx::query_scalar(
+        "SELECT m.body FROM inbox_messages m
+           JOIN inboxes i ON i.id = m.inbox_id
+          WHERE i.name = 'durable'",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .expect("the message should be in Postgres, not only in memory");
+    assert!(stored.contains("keep-me"), "{stored}");
+}
+
+/// The third read path: a deployed function reaching its owner's inbox while
+/// it runs. That is what lets one URL receive a webhook and another serve the
+/// result, without the agent shuttling it.
+#[tokio::test]
+async fn a_function_can_read_its_owners_inbox() {
+    let t = boot().await;
+
+    let (_, created) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"inbox_create","arguments":{"name":"from-stripe","ttl_seconds":120}}}),
+    )
+    .await;
+    let info: Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = info["url"].as_str().unwrap().to_string();
+
+    reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({ "amount": 4200 }))
+        .send()
+        .await
+        .unwrap();
+
+    push(
+        &t,
+        "settle",
+        r#"export default async function handler(request, context) {
+            const messages = await context.inbox.get("from-stripe");
+            const total = messages.reduce((sum, m) => sum + (m.amount ?? 0), 0);
+            return context.json({ seen: messages.length, total });
+        }"#,
+    )
+    .await;
+
+    let r = t.client.post(t.data("/f/settle")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["seen"], 1, "{body}");
+    assert_eq!(body["total"], 4200, "{body}");
+}
+
+/// Scoping comes from the stored owner, never from what the handler asks for.
+/// A function must not be able to name its way into another account's inbox.
+#[tokio::test]
+async fn a_function_cannot_reach_another_accounts_inbox() {
+    let t = boot().await;
+
+    // An inbox belonging to somebody else entirely.
+    let stranger = rusted_server::testsupport::seed_user(&t.pool).await;
+    sqlx::query(
+        "INSERT INTO inboxes (user_id, name, address, expires_at)
+         VALUES ($1, 'private', 'someone-elses-address', now() + interval '2 minutes')",
+    )
+    .bind(stranger)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+
+    push(
+        &t,
+        "peek",
+        r#"export default async function handler(request, context) {
+            try {
+                const messages = await context.inbox.get("private");
+                return context.json({ leaked: messages });
+            } catch (e) {
+                return context.json({ refused: e.message });
+            }
+        }"#,
+    )
+    .await;
+
+    let r = t.client.post(t.data("/f/peek")).send().await.unwrap();
+    let body: Value = r.json().await.unwrap();
+    assert!(
+        body["leaked"].is_null(),
+        "a handler reached another account's inbox: {body}"
+    );
+    assert!(
+        body["refused"].as_str().unwrap_or("").contains("private"),
+        "{body}"
+    );
+}

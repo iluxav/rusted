@@ -72,6 +72,8 @@ pub struct AppState {
     pub exec_runtime: Arc<ExecRuntime>,
     /// Stops admitting invocations while the process is already using too much.
     pub memory: Arc<crate::memory::MemoryGuard>,
+    /// Inboxes in memory, written through to Postgres.
+    pub inboxes: Arc<crate::inbox::InboxCache>,
     pub limits: Limits,
     /// Caps how many invocations run on worker threads at once.
     pub exec_slots: Arc<tokio::sync::Semaphore>,
@@ -202,6 +204,7 @@ impl AppState {
             records: Mutex::new(HashMap::new()),
             executor: Arc::new(QuickJsExecutor::new()),
             memory: Arc::new(crate::memory::MemoryGuard::new()),
+            inboxes: Arc::new(crate::inbox::InboxCache::default()),
             exec_runtime: Arc::new(ExecRuntime::new(
                 tokio::runtime::Builder::new_multi_thread()
                     // Sized by cores, not by slots: this bounds parallel

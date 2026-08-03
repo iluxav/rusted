@@ -9,7 +9,8 @@
 //! unguessable and grants only writing; reading is by name and needs the
 //! owner's key. Handing the URL to Stripe never hands over what Stripe sent.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -122,6 +123,12 @@ pub async fn create(
     .await
     .map_err(|e| format!("could not create the inbox: {e}"))?;
 
+    // Reusing a name mints a new address, so any copy of the old one must go.
+    announce(state, &address).await;
+    if let Some(stale) = state.inboxes.cached_address_for(user_id, name) {
+        announce(state, &stale).await;
+    }
+
     Ok(Created {
         name: name.to_string(),
         address,
@@ -129,6 +136,151 @@ pub async fn create(
         drain,
         expires_in_seconds: ttl_seconds,
     })
+}
+
+// -------------------------------------------------------------- memory layer
+
+/// An inbox and its messages, as held in memory.
+#[derive(Clone)]
+struct Cached {
+    id: Uuid,
+    user_id: Uuid,
+    name: String,
+    store: Store,
+    drain: bool,
+    writes: i32,
+    messages: Vec<String>,
+}
+
+/// Write-through cache in front of Postgres.
+///
+/// Reads and writes hit memory; Postgres is written on the same call, so a
+/// restart loses nothing and a cold instance fills itself on first use. That is
+/// the difference between a cache and a store: an inbox holds someone's OAuth
+/// code, and losing it to a deploy would be a hang with no explanation.
+///
+/// Other instances are told to drop their copy through the same LISTEN/NOTIFY
+/// channel everything else uses. The payload is not sent — `NOTIFY` caps at
+/// 8000 bytes and a webhook body routinely exceeds it — so the notification
+/// carries the address and the reader reloads.
+#[derive(Default)]
+pub struct InboxCache {
+    by_address: Mutex<HashMap<String, Cached>>,
+    /// So a read by (owner, name) does not have to scan.
+    address_of: Mutex<HashMap<(Uuid, String), String>>,
+}
+
+impl InboxCache {
+    pub fn invalidate(&self, address: &str) {
+        if let Some(entry) = self.by_address.lock().unwrap().remove(address) {
+            self.address_of
+                .lock()
+                .unwrap()
+                .remove(&(entry.user_id, entry.name));
+        }
+    }
+
+    pub fn clear(&self) {
+        self.by_address.lock().unwrap().clear();
+        self.address_of.lock().unwrap().clear();
+    }
+
+    fn get(&self, address: &str) -> Option<Cached> {
+        self.by_address.lock().unwrap().get(address).cloned()
+    }
+
+    fn cached_address_for(&self, user_id: Uuid, name: &str) -> Option<String> {
+        self.address_of
+            .lock()
+            .unwrap()
+            .get(&(user_id, name.to_string()))
+            .cloned()
+    }
+
+    fn put(&self, address: &str, entry: Cached) {
+        self.address_of
+            .lock()
+            .unwrap()
+            .insert((entry.user_id, entry.name.clone()), address.to_string());
+        self.by_address
+            .lock()
+            .unwrap()
+            .insert(address.to_string(), entry);
+    }
+}
+
+/// Tells every instance, including this one, to drop its copy.
+async fn announce(state: &AppState, address: &str) {
+    state.inboxes.invalidate(address);
+    let _ = sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(crate::store::INVALIDATION_CHANNEL)
+        .bind(format!("inbox:{address}"))
+        .execute(&state.pool)
+        .await;
+}
+
+/// Loads an inbox and its messages from Postgres into memory.
+///
+/// Expiry is decided by the database rather than a timestamp held in memory:
+/// one clock, and no stale copy outliving its TTL.
+async fn load(state: &AppState, address: &str) -> Option<Cached> {
+    let row = sqlx::query(
+        "SELECT id, user_id, name, store, drain, writes
+           FROM inboxes WHERE address = $1 AND expires_at > now()",
+    )
+    .bind(address)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()??;
+
+    let id: Uuid = row.get("id");
+    let messages =
+        sqlx::query("SELECT body FROM inbox_messages WHERE inbox_id = $1 ORDER BY received_at, id")
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await
+            .ok()?
+            .iter()
+            .map(|r| r.get::<String, _>("body"))
+            .collect();
+
+    let entry = Cached {
+        id,
+        user_id: row.get("user_id"),
+        name: row.get("name"),
+        store: Store::parse(&row.get::<String, _>("store")).unwrap_or(Store::Append),
+        drain: row.get("drain"),
+        writes: row.get("writes"),
+        messages,
+    };
+    state.inboxes.put(address, entry.clone());
+    Some(entry)
+}
+
+/// Memory first, Postgres on a miss.
+async fn resolve(state: &AppState, address: &str) -> Option<Cached> {
+    match state.inboxes.get(address) {
+        Some(entry) => Some(entry),
+        None => load(state, address).await,
+    }
+}
+
+/// The address behind a name, which needs a lookup on a cold instance.
+async fn address_for(state: &AppState, user_id: Uuid, name: &str) -> Option<String> {
+    if let Some(address) = state.inboxes.cached_address_for(user_id, name) {
+        return Some(address);
+    }
+    let address: String = sqlx::query(
+        "SELECT address FROM inboxes WHERE user_id = $1 AND name = $2 AND expires_at > now()",
+    )
+    .bind(user_id)
+    .bind(name)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()??
+    .get("address");
+    load(state, &address).await;
+    Some(address)
 }
 
 /// What a read found.
@@ -142,51 +294,37 @@ pub enum Reading {
 
 /// Reads by name, on behalf of the owner.
 pub async fn read(state: &AppState, user_id: Uuid, name: &str) -> Result<Reading, String> {
-    let row = sqlx::query(
-        "SELECT id, store, drain, expires_at < now() AS expired
-           FROM inboxes WHERE user_id = $1 AND name = $2",
-    )
-    .bind(user_id)
-    .bind(name)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| format!("could not read the inbox: {e}"))?;
-
-    let Some(row) = row else {
+    let Some(address) = address_for(state, user_id, name).await else {
         return Ok(Reading::Gone);
     };
-    if row.get::<bool, _>("expired") {
+    let Some(entry) = resolve(state, &address).await else {
+        return Ok(Reading::Gone);
+    };
+    // The name index is per-owner, but a cold lookup could still land on
+    // someone else's row if a name were reused; check rather than assume.
+    if entry.user_id != user_id {
         return Ok(Reading::Gone);
     }
 
-    let inbox_id: Uuid = row.get("id");
-    let drain: bool = row.get("drain");
-
-    let rows =
-        sqlx::query("SELECT body FROM inbox_messages WHERE inbox_id = $1 ORDER BY received_at, id")
-            .bind(inbox_id)
-            .fetch_all(&state.pool)
-            .await
-            .map_err(|e| format!("could not read messages: {e}"))?;
-
-    let messages: Vec<Value> = rows
+    let messages: Vec<Value> = entry
+        .messages
         .iter()
-        .map(|r| {
-            let body: String = r.get("body");
+        .map(|body| {
             // Most senders post JSON; anything else comes back as the string it
             // was, rather than being forced into a shape it does not have.
-            serde_json::from_str(&body).unwrap_or(Value::String(body))
+            serde_json::from_str(body).unwrap_or(Value::String(body.clone()))
         })
         .collect();
 
     // Only a read that found something drains. Draining an empty inbox would
     // destroy it while the agent was still waiting for the first message.
-    let drained = drain && !messages.is_empty();
+    let drained = entry.drain && !messages.is_empty();
     if drained {
         let _ = sqlx::query("DELETE FROM inboxes WHERE id = $1")
-            .bind(inbox_id)
+            .bind(entry.id)
             .execute(&state.pool)
             .await;
+        announce(state, &address).await;
     }
 
     Ok(Reading::Alive { messages, drained })
@@ -223,6 +361,9 @@ pub async fn list(state: &AppState, user_id: Uuid) -> Result<Vec<Value>, String>
 }
 
 pub async fn delete(state: &AppState, user_id: Uuid, name: &str) -> Result<bool, String> {
+    if let Some(address) = address_for(state, user_id, name).await {
+        announce(state, &address).await;
+    }
     let done = sqlx::query("DELETE FROM inboxes WHERE user_id = $1 AND name = $2")
         .bind(user_id)
         .bind(name)
@@ -294,21 +435,10 @@ async fn receive(
             .into_response();
     };
 
-    let row = sqlx::query(
-        "SELECT id, store, writes, expires_at < now() AS expired
-           FROM inboxes WHERE address = $1",
-    )
-    .bind(&address)
-    .fetch_optional(&state.pool)
-    .await;
-
-    let Ok(Some(row)) = row else {
+    let Some(entry) = resolve(&state, &address).await else {
         return gone();
     };
-    if row.get::<bool, _>("expired") {
-        return gone();
-    }
-    if row.get::<i32, _>("writes") >= MAX_WRITES {
+    if entry.writes >= MAX_WRITES {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": { "code": "inbox_full",
@@ -316,39 +446,29 @@ async fn receive(
         )
             .into_response();
     }
+    if entry.store == Store::Append && entry.messages.len() as i64 >= MAX_MESSAGES {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": { "code": "inbox_full",
+                "message": format!("this inbox already holds {MAX_MESSAGES} messages") } })),
+        )
+            .into_response();
+    }
 
-    let inbox_id: Uuid = row.get("id");
-    let store: String = row.get("store");
-
+    // Written through: Postgres first, so a crash between the two loses a
+    // message rather than inventing one, then memory so the next read is warm.
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return gone(),
     };
-    // Upsert keeps only the latest, so the previous message goes first.
-    if store == "upsert" {
+    if entry.store == Store::Upsert {
         let _ = sqlx::query("DELETE FROM inbox_messages WHERE inbox_id = $1")
-            .bind(inbox_id)
+            .bind(entry.id)
             .execute(&mut *tx)
             .await;
-    } else {
-        let held: i64 = sqlx::query("SELECT count(*) AS n FROM inbox_messages WHERE inbox_id = $1")
-            .bind(inbox_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map(|r| r.get::<i64, _>("n"))
-            .unwrap_or(0);
-        if held >= MAX_MESSAGES {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({ "error": { "code": "inbox_full",
-                    "message": format!("this inbox already holds {MAX_MESSAGES} messages") } })),
-            )
-                .into_response();
-        }
     }
-
     if sqlx::query("INSERT INTO inbox_messages (inbox_id, body) VALUES ($1, $2)")
-        .bind(inbox_id)
+        .bind(entry.id)
         .bind(&body)
         .execute(&mut *tx)
         .await
@@ -357,12 +477,27 @@ async fn receive(
         return gone();
     }
     let _ = sqlx::query("UPDATE inboxes SET writes = writes + 1 WHERE id = $1")
-        .bind(inbox_id)
+        .bind(entry.id)
         .execute(&mut *tx)
         .await;
     if tx.commit().await.is_err() {
         return gone();
     }
+
+    let mut updated = entry;
+    if updated.store == Store::Upsert {
+        updated.messages.clear();
+    }
+    updated.messages.push(body);
+    updated.writes += 1;
+    state.inboxes.put(&address, updated);
+    // Other instances hold a stale copy now. The body is too big for a NOTIFY
+    // payload, so they are told to reload rather than sent the message.
+    let _ = sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(crate::store::INVALIDATION_CHANNEL)
+        .bind(format!("inbox:{address}"))
+        .execute(&state.pool)
+        .await;
 
     (StatusCode::ACCEPTED, Json(json!({ "received": true }))).into_response()
 }
@@ -429,6 +564,46 @@ pub fn public_router(state: Arc<AppState>) -> axum::Router {
             MAX_MESSAGE_BYTES + 4096,
         ))
         .with_state(state)
+}
+
+// --------------------------------------------------- what a handler may see
+
+/// Lends `context.inbox` to a running handler, fixed to one owner.
+///
+/// The user id is captured when this is built, from the function's stored
+/// owner — never from anything the handler says. So a handler can ask for a
+/// name, and only ever gets an inbox belonging to whoever deployed it.
+pub struct OwnerScopedInbox {
+    state: Arc<AppState>,
+    user_id: Uuid,
+}
+
+impl OwnerScopedInbox {
+    pub fn new(state: Arc<AppState>, user_id: Uuid) -> Self {
+        Self { state, user_id }
+    }
+}
+
+impl rusted_engine::HostServices for OwnerScopedInbox {
+    fn inbox_get(
+        &self,
+        name: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            match read(&self.state, self.user_id, &name).await {
+                Ok(Reading::Alive { messages, .. }) => {
+                    Ok(serde_json::to_string(&messages).unwrap_or_else(|_| "[]".into()))
+                }
+                // A handler gets the same answer a person does: gone is gone,
+                // and it cannot tell that apart from never having existed.
+                Ok(Reading::Gone) => Err(format!(
+                    "inbox '{name}' has expired, been drained, or never existed"
+                )),
+                Err(e) => Err(e),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
