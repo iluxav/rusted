@@ -127,6 +127,7 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
                 .expect("admin listener serves until aborted");
         }),
         tokio::spawn(api::sweep_temp_runs(state.clone())),
+        tokio::spawn(inbox::sweeper(state.clone())),
         tokio::spawn(auth::invalidation_listener(
             config.database_url.clone(),
             state.clone(),
