@@ -1,124 +1,211 @@
 {% extends "base.html" %}
-{% block title %}rusted — run the code your agent wrote{% endblock %}
+{% block title %}rusted — a runtime for agent-written code{% endblock %}
+{% block head %}
+<meta name="description" content="Run agent-written JavaScript in a tiny QuickJS sandbox built in Rust. Execute once, deploy an endpoint, or receive a callback — over MCP or from the CLI.">
+<link rel="canonical" href="https://rusted.sh/">
+{% endblock %}
 {% block body %}
-<div class="relative isolate mx-auto flex min-h-full max-w-6xl flex-col overflow-hidden px-5 sm:px-8">
-  <div class="pointer-events-none absolute left-1/2 top-24 -z-10 h-[34rem] w-[34rem] -translate-x-1/2 rounded-full bg-ember/[0.07] blur-[110px]"></div>
+<div class="landing-page relative isolate min-h-full overflow-hidden">
+  <div class="landing-glow pointer-events-none absolute left-[58%] top-[-12rem] -z-10 h-[42rem] w-[42rem] rounded-full bg-ember/[0.07] blur-[120px]"></div>
 
-  <header class="flex items-center justify-between border-b border-copper/10 py-5">
-    <a href="/" class="group flex items-center gap-2.5 font-display text-xl font-bold tracking-[-0.04em] text-cream">
-      <span class="flex h-7 w-7 items-center justify-center rounded-md border border-ember/30 bg-ember/10 font-mono text-sm text-ember transition-colors group-hover:bg-ember group-hover:text-rust-950">r_</span>
-      rusted
-    </a>
-    <nav class="flex items-center gap-3 text-sm text-clay">
-      <a href="https://github.com/iluxav/rusted" class="hidden px-3 py-2 font-mono text-xs transition-colors hover:text-cream sm:block">GitHub ↗</a>
-      <a href="/login" class="btn-secondary px-4 py-2 text-sm">Open console <span class="text-ember">→</span></a>
-    </nav>
-  </header>
-
-  <main class="flex w-full min-w-0 flex-1 flex-col items-center pb-20 pt-16 text-center sm:pt-24">
-    <div class="mb-7 inline-flex items-center gap-2.5 rounded-full border border-copper/20 bg-rust-900/80 px-3.5 py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-clay backdrop-blur">
-      <span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span>
-      Runtime online
-      <span class="text-copper/50">/</span>
-      mcp ready
-    </div>
-
-    <h1 class="max-w-4xl font-display text-5xl font-semibold leading-[0.98] tracking-[-0.06em] text-cream sm:text-7xl lg:text-[5.75rem]">
-      The <span class="text-ember">eval</span> you can<br>hand a model.
-    </h1>
-    <p class="mt-7 max-w-xl text-base leading-7 text-clay sm:text-lg">
-      Your agent writes JavaScript. rusted runs it in about a millisecond, in a
-      sandbox that stops infinite loops, refuses private networks, and has no
-      filesystem at all. One HTTP call, or connect it over MCP.
-    </p>
-
-    <div class="mt-9 flex flex-col items-center gap-3 sm:flex-row">
-      <a href="/login" class="btn-primary px-6 py-3 text-sm">
-        Connect your agent <span aria-hidden="true">→</span>
+  <div class="mx-auto flex min-h-full max-w-6xl flex-col px-5 sm:px-8">
+    <header class="flex items-center justify-between border-b border-copper/10 py-5">
+      <a href="/" class="group flex items-center gap-2.5 font-display text-xl font-bold tracking-[-0.04em] text-cream" aria-label="Rusted home">
+        <span class="flex h-7 w-7 items-center justify-center rounded-md border border-ember/30 bg-ember/10 font-mono text-sm text-ember transition-colors group-hover:bg-ember group-hover:text-rust-950">r_</span>
+        <span>rusted<span class="text-copper">.sh</span></span>
       </a>
-      <code class="rounded-md border border-copper/20 bg-rust-900/60 px-3.5 py-2.5 font-mono text-xs text-ember-soft">https://rusted.sh/mcp</code>
-    </div>
+      <nav class="flex items-center gap-2" aria-label="Primary navigation">
+        <a href="https://github.com/iluxav/rusted" target="_blank" rel="noreferrer" aria-label="Rusted on GitHub" title="View Rusted on GitHub"
+           class="btn-secondary h-9 w-9 p-0 text-clay hover:text-cream">
+          <svg viewBox="0 0 16 16" class="h-4 w-4" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        </a>
+        <a href="/login" class="btn-secondary px-4 py-2 text-sm">Console <span class="text-ember" aria-hidden="true">→</span></a>
+      </nav>
+    </header>
 
-    <!-- The hero is what gets refused. Anyone can show a deploy succeeding;
-         the hard part of running code a model wrote is what happens when it
-         misbehaves, so that goes first and the useful call goes last. -->
-    <div class="surface mt-14 w-full min-w-0 max-w-3xl overflow-hidden rounded-xl text-left shadow-[0_28px_100px_-34px_rgba(255,107,36,0.28)]">
-      <div class="flex items-center justify-between border-b border-copper/10 bg-black/10 px-4 py-3 sm:px-5">
-        <div class="flex items-center gap-2">
-          <span class="h-2 w-2 rounded-full bg-blood/70"></span>
-          <span class="h-2 w-2 rounded-full bg-copper/60"></span>
-          <span class="h-2 w-2 rounded-full bg-sage/70"></span>
-          <span class="ml-2 font-mono text-[11px] text-clay">agent → rusted.execute</span>
-        </div>
-        <span class="hidden font-mono text-[10px] uppercase tracking-widest text-copper/70 sm:block">sandboxed</span>
-      </div>
-      <div class="space-y-4 overflow-x-auto px-5 py-6 font-mono text-[12px] leading-relaxed sm:px-7 sm:text-[13px]">
-        <div class="space-y-1">
-          <p><span class="mr-2 text-ember">❯</span><span class="text-cream">while (true) {}</span></p>
-          <p class="text-clay"><span class="mr-2 text-blood">✗</span>terminated <span class="text-clay/60">— wall deadline, 1000ms</span></p>
-        </div>
-        <div class="space-y-1">
-          <p><span class="mr-2 text-ember">❯</span><span class="text-cream">fetch("http://169.254.169.254/latest/meta-data/")</span></p>
-          <p class="text-clay"><span class="mr-2 text-blood">✗</span>refused <span class="text-clay/60">— resolves to a private address</span></p>
-        </div>
-        <div class="space-y-1">
-          <p><span class="mr-2 text-ember">❯</span><span class="text-cream">require("fs").readFileSync("/etc/passwd")</span></p>
-          <p class="text-clay"><span class="mr-2 text-blood">✗</span>require is not defined</p>
-        </div>
-        <div class="space-y-1 border-t border-copper/10 pt-4">
-          <p><span class="mr-2 text-ember">❯</span><span class="text-cream">const r = await fetch(api); return ctx.json({ stars: r.stars })</span></p>
-          <p class="text-clay"><span class="mr-2 text-sage">✓</span>200 <span class="text-copper/50">/</span> 1.25ms <span class="text-copper/50">/</span> <span class="text-cream">6,180 bytes in, 74 out</span></p>
-        </div>
-        <p class="caret"><span class="mr-2 text-ember">❯</span></p>
-      </div>
-    </div>
+    <main class="flex-1 pb-24">
+      <section class="grid items-center gap-14 pb-16 pt-16 sm:pt-24 lg:grid-cols-[1.02fr_.98fr] lg:gap-16 lg:pb-24 lg:pt-28">
+        <div>
+          <div class="mb-6 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-copper">
+            <span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span>
+            QuickJS sandbox
+            <span class="text-copper/40">//</span>
+            written in Rust
+          </div>
 
-    <p class="mt-6 max-w-2xl text-sm leading-6 text-clay">
-      That last line is the point: the fetch happened next to the data, and only
-      the answer came back. A response too large to read stops being a problem
-      when your agent never has to read it.
-    </p>
+          <h1 class="max-w-2xl font-display text-5xl font-semibold leading-[0.96] tracking-[-0.06em] text-cream sm:text-7xl lg:text-[5.25rem]">
+            Give agents a runtime.<br><span class="text-ember">Not your machine.</span>
+          </h1>
+          <p class="mt-7 max-w-xl text-base leading-7 text-clay sm:text-lg">
+            rusted runs agent-written JavaScript inside a fresh, stoppable sandbox.
+            Execute code, publish an HTTP endpoint, or receive a callback — over
+            MCP, or from the CLI.
+          </p>
 
-    <div class="mt-14 grid w-full min-w-0 max-w-3xl grid-cols-1 border-y border-copper/10 text-left sm:grid-cols-3">
-      <div class="px-2 py-5 sm:border-r sm:border-copper/10 sm:px-5">
-        <p class="eyebrow">01 / execute</p>
-        <p class="mt-2 text-sm text-cream">Code in, answer out.</p>
-        <p class="mt-1.5 text-xs leading-5 text-clay">Nothing saved, nothing to clean up. About a millisecond.</p>
-      </div>
-      <div class="border-t border-copper/10 px-2 py-5 sm:border-r sm:border-t-0 sm:px-5">
-        <p class="eyebrow">02 / deploy</p>
-        <p class="mt-2 text-sm text-cream">A public URL in a second.</p>
-        <p class="mt-1.5 text-xs leading-5 text-clay">Your agent publishes a tool, then calls it — or hands it to another agent.</p>
-      </div>
-      <div class="border-t border-copper/10 px-2 py-5 sm:border-t-0 sm:px-5">
-        <p class="eyebrow">03 / receive</p>
-        <p class="mt-2 text-sm text-cream">An address of its own.</p>
-        <p class="mt-1.5 text-xs leading-5 text-clay">Throwaway inboxes for OAuth callbacks, webhooks, anything that calls back.</p>
-      </div>
-    </div>
+          <div class="mt-9 flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+            <a href="/login" class="btn-primary px-5 py-3 text-sm">Open the console <span aria-hidden="true">→</span></a>
+            <!-- Not a link: this endpoint only answers JSON-RPC over POST, so
+                 clicking it would serve a 405. It is an address to paste into an
+                 MCP client, so present it as one. -->
+            <p class="font-mono text-[11px] text-clay">
+              <span class="mr-2 text-ember">MCP</span><code class="select-all">https://rusted.sh/mcp</code>
+            </p>
+          </div>
+        </div>
 
-    <div class="mt-14 w-full min-w-0 max-w-3xl text-left">
-      <p class="eyebrow">Why not just give it a shell</p>
-      <p class="mt-3 max-w-2xl text-sm leading-6 text-clay">
-        Because you would have to trust it. A model-written script is one prompt
-        injection from hostile, and the usual answer — boot a container — costs
-        <span class="text-cream">150ms or more</span> before a line runs. rusted
-        starts a fresh sandbox per call in
-        <span class="text-cream">about a millisecond</span>, and the limits are
-        the runtime, not a policy layer: the interrupt cannot be caught, the heap
-        is capped, and there is no filesystem to reach.
-      </p>
-      <p class="mt-3 max-w-2xl text-sm leading-6 text-clay">
-        It runs JavaScript and nothing else. If your agent needs Python and pip,
-        you want a microVM. If it needs to call an API, reshape some JSON, or
-        stand up a webhook — that is this.
-      </p>
-    </div>
-  </main>
+        <div class="terminal surface relative min-w-0 overflow-hidden rounded-xl shadow-[0_30px_100px_-35px_rgba(255,107,36,0.32)]">
+          <div class="flex items-center justify-between border-b border-copper/10 bg-black/10 px-4 py-3">
+            <div class="flex items-center gap-2">
+              <span class="h-2 w-2 rounded-full bg-blood/65"></span>
+              <span class="h-2 w-2 rounded-full bg-copper/60"></span>
+              <span class="h-2 w-2 rounded-full bg-sage/70"></span>
+              <span class="ml-2 font-mono text-[10px] text-clay">rusted.sh/session</span>
+            </div>
+            <span class="font-mono text-[9px] uppercase tracking-widest text-sage">isolated</span>
+          </div>
 
-  <footer class="flex items-center justify-between border-t border-copper/10 py-5 font-mono text-[10px] uppercase tracking-widest text-clay/70">
-    <span>rusted / sandboxed js for agents</span>
-    <a href="/login" class="text-copper transition-colors hover:text-ember">console →</a>
-  </footer>
+          <div class="terminal-screen relative space-y-5 overflow-x-auto px-5 py-6 font-mono text-[11px] leading-relaxed sm:px-6 sm:py-7 sm:text-[12px]">
+            <div class="terminal-line">
+              <p class="whitespace-nowrap text-cream"><span class="mr-2 text-ember">01:❯</span>mcp.call(<span class="text-copper">"execute"</span>, { code: <span class="text-copper">"export default () =&gt; { while (true) {} }"</span> })</p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="mr-2 text-blood">ERR</span>wall deadline: interrupted <span class="text-clay/50">/ kind: limit / 1001.98ms</span></p>
+            </div>
+            <div class="terminal-line terminal-line-delay-1">
+              <p class="whitespace-nowrap text-cream"><span class="mr-2 text-ember">02:❯</span>mcp.call(<span class="text-copper">"execute"</span>, { code: <span class="text-copper">"export default () =&gt; fetch('http://169.254.169.254')"</span> })</p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="mr-2 text-blood">ERR</span>169.254.169.254 resolves to a private address <span class="text-clay/50">/ kind: script</span></p>
+            </div>
+            <div class="terminal-line terminal-line-delay-2 border-t border-copper/10 pt-5">
+              <p class="whitespace-nowrap text-cream"><span class="mr-2 text-ember">03:❯</span>mcp.call(<span class="text-copper">"deploy"</span>, { code, name: <span class="text-copper">"normalize"</span> })</p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="mr-2 text-sage">OK</span><span class="text-ember-soft">https://rusted.sh/f/normalize</span> <span class="text-clay/50">/ POST / rev 1</span></p>
+            </div>
+            <p class="terminal-line terminal-line-delay-3 caret text-cream"><span class="mr-2 text-ember">04:❯</span></p>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid border-y border-copper/10 font-mono text-[10px] uppercase tracking-[0.13em] text-clay sm:grid-cols-3">
+        <div class="py-4 sm:border-r sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">host</span> Rust + QuickJS</div>
+        <div class="border-t border-copper/10 py-4 sm:border-r sm:border-t-0 sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">boot</span> ~1ms, cold every call</div>
+        <div class="border-t border-copper/10 py-4 sm:border-t-0 sm:px-5"><span class="mr-2 text-copper">surface</span> MCP + HTTP</div>
+      </div>
+
+      <section class="grid gap-10 border-b border-copper/10 py-20 lg:grid-cols-[.72fr_1.28fr] lg:gap-20">
+        <div>
+          <p class="eyebrow">MCP tools</p>
+          <h2 class="mt-4 max-w-sm font-display text-3xl font-semibold leading-tight tracking-[-0.04em] text-cream sm:text-4xl">Three primitives.<br>No control-panel maze.</h2>
+        </div>
+
+        <div class="divide-y divide-copper/10 border-y border-copper/10">
+          <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
+            <code class="font-mono text-xs text-ember">execute()</code>
+            <p class="text-sm leading-6 text-clay"><span class="text-cream">Run code once.</span> Return the answer and throw the sandbox away.</p>
+          </div>
+          <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
+            <code class="font-mono text-xs text-ember">deploy()</code>
+            <p class="text-sm leading-6 text-clay"><span class="text-cream">Turn one file into a URL.</span> No container spec, build service, or server process.</p>
+          </div>
+          <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
+            <code class="font-mono text-xs text-ember">inbox_create()</code>
+            <p class="text-sm leading-6 text-clay"><span class="text-cream">Give the agent an address.</span> Receive OAuth callbacks and webhooks, then expire it.</p>
+          </div>
+          <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
+            <code class="font-mono text-xs text-clay/60">+ 3 more</code>
+            <p class="text-sm leading-6 text-clay/70"><code class="text-clay">inbox_read</code>, <code class="text-clay">list</code>, <code class="text-clay">delete</code> — housekeeping. Six tools is the whole API.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid gap-12 py-20 lg:grid-cols-2 lg:gap-24">
+        <div class="font-mono text-[11px]">
+          <div class="mb-3 flex items-center justify-between text-clay">
+            <span>sandbox.capabilities</span><span class="text-copper">read only</span>
+          </div>
+          <div class="surface overflow-hidden rounded-lg">
+            <div class="capability-row"><span>filesystem</span><span class="text-blood">undefined</span></div>
+            <div class="capability-row"><span>private_network</span><span class="text-blood">denied</span></div>
+            <div class="capability-row"><span>heap</span><span class="text-copper">32 MB cap</span></div>
+            <div class="capability-row"><span>deadline</span><span class="text-copper">uncatchable</span></div>
+            <div class="capability-row"><span>context</span><span class="text-sage">fresh per call</span></div>
+          </div>
+        </div>
+
+        <div class="lg:pt-3">
+          <p class="eyebrow">The boundary is the product</p>
+          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Small on purpose.</h2>
+          <p class="mt-5 text-sm leading-7 text-clay">
+            rusted is JavaScript, fetch, and a return value. It has no shell to escape,
+            no filesystem to inspect, and no runaway loop the runtime cannot stop.
+          </p>
+          <p class="mt-4 text-sm leading-7 text-clay">
+            Need Python, pip, or a whole OS? Use a microVM. Need to call an API,
+            reshape JSON, publish a webhook, or make a one-off tool? That is this.
+          </p>
+        </div>
+      </section>
+
+      <section class="surface relative overflow-hidden rounded-xl px-5 py-7 sm:flex sm:items-center sm:justify-between sm:gap-8 sm:px-7">
+        <div>
+          <p class="eyebrow">Install / one binary</p>
+          <p class="mt-2 text-sm text-cream">Run locally. Point at rusted.sh when you are ready.</p>
+        </div>
+        <code class="mt-5 block max-w-full overflow-x-auto whitespace-nowrap rounded-md border border-copper/10 bg-rust-950 px-4 py-3 font-mono text-[10px] text-clay sm:mt-0 sm:text-[11px]"><span class="mr-2 text-ember">$</span>curl -fsSL https://raw.githubusercontent.com/iluxav/rusted/main/install.sh | sh</code>
+      </section>
+    </main>
+
+    <footer class="flex flex-col gap-3 border-t border-copper/10 py-5 font-mono text-[9px] uppercase tracking-widest text-clay/70 sm:flex-row sm:items-center sm:justify-between">
+      <span>rusted.sh / sandboxed JavaScript / built in Rust</span>
+      <div class="flex gap-5">
+        <a href="https://github.com/iluxav/rusted" class="transition-colors hover:text-ember">source ↗</a>
+        <a href="/login" class="text-copper transition-colors hover:text-ember">console →</a>
+      </div>
+    </footer>
+  </div>
 </div>
+
+<style>
+  .landing-page::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent 49.9%, rgba(196,123,69,.035) 50%, transparent 50.1%);
+  }
+  .terminal::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(110deg, transparent 0 42%, rgba(255,154,98,.025) 49%, transparent 56% 100%);
+    transform: translateX(-100%);
+    animation: terminal-sweep 8s ease-in-out 1.5s infinite;
+  }
+  .terminal-screen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: .12;
+    background: repeating-linear-gradient(to bottom, transparent 0, transparent 3px, rgba(255,255,255,.04) 4px);
+  }
+  .terminal-line { animation: terminal-in 420ms both; }
+  .terminal-line-delay-1 { animation-delay: 100ms; }
+  .terminal-line-delay-2 { animation-delay: 200ms; }
+  .terminal-line-delay-3 { animation-delay: 300ms; }
+  .primitive-row { transition: padding-left 160ms ease, background 160ms ease; }
+  .primitive-row:hover { padding-left: .75rem; background: rgba(196,123,69,.025); }
+  .capability-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid rgba(196,123,69,.1); padding: .8rem 1rem; color: #a99282; }
+  .capability-row:last-child { border-bottom: 0; }
+  @keyframes terminal-in {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes terminal-sweep {
+    0%, 65% { transform: translateX(-100%); }
+    85%, 100% { transform: translateX(100%); }
+  }
+  @media (max-width: 640px) {
+    .landing-page::before { display: none; }
+    .primitive-row:hover { padding-left: 0; }
+  }
+</style>
 {% endblock %}
