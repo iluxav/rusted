@@ -93,7 +93,7 @@ Every command takes `--json` for stable machine-readable output.
 | Path                   | Purpose                                                                                                                                                                      |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `crates/rusted-engine` | QuickJS executor: uncatchable wall-clock interrupt, heap cap, output cap, structured `console` logs, fresh context per invocation                                            |
-| `crates/rusted-server` | Orchestrator: data API (`/f/<name>`, `/r/<id>`), admin API for the CLI, content-addressed Postgres store with immutable revisions, per-function concurrency 1, temp-run TTLs |
+| `crates/rusted-server` | Orchestrator: data API (`/f/<name>`, `/r/<id>`), admin API for the CLI, content-addressed Postgres store with immutable revisions, inboxes, per-function concurrency 1, temp-run TTLs |
 | `crates/rusted-cli`    | The single `rusted` binary                                                                                                                                                   |
 
 The engine choice (QuickJS over Boa) came out of a measured spike — cold start, throughput, memory, and whether hostile code can actually be stopped. QuickJS won on all four, decisively on the last: it can interrupt a runaway script uncatchably and cap its heap, which Boa cannot.
@@ -153,6 +153,62 @@ return context.json(
 ```
 
 Status must be 200–599. Headers that frame the response — `content-length`, `transfer-encoding`, `connection`, and friends — belong to the platform and are refused, as is any value containing a line break. A refused header fails the call rather than shipping a half-correct response.
+
+## Receiving: inboxes
+
+A function can call out. Nothing can call *in* — which rules out OAuth callbacks, webhooks, form submissions, and anything a third party has to initiate. That's especially true of an agent running in a browser or someone's cloud: it has no address at all.
+
+An inbox is a throwaway URL that accepts a POST from anyone and holds what arrives:
+
+```bash
+rusted inbox new stripe-data --ttl 2m
+# https://rusted.sh/inbox/435007f5f71dc851a66e39aedb5b4e43ebdadb5ae12c878a
+#   anyone with this URL can POST to it; reading needs your key
+#   expires in 120s
+```
+
+**The write address and the read handle are deliberately different things.** The URL is unguessable and grants exactly one capability: writing. Reading is by name and needs your key. So handing the URL to Stripe never hands over what Stripe sent — and that separation is what makes it safe to paste a receiving URL into someone else's dashboard.
+
+Read it three ways. From the CLI:
+
+```bash
+rusted inbox get stripe-data     # also: inbox list, inbox rm <name>
+```
+
+From inside a deployed function, scoped to whoever deployed it:
+
+```js
+export default async function handler(request, context) {
+  const messages = await context.inbox.get("stripe-data");
+  const total = messages.reduce((sum, m) => sum + (m.amount ?? 0), 0);
+  return context.json({ payments: messages.length, total_cents: total });
+}
+```
+
+Or over MCP as `inbox_create` and `inbox_read`, which is how an agent uses it — create an inbox, hand out the URL, poll until something lands.
+
+Scoping comes from the function's stored owner, never from the name asked for, so a handler can't name its way into another account's inbox.
+
+### How arrivals accumulate
+
+```bash
+rusted inbox new events   --ttl 1h                      # keep every message
+rusted inbox new oauth-cb --ttl 2m --store upsert --drain
+```
+
+`--store append` (the default) keeps everything; `upsert` keeps only the most recent, which is what you want for a single value like an OAuth code. `--drain` removes the inbox on the first read that finds something, like taking a message off a queue.
+
+Both defaults are the non-lossy choice, because `upsert` silently discards earlier writes and `--drain` silently discards on read. Note that `--drain` is at-most-once: if the read fails in transit the message is gone, which is fine for a code you can request again and wrong for a payment event.
+
+### What it costs and when it ends
+
+The TTL runs **from creation and is never extended by activity** — sliding expiry would let anyone holding the write URL keep the inbox, and its storage, alive indefinitely. When it's over the URL answers `410 Gone`, which tells a well-behaved webhook sender to stop retrying rather than escalating to a disabled endpoint. Expired, drained, and never-existed are all the same `410`, so probing addresses reveals nothing. An inbox that's alive but empty answers `200` with no messages, so a polling agent can tell "nothing yet" from "too late".
+
+A public write endpoint is an unbounded write primitive unless it's bounded, so: 64KB per message, 100 messages, and 1000 accepted writes over an inbox's life. Bodies that aren't valid UTF-8 are refused rather than stored mangled.
+
+Messages are served from memory and written through to Postgres on the same call, so a restart loses nothing and other server instances are told to reload over the same `LISTEN/NOTIFY` channel everything else uses. Expiry deletes the payload rather than merely hiding it — a TTL on something holding webhook data is a promise it stops existing.
+
+> `context.inbox` is only present on a deployed function. `rusted run` lends no host services, so a handler that uses it works deployed and fails locally; it's typed as optional so that's visible before you ship.
 
 ## Using npm packages
 
