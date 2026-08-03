@@ -162,6 +162,9 @@ enum Cmd {
     Delete { name: String },
     /// Show recent invocations of a function with their console output
     Logs { name: String },
+    /// Throwaway URLs that anyone can POST to, for receiving callbacks
+    #[command(subcommand)]
+    Inbox(InboxCmd),
     /// Write TypeScript declarations for `request`, `context`, and the globals
     Types {
         /// Where to write them (default: rusted.d.ts)
@@ -176,6 +179,29 @@ enum Cmd {
         #[arg(long)]
         js: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum InboxCmd {
+    /// Create one and print the URL to hand out
+    New {
+        name: String,
+        /// How long it lives, from creation — never extended by activity
+        #[arg(long, default_value_t = 300)]
+        ttl: i64,
+        /// "append" keeps every message; "upsert" keeps only the latest
+        #[arg(long, default_value = "append")]
+        store: String,
+        /// Delete on the first read that finds something, like a queue
+        #[arg(long)]
+        drain: bool,
+    },
+    /// Read what has arrived
+    Get { name: String },
+    /// Show live inboxes
+    List,
+    /// Remove one before it expires
+    Rm { name: String },
 }
 
 impl Cli {
@@ -596,6 +622,79 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             );
             Ok(())
         }
+        Cmd::Inbox(ref sub) => match sub {
+            InboxCmd::New {
+                name,
+                ttl,
+                store,
+                drain,
+            } => {
+                let v = api(
+                    &cli,
+                    Method::POST,
+                    "/api/inboxes",
+                    Some(json!({
+                        "name": name,
+                        "ttl_seconds": ttl,
+                        "store": store,
+                        "drain": drain,
+                    })),
+                )?;
+                emit(&cli, &v, |v| {
+                    format!(
+                        "{}\n  anyone with this URL can POST to it; reading needs your key\n  expires in {}s",
+                        v["url"].as_str().unwrap_or(""),
+                        v["expires_in_seconds"]
+                    )
+                })
+            }
+            InboxCmd::Get { name } => {
+                let v = api(&cli, Method::GET, &format!("/api/inboxes/{name}"), None)?;
+                emit(&cli, &v, |v| {
+                    let messages = v["messages"].as_array().cloned().unwrap_or_default();
+                    if messages.is_empty() {
+                        return "nothing yet — the inbox is alive, try again".to_string();
+                    }
+                    let body = messages
+                        .iter()
+                        .map(|m| serde_json::to_string_pretty(m).unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if v["drained"] == json!(true) {
+                        format!("{body}\n\n  drained — this inbox is now gone")
+                    } else {
+                        body
+                    }
+                })
+            }
+            InboxCmd::List => {
+                let v = api(&cli, Method::GET, "/api/inboxes", None)?;
+                emit(&cli, &v, |v| {
+                    let inboxes = v["inboxes"].as_array().cloned().unwrap_or_default();
+                    if inboxes.is_empty() {
+                        return "no live inboxes".to_string();
+                    }
+                    inboxes
+                        .iter()
+                        .map(|i| {
+                            format!(
+                                "{:<20} {:<8} held {:<4} expires in {}s\n  {}",
+                                i["name"].as_str().unwrap_or(""),
+                                i["store"].as_str().unwrap_or(""),
+                                i["held"],
+                                i["expires_in_seconds"],
+                                i["url"].as_str().unwrap_or(""),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            }
+            InboxCmd::Rm { name } => {
+                let v = api(&cli, Method::DELETE, &format!("/api/inboxes/{name}"), None)?;
+                emit(&cli, &v, |_| format!("removed {name}"))
+            }
+        },
         Cmd::Logs { ref name } => {
             let v = api(&cli, Method::GET, &format!("/api/functions/{name}"), None)?;
             if cli.json {

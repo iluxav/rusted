@@ -1531,8 +1531,15 @@ async fn mcp_handshake_and_tool_listing() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert_eq!(
         names,
-        vec!["execute", "deploy", "list", "delete"],
-        "the whole lifecycle, and nothing more: {list}"
+        vec![
+            "execute",
+            "deploy",
+            "inbox_create",
+            "inbox_read",
+            "list",
+            "delete"
+        ],
+        "run, publish, receive, and clean up: {list}"
     );
 }
 
@@ -2069,4 +2076,221 @@ async fn mcp_delete_only_touches_your_own_functions() {
     assert_eq!(res["result"]["isError"], serde_json::json!(true), "{res}");
     let text = res["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("no function named"), "{text}");
+}
+
+// --- inboxes ------------------------------------------------------------------
+
+/// The whole point: an agent with no inbound address hands out a URL, something
+/// on the internet posts to it, and the agent reads what arrived.
+#[tokio::test]
+async fn an_inbox_receives_from_anyone_and_is_read_by_its_owner() {
+    let t = boot().await;
+
+    let (_, created) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"inbox_create",
+            "arguments":{ "name":"stripe-data", "ttl_seconds": 120 }}}),
+    )
+    .await;
+    let info: Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = info["url"].as_str().expect("a url").to_string();
+    assert!(url.contains("/inbox/"), "{info}");
+
+    // Nothing yet: alive and empty, which must be distinguishable from gone.
+    let (_, empty) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"inbox_read","arguments":{"name":"stripe-data"}}}),
+    )
+    .await;
+    assert_ne!(
+        empty["result"]["isError"],
+        serde_json::json!(true),
+        "{empty}"
+    );
+    let waiting: Value =
+        serde_json::from_str(empty["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(waiting["messages"].as_array().unwrap().len(), 0);
+    assert!(
+        waiting["note"].is_string(),
+        "should say to keep polling: {waiting}"
+    );
+
+    // A stranger posts — no credentials at all.
+    let anon = reqwest::Client::new();
+    let posted = anon
+        .post(&url)
+        .json(&serde_json::json!({ "type": "payment_intent.succeeded", "amount": 4200 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(posted.status(), 202, "anyone holding the URL may write");
+
+    let (_, got) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"inbox_read","arguments":{"name":"stripe-data"}}}),
+    )
+    .await;
+    let read: Value =
+        serde_json::from_str(got["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(read["messages"][0]["amount"], 4200, "{read}");
+
+    // Not draining, so it is still there on a second read.
+    let (_, again) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"inbox_read","arguments":{"name":"stripe-data"}}}),
+    )
+    .await;
+    let reread: Value =
+        serde_json::from_str(again["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(reread["messages"].as_array().unwrap().len(), 1);
+}
+
+/// Holding the write URL must never grant reading — that is the whole reason
+/// the address and the name are different things.
+#[tokio::test]
+async fn the_write_url_cannot_be_used_to_read() {
+    let t = boot().await;
+    let (_, created) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"inbox_create","arguments":{"name":"secrets","ttl_seconds":120}}}),
+    )
+    .await;
+    let info: Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = info["url"].as_str().unwrap().to_string();
+
+    let anon = reqwest::Client::new();
+    anon.post(&url)
+        .json(&serde_json::json!({ "code": "an-oauth-code" }))
+        .send()
+        .await
+        .unwrap();
+
+    // GET on the write address is not a route at all.
+    let peek = anon.get(&url).send().await.unwrap();
+    assert!(
+        peek.status() == 405 || peek.status() == 404,
+        "the write address must not serve reads, got {}",
+        peek.status()
+    );
+
+    // And the owner's read path needs the key.
+    let unauthenticated = anon
+        .get(t.admin("/api/inboxes/secrets"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauthenticated.status(),
+        401,
+        "reading must require the key"
+    );
+}
+
+/// upsert keeps the latest; drain takes the message off on first read.
+#[tokio::test]
+async fn upsert_and_drain_behave_as_named() {
+    let t = boot().await;
+    let (_, created) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"inbox_create",
+            "arguments":{"name":"oauth-cb","ttl_seconds":120,"store":"upsert","drain":true}}}),
+    )
+    .await;
+    let info: Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = info["url"].as_str().unwrap().to_string();
+
+    let anon = reqwest::Client::new();
+    for code in ["first", "second", "third"] {
+        anon.post(&url)
+            .json(&serde_json::json!({ "code": code }))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let (_, got) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"inbox_read","arguments":{"name":"oauth-cb"}}}),
+    )
+    .await;
+    let read: Value =
+        serde_json::from_str(got["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        read["messages"].as_array().unwrap().len(),
+        1,
+        "upsert keeps one: {read}"
+    );
+    assert_eq!(read["messages"][0]["code"], "third", "and it is the latest");
+    assert_eq!(read["drained"], true);
+
+    // Drained, so it is gone — and the write URL is gone with it.
+    let (_, after) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"inbox_read","arguments":{"name":"oauth-cb"}}}),
+    )
+    .await;
+    assert_eq!(
+        after["result"]["isError"],
+        serde_json::json!(true),
+        "{after}"
+    );
+    let gone = anon.post(&url).body("{}").send().await.unwrap();
+    assert_eq!(gone.status(), 410, "a dead inbox must tell senders to stop");
+}
+
+/// A public write endpoint is an unbounded write primitive unless it is capped,
+/// and a body that is not text must be refused rather than stored mangled.
+#[tokio::test]
+async fn the_public_endpoint_is_bounded() {
+    let t = boot().await;
+    let (_, created) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"inbox_create","arguments":{"name":"bounded","ttl_seconds":120}}}),
+    )
+    .await;
+    let info: Value =
+        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let url = info["url"].as_str().unwrap().to_string();
+    let anon = reqwest::Client::new();
+
+    let too_big = anon
+        .post(&url)
+        .body("x".repeat(rusted_server::inbox::MAX_MESSAGE_BYTES + 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_big.status(), 413, "oversized messages must be refused");
+
+    let binary = anon
+        .post(&url)
+        .body(vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        binary.status(),
+        400,
+        "non-UTF-8 must be refused, not mangled"
+    );
+
+    // An address nobody issued is gone, not "not found" — no oracle.
+    let nowhere = anon
+        .post(t.admin("/inbox/0000000000000000000000000000000000000000000000"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(nowhere.status(), 410);
 }

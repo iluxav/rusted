@@ -1320,11 +1320,64 @@ fn mcp_tools() -> Value {
         }
     },
     {
+        "name": "inbox_create",
+        "description":
+            "Create a throwaway URL that anyone can POST to, and get that URL back. \
+             Use it to receive something you cannot fetch: an OAuth callback, a webhook \
+             from Stripe or GitHub, a form submission, a reply from another agent, or a \
+             'job finished' notification.\
+             \n\nYou have no inbound address otherwise — this is how something on the \
+             internet reaches you. Hand the URL out, then poll `inbox_read` by name until \
+             it arrives. Holding the URL only allows writing; reading needs your key, so \
+             giving it to a third party never gives them what they sent.\
+             \n\nThe inbox expires and the URL stops working. Pick a ttl that covers the \
+             wait and no more.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "How you will ask for it back. 1-64 chars of a-z, 0-9, '-', '_'. Reusing a name replaces the old inbox."
+                },
+                "ttl_seconds": {
+                    "type": "integer",
+                    "description": "How long it lives, from creation. Default 300, max 86400. Never extended by activity."
+                },
+                "store": {
+                    "type": "string",
+                    "enum": ["append", "upsert"],
+                    "description": "'append' keeps every message (default). 'upsert' keeps only the most recent — use it when you want the latest value, like a single OAuth code."
+                },
+                "drain": {
+                    "type": "boolean",
+                    "description": "Delete the inbox on the first read that finds something, like taking a message off a queue. Default false. Note the message is then unrecoverable if the read fails in transit."
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "inbox_read",
+        "description":
+            "Read what has arrived at an inbox. Poll this after handing out the URL from \
+             `inbox_create`.\
+             \n\nAn empty `messages` array means the inbox is alive and nothing has \
+             arrived yet — keep polling. An error saying the inbox is gone means it \
+             expired or was drained, and waiting longer will not help.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "The inbox name you chose." }
+            },
+            "required": ["name"]
+        }
+    },
+    {
         "name": "list",
         "description":
-            "List the functions deployed on this account, with their URLs and methods. \
-             Use it to find something deployed earlier, or to check what exists before \
-             choosing a name.",
+            "List what exists on this account: deployed functions with their URLs and \
+             methods, and any live inboxes with how long they have left. Use it to find \
+             something from earlier, or to check a name before reusing it.",
         "inputSchema": { "type": "object", "properties": {} }
     },
     {
@@ -1491,7 +1544,11 @@ async fn mcp_list(state: &Arc<AppState>, user_id: Uuid) -> Value {
             }));
         }
     }
-    mcp_tool_result(json!({ "functions": functions }).to_string(), false)
+    let inboxes = crate::inbox::list(state, user_id).await.unwrap_or_default();
+    mcp_tool_result(
+        json!({ "functions": functions, "inboxes": inboxes }).to_string(),
+        false,
+    )
 }
 
 async fn mcp_delete(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
@@ -1506,6 +1563,44 @@ async fn mcp_delete(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
     match state.store.delete(name).await {
         Ok(_) => mcp_tool_result(json!({ "deleted": name }).to_string(), false),
         Err(e) => mcp_tool_result(format!("could not delete '{name}': {e}"), true),
+    }
+}
+
+async fn mcp_inbox_create(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
+    match crate::inbox::create_endpoint(state, user_id, args.clone()).await {
+        Ok(value) => mcp_tool_result(value.to_string(), false),
+        // The body of the refusal carries the reason; a model reads it and
+        // corrects, so it must not be flattened to a status.
+        Err(_) => mcp_tool_result(
+            json!({ "error": "could not create that inbox — check the name, ttl and store mode" })
+                .to_string(),
+            true,
+        ),
+    }
+}
+
+async fn mcp_inbox_read(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
+    let Some(name) = args.get("name").and_then(|n| n.as_str()) else {
+        return mcp_tool_result("`name` is required and must be a string".into(), true);
+    };
+    match crate::inbox::read(state, user_id, name).await {
+        Ok(crate::inbox::Reading::Alive { messages, drained }) => {
+            let waiting = messages.is_empty();
+            let mut out = json!({ "name": name, "messages": messages, "drained": drained });
+            if waiting {
+                // Said explicitly, because "empty" and "expired" lead to
+                // opposite decisions and a model should not have to guess.
+                out["note"] = json!("alive, nothing has arrived yet — poll again");
+            }
+            mcp_tool_result(out.to_string(), false)
+        }
+        Ok(crate::inbox::Reading::Gone) => mcp_tool_result(
+            json!({ "error": format!("inbox '{name}' has expired, been drained, or never existed"),
+                    "kind": "gone" })
+            .to_string(),
+            true,
+        ),
+        Err(e) => mcp_tool_result(json!({ "error": e }).to_string(), true),
     }
 }
 
@@ -1533,6 +1628,8 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
                 "deploy" => ok(mcp_deploy(state, user_id, &args).await),
                 "list" => ok(mcp_list(state, user_id).await),
                 "delete" => ok(mcp_delete(state, user_id, &args).await),
+                "inbox_create" => ok(mcp_inbox_create(state, user_id, &args).await),
+                "inbox_read" => ok(mcp_inbox_read(state, user_id, &args).await),
                 other => ok(mcp_tool_result(format!("unknown tool: {other}"), true)),
             }
         }
@@ -1596,6 +1693,77 @@ async fn mcp_endpoint(State(state): Shared, headers: HeaderMap, body: Bytes) -> 
     ([("mcp-session-id", session)], Json(payload)).into_response()
 }
 
+// ------------------------------------------------------------------ inboxes
+
+async fn inbox_create(
+    State(state): Shared,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    match crate::inbox::create_endpoint(&state, user_id, body).await {
+        Ok(value) => Json(value).into_response(),
+        Err(response) => response,
+    }
+}
+
+async fn inbox_list(State(state): Shared, headers: HeaderMap) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    match crate::inbox::list(&state, user_id).await {
+        Ok(inboxes) => Json(json!({ "inboxes": inboxes })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store_error", e),
+    }
+}
+
+async fn inbox_read(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    match crate::inbox::read(&state, user_id, &name).await {
+        // Alive but empty is a 200, not a 410: an agent polling a fresh inbox
+        // has to be able to tell "nothing yet" from "too late".
+        Ok(crate::inbox::Reading::Alive { messages, drained }) => Json(json!({
+            "name": name,
+            "messages": messages,
+            "drained": drained,
+        }))
+        .into_response(),
+        Ok(crate::inbox::Reading::Gone) => err(
+            StatusCode::GONE,
+            "gone",
+            "this inbox has expired, been drained, or never existed",
+        ),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store_error", e),
+    }
+}
+
+async fn inbox_delete(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    match crate::inbox::delete(&state, user_id, &name).await {
+        Ok(true) => Json(json!({ "deleted": name })).into_response(),
+        Ok(false) => err(StatusCode::GONE, "gone", "no such inbox"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store_error", e),
+    }
+}
+
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/functions", post(push_function).get(list_functions))
@@ -1610,6 +1778,8 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         // Unauthenticated by necessity: a client starting the device flow has
         // no credential yet. Both are rate limited and every code expires.
         .route("/mcp", post(mcp_endpoint))
+        .route("/api/inboxes", post(inbox_create).get(inbox_list))
+        .route("/api/inboxes/{name}", get(inbox_read).delete(inbox_delete))
         .route("/api/device/code", post(device_start))
         .route("/api/device/token", post(device_poll))
         .layer(DefaultBodyLimit::max(ADMIN_BODY_LIMIT))
