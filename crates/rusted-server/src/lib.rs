@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod bundler;
 pub mod device;
+pub mod inbox;
 pub mod local;
 pub mod memory;
 pub mod oauth;
@@ -107,8 +108,12 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .expect("admin_addr set exactly once");
 
     let data_app = api::data_router(state.clone());
+    // The public inbox write route rides the admin listener, alongside the
+    // console, OAuth registration and .well-known — all public and
+    // unauthenticated — so the deployed proxy needs no new rule.
     let admin_app = api::admin_router(state.clone())
         .merge(oauth::router(state.clone()))
+        .merge(inbox::public_router(state.clone()))
         .merge(web::router(web::WebState::new(state.clone())));
     let tasks = vec![
         tokio::spawn(async move {
