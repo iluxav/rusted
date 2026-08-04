@@ -20,3 +20,6 @@ tiny-quickjs-lambda-platform.md
 .claude
 .DS_Store
 *.log
+
+# Git worktrees
+.worktrees/
