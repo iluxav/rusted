@@ -133,16 +133,15 @@ async fn a_huge_tool_output_hits_the_output_cap() {
 }
 
 #[tokio::test]
-#[ignore = "known hole: the async executor hangs on a never-settling promise where the \
-            blocking one reports Terminated — pre-existing, affects the http path \
-            identically; needs an engine-level deadline on promise.into_future"]
 async fn a_handler_returning_a_never_settling_promise_is_terminated() {
     let src = r#"export const mcp = { tools: { t: {
         description: "d", inputSchema: { type: "object" },
         handler() { return new Promise(() => {}); } } } };"#;
-    let r = run(src, "t").await;
+    let r = QuickJsExecutor::new()
+        .execute_tool_with_services(src, "t", &serde_json::json!({}), &limits(300), None)
+        .await;
     assert!(
-        matches!(r.outcome, Outcome::Terminated(_)),
+        matches!(&r.outcome, Outcome::Terminated(m) if m.contains("never")),
         "{:?}",
         r.outcome
     );

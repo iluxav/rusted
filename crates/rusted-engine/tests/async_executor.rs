@@ -164,6 +164,24 @@ async fn containment_holds_in_the_async_executor() {
     }
 }
 
+/// A promise that never settles runs no bytecode, so the QuickJS interrupt
+/// cannot fire; the host must enforce the wall deadline itself, and report it
+/// the same way the blocking executor does.
+#[tokio::test]
+async fn a_never_settling_handler_is_terminated_like_the_blocking_path() {
+    let l = limits(300, 0);
+    let src = "export default async function h() { return new Promise(() => {}); }";
+    let started = Instant::now();
+    let (s, a) = both(src, "{}", &l).await;
+    assert_eq!(s, a, "blocking={s} async={a}");
+    assert_eq!(a, "terminated:the handler never finished");
+    assert!(
+        started.elapsed() < Duration::from_millis(2000),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
 /// The reason for the whole change: awaits from separate invocations overlap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "hits the network; run explicitly"]

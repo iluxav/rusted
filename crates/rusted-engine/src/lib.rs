@@ -925,14 +925,9 @@ impl QuickJsExecutor {
                     )
                 }
             };
-            let finished = promise
-                .into_future::<String>()
-                .await
-                .map_err(|e| exception_message(&c, e));
-            let exec_wall = exec0.elapsed();
-            let expired = expired.load(Ordering::Relaxed);
-            let (outcome, response, logs, stack) = outcome_from_envelope(finished, expired, limits);
-            (outcome, response, logs, stack, exec_wall)
+            let (outcome, response, logs, stack) =
+                settle_with_deadline(&c, promise, deadline, &expired, limits).await;
+            (outcome, response, logs, stack, exec0.elapsed())
         });
 
         let (parts, cpu) = cpu_metered(body).await;
@@ -1030,18 +1025,50 @@ impl QuickJsExecutor {
                     )
                 }
             };
-            let finished = promise
-                .into_future::<String>()
-                .await
-                .map_err(|e| exception_message(&c, e));
-            let exec_wall = exec0.elapsed();
-            let expired = expired.load(Ordering::Relaxed);
-            let (outcome, response, logs, stack) = outcome_from_envelope(finished, expired, limits);
-            (outcome, response, logs, stack, exec_wall)
+            let (outcome, response, logs, stack) =
+                settle_with_deadline(&c, promise, deadline, &expired, limits).await;
+            (outcome, response, logs, stack, exec0.elapsed())
         });
 
         let (parts, cpu) = cpu_metered(body).await;
         assemble_result(parts, cpu, wall0, limits, &budget)
+    }
+}
+
+/// Waits for the glue's promise with the host holding the wall deadline.
+///
+/// The QuickJS interrupt only fires while bytecode runs, so a promise nothing
+/// will ever settle — `new Promise(() => {})` — leaves the job queue idle and
+/// `into_future` pending forever. The host enforces the same deadline from the
+/// outside, with a small grace so a genuine in-engine termination (which
+/// carries the more specific message) wins the race, and reports the expiry
+/// exactly as the blocking executor reports an unsettled promise.
+async fn settle_with_deadline<'js>(
+    c: &Ctx<'js>,
+    promise: Promise<'js>,
+    deadline: Instant,
+    expired: &AtomicBool,
+    limits: &Limits,
+) -> (Outcome, Response, Vec<LogEntry>, Option<String>) {
+    const GRACE: Duration = Duration::from_millis(50);
+    let settled = tokio::time::timeout_at(
+        (deadline + GRACE).into(),
+        promise.into_future::<String>(),
+    )
+    .await;
+    let expired = expired.load(Ordering::Relaxed);
+    match settled {
+        Ok(finished) => {
+            outcome_from_envelope(finished.map_err(|e| exception_message(c, e)), expired, limits)
+        }
+        // Feeding `classify_with` the dead-lock shape keeps the wording
+        // identical to what the blocking executor says for this situation.
+        Err(_) => (
+            classify_with("dead lock: the promise is still pending".to_string(), expired),
+            Response::default(),
+            Vec::new(),
+            None,
+        ),
     }
 }
 
