@@ -48,6 +48,16 @@ pub struct FunctionRecord {
     /// the invocation path must not query Postgres.
     #[serde(default)]
     pub user_id: Option<Uuid>,
+    /// Data-plane protocol: `"http"` or `"mcp"`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Deploy-time MCP tool metadata (handlers stripped); NULL for http.
+    #[serde(default)]
+    pub mcp: Option<serde_json::Value>,
+}
+
+fn default_kind() -> String {
+    "http".to_string()
 }
 
 impl FunctionRecord {
@@ -59,10 +69,22 @@ impl FunctionRecord {
     }
 }
 
+/// Snapshot of a function's current revision, served through the read cache —
+/// everything the invocation path needs without touching Postgres.
+#[derive(Debug, Clone)]
+pub struct Fetched {
+    pub source: String,
+    pub trigger: HttpTrigger,
+    pub owner: Option<Uuid>,
+    pub kind: String,
+    pub mcp: Option<serde_json::Value>,
+    pub rev: u64,
+}
+
 pub struct Store {
     pool: PgPool,
-    /// name → (record, source); the hot path for serving functions.
-    cache: Mutex<HashMap<String, Arc<(FunctionRecord, String)>>>,
+    /// name → current-revision snapshot; the hot path for serving functions.
+    cache: Mutex<HashMap<String, Arc<Fetched>>>,
 }
 
 impl Store {
@@ -129,6 +151,7 @@ impl Store {
             .await
     }
 
+    /// Push an http function with an explicit trigger.
     pub async fn push_with_trigger(
         &self,
         name: &str,
@@ -136,6 +159,24 @@ impl Store {
         trigger: HttpTrigger,
         user_id: Option<Uuid>,
     ) -> sqlx::Result<Revision> {
+        self.push_full(name, source, Some(&trigger), "http", None, user_id)
+            .await
+    }
+
+    /// The full push: kind selects the data-plane protocol (`"http"` or
+    /// `"mcp"`), mcp carries the tool metadata for mcp functions. A missing
+    /// trigger stores the default (mcp functions ignore it).
+    pub async fn push_full(
+        &self,
+        name: &str,
+        source: &str,
+        trigger: Option<&HttpTrigger>,
+        kind: &str,
+        mcp: Option<&serde_json::Value>,
+        user_id: Option<Uuid>,
+    ) -> sqlx::Result<Revision> {
+        let default_trigger = HttpTrigger::default();
+        let trigger = trigger.unwrap_or(&default_trigger);
         let hash = hex::encode(Sha256::digest(source.as_bytes()));
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -155,17 +196,19 @@ impl Store {
         .await?
         .get("next");
         sqlx::query(
-            "INSERT INTO functions (name, current_rev, methods, path, user_id)
-             VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO functions (name, current_rev, methods, path, user_id, kind, mcp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (name) DO UPDATE
                  SET current_rev = $2, methods = $3, path = $4, updated_at = now(),
-                     user_id = coalesce(functions.user_id, $5)",
+                     user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7",
         )
         .bind(name)
         .bind(rev)
         .bind(&trigger.methods)
         .bind(&trigger.path)
         .bind(user_id)
+        .bind(kind)
+        .bind(mcp)
         .execute(&mut *tx)
         .await?;
         let created_at: i64 = sqlx::query(
@@ -201,7 +244,7 @@ impl Store {
 
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
-            "SELECT current_rev, methods, path, user_id FROM functions WHERE name = $1",
+            "SELECT current_rev, methods, path, user_id, kind, mcp FROM functions WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -231,16 +274,19 @@ impl Store {
                 path: function.get("path"),
             },
             user_id: function.get("user_id"),
+            kind: function.get("kind"),
+            mcp: function.get("mcp"),
         }))
     }
 
     /// Source of the function's current revision.
     pub async fn source(&self, name: &str) -> sqlx::Result<Option<String>> {
-        Ok(self.fetch(name).await?.map(|hit| hit.1.clone()))
+        Ok(self.fetch(name).await?.map(|hit| hit.source.clone()))
     }
 
-    /// Record + source through the read cache — the per-request hot path.
-    pub async fn fetch(&self, name: &str) -> sqlx::Result<Option<Arc<(FunctionRecord, String)>>> {
+    /// Current-revision snapshot through the read cache — the per-request hot
+    /// path.
+    pub async fn fetch(&self, name: &str) -> sqlx::Result<Option<Arc<Fetched>>> {
         if let Some(hit) = self.cache.lock().unwrap().get(name) {
             return Ok(Some(hit.clone()));
         }
@@ -257,7 +303,14 @@ impl Store {
         .fetch_one(&self.pool)
         .await?
         .get("source");
-        let hit = Arc::new((record, source));
+        let hit = Arc::new(Fetched {
+            source,
+            trigger: record.trigger,
+            owner: record.user_id,
+            kind: record.kind,
+            mcp: record.mcp,
+            rev: record.current_rev,
+        });
         self.cache
             .lock()
             .unwrap()

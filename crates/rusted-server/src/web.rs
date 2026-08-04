@@ -1224,8 +1224,8 @@ async fn page_lambda(
     let Ok(Some(hit)) = state.0.app.store.fetch(&name).await else {
         return console_page(&state, &headers, &user, "", missing_lambda(&name)).await;
     };
-    let (record, source) = (&hit.0, &hit.1);
-    let trigger = record.trigger.clone();
+    let source = &hit.source;
+    let trigger = hit.trigger.clone();
     let route = format!("/f/{}{}", name, trigger.path.as_deref().unwrap_or(""));
     let url = state.0.app.data_url(&route);
     let (user_code, hidden) = split_user_code(source);
@@ -1237,7 +1237,7 @@ async fn page_lambda(
         methods: trigger.methods.clone(),
         url_example: url.clone(),
         url,
-        revision: record.current().rev,
+        revision: hit.rev,
         size: pretty_size(source.len()),
         hidden_kb: hidden / 1024,
         code_json,

@@ -484,7 +484,7 @@ async fn serve_function(
 ) -> Response {
     // Served through the store's read cache; NOTIFY events keep it fresh.
     let (source, trigger, owner) = match state.store.fetch(&name).await {
-        Ok(Some(hit)) => (hit.1.clone(), hit.0.trigger.clone(), hit.0.user_id),
+        Ok(Some(hit)) => (hit.source.clone(), hit.trigger.clone(), hit.owner),
         Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
         Err(e) => {
             return err(

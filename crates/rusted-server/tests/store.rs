@@ -132,12 +132,28 @@ async fn plain_push_preserves_existing_trigger() {
 }
 
 #[tokio::test]
+async fn mcp_metadata_round_trips() {
+    let (store, _pool, owner) = store().await;
+    let meta = serde_json::json!({"public": false, "tools": {"slugify": {"description": "d", "inputSchema": {"type": "object"}}}});
+    store
+        .push_full("m", "export const mcp = {}", None, "mcp", Some(&meta), Some(owner))
+        .await
+        .unwrap();
+    let f = store.fetch("m").await.unwrap().unwrap();
+    assert_eq!(f.kind, "mcp");
+    assert_eq!(f.mcp.as_ref().unwrap()["tools"]["slugify"]["description"], "d");
+    assert_eq!(f.rev, 1);
+}
+
+#[tokio::test]
 async fn fetch_caches_and_own_pushes_invalidate() {
     let (store, _pool, owner) = store().await;
     store.push("greet", SRC_A, Some(owner)).await.unwrap();
     let first = store.fetch("greet").await.unwrap().unwrap();
-    assert_eq!(first.1, SRC_A);
+    assert_eq!(first.source, SRC_A);
+    assert_eq!(first.kind, "http");
+    assert!(first.mcp.is_none());
     store.push("greet", SRC_B, Some(owner)).await.unwrap();
     let second = store.fetch("greet").await.unwrap().unwrap();
-    assert_eq!(second.1, SRC_B);
+    assert_eq!(second.source, SRC_B);
 }
