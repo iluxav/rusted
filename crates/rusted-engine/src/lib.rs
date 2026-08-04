@@ -119,9 +119,10 @@ pub struct HttpConfig {
     pub path: Option<String>,
 }
 
-/// One tool's deploy-time metadata. The handler function is checked for
-/// presence at inspect time and stripped by JSON serialization (functions
-/// don't survive JSON.stringify), so it never leaves the engine.
+/// One tool's deploy-time metadata. At inspect time the handler function is
+/// checked for presence on the same snapshot this was serialized from, then
+/// dropped by JSON serialization (functions don't survive JSON.stringify) —
+/// execution looks the handler up again in the live module at call time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolConfig {
@@ -1082,23 +1083,46 @@ impl Executor for QuickJsExecutor {
             }
 
             // Handlers must exist here — JSON.stringify drops them, so serde
-            // can't check. One eval'd probe reports every tool missing one.
+            // can't check. One eval'd pass snapshots the export (every property
+            // read exactly once), checks handler presence on that snapshot, and
+            // serializes the same snapshot: a getter that answers differently
+            // per read cannot smuggle an unchecked tool into the stored config.
             let probe: Function = c
                 .eval(
-                    r#"(m) => Object.entries((m && m.tools) || {})
-                        .filter(([, t]) => typeof (t && t.handler) !== "function")
-                        .map(([k]) => k)"#,
+                    r#"(m) => {
+                        m = m || {};
+                        const config = {};
+                        for (const k of Object.keys(m)) config[k] = m[k];
+                        const tools = config.tools || {};
+                        const snapshot = {};
+                        const missing = [];
+                        for (const k of Object.keys(tools)) {
+                            const t = tools[k];
+                            if (typeof (t && t.handler) !== "function") missing.push(k);
+                            snapshot[k] = t;
+                        }
+                        if ("tools" in config) config.tools = snapshot;
+                        return JSON.stringify({ missing, config });
+                    }"#,
                 )
                 .map_err(|e| exception_message(&c, e))?;
-            let missing: Vec<String> = probe
+            let raw: String = probe
                 .call((mcp.clone(),))
                 .map_err(|e| exception_message(&c, e))?;
-            if let Some(name) = missing.first() {
+
+            #[derive(Deserialize)]
+            struct Probed {
+                #[serde(default)]
+                missing: Vec<String>,
+                #[serde(default)]
+                config: serde_json::Value,
+            }
+            let probed: Probed = serde_json::from_str(&raw)
+                .map_err(|e| format!("invalid mcp export: {e}"))?;
+            if let Some(name) = probed.missing.first() {
                 return Err(format!("tool {name} has no handler function"));
             }
-
-            let json = stringify(&c, mcp, "mcp")?;
-            let config = serde_json::from_str::<McpConfig>(&json)
+            let config = serde_json::from_value::<McpConfig>(probed.config)
                 .map_err(|e| format!("invalid mcp export: {e}"))?;
             if config.tools.is_empty() {
                 return Err("an mcp module must declare at least one tool".to_string());
@@ -1114,6 +1138,11 @@ impl Executor for QuickJsExecutor {
                     return Err(format!(
                         "invalid tool name {name:?}: 1-64 chars of a-z, 0-9, '-', '_'"
                     ));
+                }
+                // The MCP spec requires an object schema; booleans are valid
+                // JSON Schema but choke clients, so refuse them here.
+                if !tool.input_schema.is_object() {
+                    return Err(format!("tool {name}: inputSchema must be a JSON object"));
                 }
                 jsonschema::validator_for(&tool.input_schema)
                     .map_err(|e| format!("tool {name}: invalid inputSchema: {e}"))?;

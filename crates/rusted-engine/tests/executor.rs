@@ -384,6 +384,53 @@ fn inspect_rejects_a_module_with_no_tools() {
 }
 
 #[test]
+fn inspect_rejects_a_non_object_input_schema() {
+    let src = r#"export const mcp = { tools: { loose: {
+        description: "d", inputSchema: true,
+        handler() {} } } };"#;
+    let err = QuickJsExecutor::new().inspect(src).unwrap_err();
+    assert!(err.contains("loose") && err.contains("inputSchema"), "{err}");
+}
+
+#[test]
+fn inspect_accepts_exactly_the_tool_limit() {
+    let tools: Vec<String> = (0..32)
+        .map(|i| {
+            format!(
+                r#"t{i}: {{ description: "d", inputSchema: {{ type: "object" }}, handler() {{}} }}"#
+            )
+        })
+        .collect();
+    let src = format!("export const mcp = {{ tools: {{ {} }} }};", tools.join(", "));
+    match QuickJsExecutor::new().inspect(&src).unwrap() {
+        Surface::Mcp(m) => assert_eq!(m.tools.len(), 32),
+        s => panic!("expected mcp surface, got {s:?}"),
+    }
+}
+
+/// A hostile `tools` getter that answers differently per read must not be able
+/// to smuggle unchecked tools past inspect: the handler check and the stored
+/// metadata must come from the same single read.
+#[test]
+fn inspect_snapshots_tools_in_one_read() {
+    let src = r#"
+        const checked = { good: { description: "d", inputSchema: { type: "object" }, handler() {} } };
+        const ghost = { ghost: { description: "never handler-checked", inputSchema: { type: "object" } } };
+        let reads = 0;
+        export const mcp = { name: "shifty", get tools() { return reads++ === 0 ? checked : ghost; } };
+    "#;
+    match QuickJsExecutor::new().inspect(src) {
+        // The snapshot that was handler-checked is the one stored.
+        Ok(Surface::Mcp(m)) => {
+            assert_eq!(m.tools.keys().collect::<Vec<_>>(), vec!["good"]);
+        }
+        Ok(s) => panic!("expected mcp surface, got {s:?}"),
+        // Refusing the module outright is also sound.
+        Err(err) => assert!(!err.is_empty()),
+    }
+}
+
+#[test]
 fn inspect_rejects_too_many_tools() {
     let tools: Vec<String> = (0..33)
         .map(|i| {
