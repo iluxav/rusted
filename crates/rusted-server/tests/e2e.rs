@@ -1039,6 +1039,186 @@ async fn a_notification_gets_202() {
 }
 
 #[tokio::test]
+async fn mcp_auth_rejects_malformed_bearer_credentials() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+    // Every near-miss on the credential is the same 401: wrong scheme case,
+    // bare key, empty token, padded token, garbage.
+    let bad = [
+        format!("bearer {}", t.key), // scheme is matched strictly
+        t.key.clone(),               // no scheme at all
+        "Bearer".to_string(),
+        "Bearer ".to_string(),
+        // (no trailing-space case: HTTP strips trailing OWS from header
+        // values before the handler sees them, so it's the same credential)
+        format!("Bearer  {}", t.key), // double space
+        "Bearer rk_live_".to_string(),
+        "Basic dXNlcjpwYXNz".to_string(),
+    ];
+    for header in bad {
+        let r = t
+            .client
+            .post(t.data("/f/sluggy"))
+            .header("authorization", &header)
+            .json(&init)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "header {header:?} must not authenticate");
+    }
+}
+
+#[tokio::test]
+async fn mcp_sub_paths_and_wrong_methods_are_refused() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    // A sub-path is 404 even with the owner's key — the function has one URL.
+    let r = t
+        .client
+        .post(t.data("/f/sluggy/extra"))
+        .bearer_auth(&t.key)
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    // Non-POST is 405.
+    let r = t
+        .client
+        .get(t.data("/f/sluggy"))
+        .bearer_auth(&t.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 405);
+}
+
+#[tokio::test]
+async fn non_object_and_missing_arguments_are_schema_violations() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    // arguments: 42 — validated against the object schema, refused as a tool
+    // result before any sandbox boots.
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"slugify","arguments":42}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+    assert!(
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("invalid arguments"),
+        "{v}"
+    );
+    // arguments absent — validates {} against the schema, which requires text.
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"slugify"}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+}
+
+#[tokio::test]
+async fn a_hostile_schema_pattern_is_a_tool_error_not_a_500() {
+    let t = boot().await;
+    // A classic catastrophic-backtracking pattern. Deploy accepts it (it
+    // compiles); at call time the match must come back as a schema violation
+    // (or backtrack-limit error) inside a tool result — never a 500 or a hang.
+    let hostile = r#"
+export const mcp = {
+  name: "hostile",
+  tools: {
+    check: {
+      description: "pattern gate",
+      inputSchema: { type: "object", properties: {
+        text: { type: "string", pattern: "^(a+)+$" } }, required: ["text"] },
+      async handler({ text }) { return "ok:" + text.length; },
+    },
+  },
+};
+"#;
+    push(&t, "hostile", hostile).await;
+    let payload = format!("{}!", "a".repeat(40));
+    let started = std::time::Instant::now();
+    let (s, v) = mcp_fn(
+        &t,
+        "hostile",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"check","arguments":{"text": payload}}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "pattern matching must be bounded, took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_batch_gets_a_batch_reply() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!([
+            {"jsonrpc":"2.0","id":1,"method":"ping"},
+            {"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+        ]),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let replies = v.as_array().expect("batch reply is an array");
+    assert_eq!(replies.len(), 2, "notification gets no reply: {v}");
+    assert_eq!(replies[0]["id"], json!(1), "{v}");
+    assert_eq!(replies[1]["id"], json!(2), "{v}");
+}
+
+#[tokio::test]
+async fn a_json_tool_result_carries_structured_content() {
+    let t = boot().await;
+    let objecty = r#"
+export const mcp = {
+  name: "objecty",
+  tools: {
+    stats: {
+      description: "returns an object",
+      inputSchema: { type: "object" },
+      async handler() { return { count: 3, ok: true }; },
+    },
+  },
+};
+"#;
+    push(&t, "objecty", objecty).await;
+    let (s, v) = mcp_fn(
+        &t,
+        "objecty",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"stats","arguments":{}}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["structuredContent"]["count"], json!(3), "{v}");
+    // The text content carries the same JSON serialized, per spec.
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["count"], json!(3), "{v}");
+}
+
+#[tokio::test]
 async fn push_without_any_name_is_rejected() {
     let t = boot().await;
     let r = t
