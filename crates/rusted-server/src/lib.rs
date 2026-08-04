@@ -11,6 +11,7 @@ pub mod bundler;
 pub mod device;
 pub mod inbox;
 pub mod local;
+pub mod mcp_wire;
 pub mod memory;
 pub mod oauth;
 pub mod plans;

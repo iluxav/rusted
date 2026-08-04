@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::mcp_wire;
 use crate::state::{
     now_epoch, AppState, InvocationRecord, TempRun, ADMIN_BODY_LIMIT, RECORD_CAP,
     REQUEST_BODY_LIMIT,
@@ -1310,8 +1311,6 @@ async fn verify(
 // Named `execute`, not `run`, because `rusted run` is the CLI's local dev
 // server — the opposite of this, which runs on the server.
 
-const MCP_PROTOCOL: &str = "2025-06-18";
-
 fn mcp_tools() -> Value {
     json!([
     {
@@ -1473,19 +1472,9 @@ fn mcp_tools() -> Value {
     ])
 }
 
-/// Tool failures come back as results, not JSON-RPC errors: that is how the
-/// model sees what broke and fixes its own code.
-fn mcp_tool_result(text: String, is_error: bool) -> Value {
-    let mut result = json!({ "content": [{ "type": "text", "text": text }] });
-    if is_error {
-        result["isError"] = json!(true);
-    }
-    result
-}
-
 async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
     let Some(code) = args.get("code").and_then(|c| c.as_str()) else {
-        return mcp_tool_result("`code` is required and must be a string".into(), true);
+        return mcp_wire::tool_result("`code` is required and must be a string", true);
     };
     let input = match args.get("input") {
         Some(Value::String(s)) => s.clone(),
@@ -1495,7 +1484,7 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
 
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     if code.len() as i64 > plan.limits.max_script_bytes {
-        return mcp_tool_result(
+        return mcp_wire::tool_result(
             format!(
                 "script is {} bytes; the {} plan allows {}",
                 code.len(),
@@ -1519,7 +1508,7 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
     {
         Ok(result) => result,
         Err(_) => {
-            return mcp_tool_result("the server is at capacity; retry in a moment".into(), true)
+            return mcp_wire::tool_result("the server is at capacity; retry in a moment", true)
         }
     };
 
@@ -1540,9 +1529,9 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
             if !logs.is_empty() {
                 out["logs"] = json!(logs);
             }
-            mcp_tool_result(out.to_string(), false)
+            mcp_wire::tool_result(out.to_string(), false)
         }
-        rusted_engine::Outcome::Terminated(reason) => mcp_tool_result(
+        rusted_engine::Outcome::Terminated(reason) => mcp_wire::tool_result(
             json!({ "error": reason, "kind": "limit", "logs": logs, "ms": ms }).to_string(),
             true,
         ),
@@ -1554,14 +1543,14 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
             if let Some(stack) = &result.stack {
                 out["stack"] = json!(stack);
             }
-            mcp_tool_result(out.to_string(), true)
+            mcp_wire::tool_result(out.to_string(), true)
         }
     }
 }
 
 async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
     let Some(code) = args.get("code").and_then(|c| c.as_str()) else {
-        return mcp_tool_result("`code` is required and must be a string".into(), true);
+        return mcp_wire::tool_result("`code` is required and must be a string", true);
     };
     let name = args
         .get("name")
@@ -1604,9 +1593,9 @@ async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
                 out["methods"] = value["methods"].clone();
                 out["note"] = json!("live now, callable by anyone, no key needed");
             }
-            mcp_tool_result(out.to_string(), false)
+            mcp_wire::tool_result(out.to_string(), false)
         }
-        Err(refused) => mcp_tool_result(
+        Err(refused) => mcp_wire::tool_result(
             json!({ "error": refused.message, "kind": refused.code }).to_string(),
             true,
         ),
@@ -1616,7 +1605,7 @@ async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
 async fn mcp_list(state: &Arc<AppState>, user_id: Uuid) -> Value {
     let names = match state.store.names_for_user(user_id).await {
         Ok(names) => names,
-        Err(e) => return mcp_tool_result(format!("could not list functions: {e}"), true),
+        Err(e) => return mcp_wire::tool_result(format!("could not list functions: {e}"), true),
     };
     let mut functions = Vec::new();
     for name in names {
@@ -1634,7 +1623,7 @@ async fn mcp_list(state: &Arc<AppState>, user_id: Uuid) -> Value {
         }
     }
     let inboxes = crate::inbox::list(state, user_id).await.unwrap_or_default();
-    mcp_tool_result(
+    mcp_wire::tool_result(
         json!({ "functions": functions, "inboxes": inboxes }).to_string(),
         false,
     )
@@ -1642,25 +1631,25 @@ async fn mcp_list(state: &Arc<AppState>, user_id: Uuid) -> Value {
 
 async fn mcp_delete(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
     let Some(name) = args.get("name").and_then(|n| n.as_str()) else {
-        return mcp_tool_result("`name` is required and must be a string".into(), true);
+        return mcp_wire::tool_result("`name` is required and must be a string", true);
     };
     // Ownership, not existence: a function someone else deployed is not this
     // caller's to remove, and saying so would leak that it exists.
     if !owns(state, name, user_id).await {
-        return mcp_tool_result(format!("you have no function named '{name}'"), true);
+        return mcp_wire::tool_result(format!("you have no function named '{name}'"), true);
     }
     match state.store.delete(name).await {
-        Ok(_) => mcp_tool_result(json!({ "deleted": name }).to_string(), false),
-        Err(e) => mcp_tool_result(format!("could not delete '{name}': {e}"), true),
+        Ok(_) => mcp_wire::tool_result(json!({ "deleted": name }).to_string(), false),
+        Err(e) => mcp_wire::tool_result(format!("could not delete '{name}': {e}"), true),
     }
 }
 
 async fn mcp_inbox_create(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
     match crate::inbox::create_endpoint(state, user_id, args.clone()).await {
-        Ok(value) => mcp_tool_result(value.to_string(), false),
+        Ok(value) => mcp_wire::tool_result(value.to_string(), false),
         // The body of the refusal carries the reason; a model reads it and
         // corrects, so it must not be flattened to a status.
-        Err(_) => mcp_tool_result(
+        Err(_) => mcp_wire::tool_result(
             json!({ "error": "could not create that inbox — check the name, ttl and store mode" })
                 .to_string(),
             true,
@@ -1670,7 +1659,7 @@ async fn mcp_inbox_create(state: &Arc<AppState>, user_id: Uuid, args: &Value) ->
 
 async fn mcp_inbox_read(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value {
     let Some(name) = args.get("name").and_then(|n| n.as_str()) else {
-        return mcp_tool_result("`name` is required and must be a string".into(), true);
+        return mcp_wire::tool_result("`name` is required and must be a string", true);
     };
     match crate::inbox::read(state, user_id, name).await {
         Ok(crate::inbox::Reading::Alive { messages, drained }) => {
@@ -1681,15 +1670,15 @@ async fn mcp_inbox_read(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> V
                 // opposite decisions and a model should not have to guess.
                 out["note"] = json!("alive, nothing has arrived yet — poll again");
             }
-            mcp_tool_result(out.to_string(), false)
+            mcp_wire::tool_result(out.to_string(), false)
         }
-        Ok(crate::inbox::Reading::Gone) => mcp_tool_result(
+        Ok(crate::inbox::Reading::Gone) => mcp_wire::tool_result(
             json!({ "error": format!("inbox '{name}' has expired, been drained, or never existed"),
                     "kind": "gone" })
             .to_string(),
             true,
         ),
-        Err(e) => mcp_tool_result(json!({ "error": e }).to_string(), true),
+        Err(e) => mcp_wire::tool_result(json!({ "error": e }).to_string(), true),
     }
 }
 
@@ -1698,12 +1687,12 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
     let id = msg.get("id").cloned()?;
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
-    let ok = |result: Value| Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    let ok = |result: Value| Some(mcp_wire::ok(id.clone(), result));
 
     match method {
         "initialize" => ok(json!({
             "protocolVersion": params.get("protocolVersion")
-                .and_then(|v| v.as_str()).unwrap_or(MCP_PROTOCOL),
+                .and_then(|v| v.as_str()).unwrap_or(mcp_wire::MCP_PROTOCOL),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "rusted", "version": env!("CARGO_PKG_VERSION") },
         })),
@@ -1719,19 +1708,19 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
                 "delete" => ok(mcp_delete(state, user_id, &args).await),
                 "inbox_create" => ok(mcp_inbox_create(state, user_id, &args).await),
                 "inbox_read" => ok(mcp_inbox_read(state, user_id, &args).await),
-                other => ok(mcp_tool_result(format!("unknown tool: {other}"), true)),
+                other => ok(mcp_wire::tool_result(format!("unknown tool: {other}"), true)),
             }
         }
-        other => Some(json!({
-            "jsonrpc": "2.0", "id": id,
-            "error": { "code": -32601, "message": format!("method not found: {other}") }
-        })),
+        other => Some(mcp_wire::err(
+            id.clone(),
+            -32601,
+            &format!("method not found: {other}"),
+        )),
     }
 }
 
-/// MCP over Streamable HTTP in JSON response mode — the spec allows answering a
-/// POST with one `application/json` body instead of an SSE stream, so no
-/// session or streaming machinery is needed.
+/// The platform `/mcp` endpoint: authenticate the caller, then hand the wire
+/// work (framing, batches, notifications, session echo) to [`mcp_wire`].
 async fn mcp_endpoint(State(state): Shared, headers: HeaderMap, body: Bytes) -> Response {
     let user_id = match caller(&state, &headers).await {
         Ok(user_id) => user_id,
@@ -1739,47 +1728,11 @@ async fn mcp_endpoint(State(state): Shared, headers: HeaderMap, body: Bytes) -> 
         // no credentials discovers where to get them, and the spec requires it.
         Err(_) => return crate::oauth::unauthorized_challenge(&state),
     };
-    let Ok(message) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "jsonrpc": "2.0", "id": null,
-                         "error": { "code": -32700, "message": "parse error" } })),
-        )
-            .into_response();
-    };
-
-    let replies: Vec<Value> = match &message {
-        Value::Array(batch) => {
-            let mut out = Vec::new();
-            for m in batch {
-                if let Some(reply) = mcp_dispatch(&state, user_id, m).await {
-                    out.push(reply);
-                }
-            }
-            out
-        }
-        single => mcp_dispatch(&state, user_id, single)
-            .await
-            .into_iter()
-            .collect(),
-    };
-
-    // Nothing asked for an answer — say so the way the spec does.
-    if replies.is_empty() {
-        return (StatusCode::ACCEPTED, "").into_response();
-    }
-
-    let session = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("stateless")
-        .to_string();
-    let payload = if message.is_array() {
-        Value::Array(replies)
-    } else {
-        replies.into_iter().next().expect("one reply")
-    };
-    ([("mcp-session-id", session)], Json(payload)).into_response()
+    let state = &state;
+    mcp_wire::respond(&body, &headers, move |msg| async move {
+        mcp_dispatch(state, user_id, &msg).await
+    })
+    .await
 }
 
 // ------------------------------------------------------------------ inboxes
