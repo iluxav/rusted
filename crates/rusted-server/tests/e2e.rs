@@ -799,6 +799,245 @@ async fn redeploying_an_mcp_function_as_http_switches_back() {
     );
 }
 
+// --- Serving deployed MCP functions over Streamable HTTP ---------------------
+
+/// One JSON-RPC message to a deployed mcp function, as its owner.
+async fn mcp_fn(t: &TestServer, name: &str, msg: Value) -> (u16, Value) {
+    let r = t
+        .client
+        .post(t.data(&format!("/f/{name}")))
+        .bearer_auth(&t.key)
+        .json(&msg)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    let body = r.json().await.unwrap_or(json!(null));
+    (status, body)
+}
+
+#[tokio::test]
+async fn an_mcp_function_speaks_the_protocol() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    // initialize: served from metadata, serverInfo.version is the revision
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["serverInfo"]["name"], "sluggy", "{v}");
+    assert_eq!(v["result"]["serverInfo"]["version"], "rev-1", "{v}");
+    assert_eq!(
+        v["result"]["capabilities"]["tools"]["listChanged"],
+        json!(false),
+        "{v}"
+    );
+    // tools/list
+    let (_, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    assert_eq!(v["result"]["tools"][0]["name"], "slugify", "{v}");
+    assert_eq!(
+        v["result"]["tools"][0]["inputSchema"]["type"], "object",
+        "{v}"
+    );
+    // tools/call happy path
+    let (_, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"slugify","arguments":{"text":"Hello World"}}}),
+    )
+    .await;
+    assert_eq!(v["result"]["content"][0]["text"], "hello-world", "{v}");
+    assert_ne!(v["result"]["isError"], json!(true), "{v}");
+}
+
+#[tokio::test]
+async fn bad_arguments_are_a_tool_result_not_an_invocation() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"slugify","arguments":{"text": 42}}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("text"),
+        "should name the violating property: {text}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_tools_and_methods_fail_correctly() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    // Unknown tool: a result the model can read, never a protocol error.
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"nope","arguments":{}}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(v["error"].is_null(), "must not be a protocol error: {v}");
+    assert_eq!(v["result"]["isError"], json!(true), "{v}");
+    assert!(
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool"),
+        "{v}"
+    );
+    // Unknown method: the JSON-RPC method-not-found error.
+    let (s, v) = mcp_fn(
+        &t,
+        "sluggy",
+        json!({"jsonrpc":"2.0","id":2,"method":"resources/list"}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["error"]["code"], json!(-32601), "{v}");
+}
+
+#[tokio::test]
+async fn an_mcp_function_requires_an_owner_key() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+    // no key → 401 with WWW-Authenticate
+    let r = t
+        .client
+        .post(t.data("/f/sluggy"))
+        .json(&init)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert!(r.headers().contains_key("www-authenticate"));
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "unauthorized", "{v}");
+    // a different user's key → the same 401, revealing nothing
+    let other_id = rusted_server::testsupport::seed_user(&t.pool).await;
+    let (_, other_key) = rusted_server::auth::create_key(&t.pool, other_id, "other")
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .post(t.data("/f/sluggy"))
+        .bearer_auth(&other_key)
+        .json(&init)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert!(r.headers().contains_key("www-authenticate"));
+    // the owner's key works
+    let (s, v) = mcp_fn(&t, "sluggy", init).await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["serverInfo"]["name"], "sluggy", "{v}");
+}
+
+#[tokio::test]
+async fn a_public_mcp_function_needs_no_key() {
+    let t = boot().await;
+    let public_fn = r#"
+export const mcp = {
+  name: "open-sluggy",
+  public: true,
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase().replace(/[^a-z0-9]+/g, "-"); },
+    },
+  },
+};
+"#;
+    push(&t, "open-sluggy", public_fn).await;
+    let r = t
+        .client
+        .post(t.data("/f/open-sluggy"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["result"]["serverInfo"]["name"], "open-sluggy", "{v}");
+}
+
+#[tokio::test]
+async fn only_tools_call_spends_the_rate_limit() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    downgrade_to_dev(&t).await; // rate 60/min
+    for _ in 0..70 {
+        // more list calls than the rate allows — all succeed
+        let (s, v) = mcp_fn(
+            &t,
+            "sluggy",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert!(v["result"]["tools"].is_array(), "{v}");
+    }
+    // tools/call does spend it: within 70 calls one comes back rate-limited,
+    // as a tool result the model can act on.
+    let mut limited = None;
+    for _ in 0..70 {
+        let (s, v) = mcp_fn(
+            &t,
+            "sluggy",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"slugify","arguments":{"text":"hi"}}}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        if v["result"]["isError"] == json!(true) {
+            limited = Some(v);
+            break;
+        }
+    }
+    let v = limited.expect("rate limit should trip within 70 calls");
+    assert!(
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("rate limit"),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn a_notification_gets_202() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    let r = t
+        .client
+        .post(t.data("/f/sluggy"))
+        .bearer_auth(&t.key)
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    assert!(r.text().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn push_without_any_name_is_rejected() {
     let t = boot().await;

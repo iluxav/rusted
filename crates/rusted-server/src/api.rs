@@ -145,13 +145,33 @@ pub fn match_path(pattern: &str, actual: &str) -> Option<BTreeMap<String, String
 
 // ---------------------------------------------------------------- execution
 
+/// One unit of work for the executor: an HTTP request against a function's
+/// default handler, or an MCP tool call against one of its named tools. Both
+/// share the admission path — memory guard, worker slots, per-function
+/// concurrency, analytics — so limits mean the same thing on either surface.
+pub(crate) enum Job {
+    Http(HttpRequest),
+    Tool { name: String, args: Value },
+}
+
+impl Job {
+    /// The tool name, when this is a tool call — recorded in the invocation
+    /// detail so `rusted logs` says which tool ran.
+    fn tool(&self) -> Option<&str> {
+        match self {
+            Job::Http(_) => None,
+            Job::Tool { name, .. } => Some(name),
+        }
+    }
+}
+
 /// Runs `source` on a worker thread with no per-key state — used for ad-hoc
 /// invocations so they can't leak locks or records. The wait for a worker slot
 /// is bounded by the same queue-wait budget as the per-function lock.
 async fn execute_raw(
     state: &Arc<AppState>,
     source: String,
-    request: HttpRequest,
+    job: Job,
     limits: rusted_engine::Limits,
     owner: Option<Uuid>,
 ) -> Result<InvocationResult, Response> {
@@ -193,20 +213,29 @@ async fn execute_raw(
     Ok(state
         .exec_runtime
         .spawn(async move {
-            executor
-                .execute_with_services(&source, &request, &limits, services)
-                .await
+            match job {
+                Job::Http(request) => {
+                    executor
+                        .execute_with_services(&source, &request, &limits, services)
+                        .await
+                }
+                Job::Tool { name, args } => {
+                    executor
+                        .execute_tool_with_services(&source, &name, &args, &limits, services)
+                        .await
+                }
+            }
         })
         .await
         .expect("executor task never panics"))
 }
 
 /// Runs `source` with concurrency 1 per `key` and records the invocation.
-async fn execute_serialized(
+pub(crate) async fn execute_serialized(
     state: &Arc<AppState>,
     key: &str,
     source: String,
-    request: HttpRequest,
+    job: Job,
     limits: rusted_engine::Limits,
     owner: Option<uuid::Uuid>,
     concurrency: usize,
@@ -237,9 +266,15 @@ async fn execute_serialized(
         )
     })?
     .expect("semaphore never closed");
-    let result = execute_raw(state, source, request, limits, owner).await?;
+    let tool = job.tool().map(|t| t.to_string());
+    let result = execute_raw(state, source, job, limits, owner).await?;
     debug_print(state, key, &result);
 
+    let base_detail = match &result.outcome {
+        Outcome::Success(_) => None,
+        Outcome::Terminated(reason) => Some(reason.clone()),
+        Outcome::Error(message) => Some(message.clone()),
+    };
     let record = InvocationRecord {
         at: now_epoch(),
         outcome: match &result.outcome {
@@ -247,10 +282,10 @@ async fn execute_serialized(
             Outcome::Terminated(_) => "terminated".into(),
             Outcome::Error(_) => "error".into(),
         },
-        detail: match &result.outcome {
-            Outcome::Success(_) => None,
-            Outcome::Terminated(reason) => Some(reason.clone()),
-            Outcome::Error(message) => Some(message.clone()),
+        detail: match (&tool, base_detail) {
+            (Some(tool), Some(detail)) => Some(format!("tool {tool}: {detail}")),
+            (Some(tool), None) => Some(format!("tool: {tool}")),
+            (None, detail) => detail,
         },
         wall_ms: result.wall.as_secs_f64() * 1000.0,
         cpu_ms: result.cpu.as_secs_f64() * 1000.0,
@@ -291,7 +326,7 @@ fn limits_for_plan(state: &AppState, plan: &crate::plans::PlanLimits) -> rusted_
 
 /// The plan governing a function, and its engine limits. The owner comes from
 /// the cached function record, so a warm invocation never queries Postgres.
-async fn plan_for_owner(
+pub(crate) async fn plan_for_owner(
     state: &Arc<AppState>,
     owner: Option<uuid::Uuid>,
 ) -> (crate::plans::Plan, rusted_engine::Limits) {
@@ -484,8 +519,8 @@ async fn serve_function(
     body: Bytes,
 ) -> Response {
     // Served through the store's read cache; NOTIFY events keep it fresh.
-    let (source, trigger, owner) = match state.store.fetch(&name).await {
-        Ok(Some(hit)) => (hit.source.clone(), hit.trigger.clone(), hit.owner),
+    let fetched = match state.store.fetch(&name).await {
+        Ok(Some(hit)) => hit,
         Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
         Err(e) => {
             return err(
@@ -495,6 +530,30 @@ async fn serve_function(
             )
         }
     };
+    // An mcp function has no route pattern: every POST to /f/{name} is
+    // protocol, and the messages inside decide what happens.
+    if fetched.kind == "mcp" {
+        if rest.is_some() {
+            return err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("an mcp function serves only /f/{name}"),
+            );
+        }
+        if method != Method::POST {
+            return err(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "allowed: POST",
+            );
+        }
+        return crate::mcp_host::serve(state, fetched, name, headers, body).await;
+    }
+    let (source, trigger, owner) = (
+        fetched.source.clone(),
+        fetched.trigger.clone(),
+        fetched.owner,
+    );
     if !trigger.methods.iter().any(|m| m == method.as_str()) {
         return err(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -542,7 +601,7 @@ async fn serve_function(
         &state,
         &name,
         source,
-        request,
+        Job::Http(request),
         limits,
         owner,
         plan.limits.concurrency,
@@ -585,7 +644,7 @@ async fn call_run(
         &state,
         &key,
         source,
-        request,
+        Job::Http(request),
         limits,
         None,
         plan.limits.concurrency,
@@ -1148,20 +1207,22 @@ async fn invoke(
                 &state,
                 &key,
                 source,
-                request,
+                Job::Http(request),
                 limits,
                 Some(user_id),
                 plan.limits.concurrency,
             )
             .await
         }
-        None => match execute_raw(&state, source, request, limits, Some(user_id)).await {
-            Ok(result) => {
-                debug_print(&state, "ad-hoc", &result);
-                Ok(result)
+        None => {
+            match execute_raw(&state, source, Job::Http(request), limits, Some(user_id)).await {
+                Ok(result) => {
+                    debug_print(&state, "ad-hoc", &result);
+                    Ok(result)
+                }
+                Err(response) => Err(response),
             }
-            Err(response) => Err(response),
-        },
+        }
     };
     let result = match executed {
         Ok(r) => r,
@@ -1500,7 +1561,7 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
     let result = match execute_raw(
         state,
         code.to_string(),
-        HttpRequest::post_json(input),
+        Job::Http(HttpRequest::post_json(input)),
         limits,
         Some(user_id),
     )

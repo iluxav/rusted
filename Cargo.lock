@@ -3545,6 +3545,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "hex",
+ "jsonschema",
  "rand",
  "reqwest",
  "rolldown",
