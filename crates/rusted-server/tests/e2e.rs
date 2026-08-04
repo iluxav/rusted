@@ -737,10 +737,16 @@ async fn pushing_an_mcp_module_deploys_an_mcp_function() {
 #[tokio::test]
 async fn an_mcp_push_refuses_http_trigger_fields() {
     let t = boot().await;
-    let r = t
-        .admin_post("/api/functions", json!({ "source": MCP_FN, "methods": ["GET"] }))
-        .await;
-    assert_eq!(r.status(), 422);
+    let cases = [
+        json!({ "source": MCP_FN, "methods": ["GET"] }),
+        json!({ "source": MCP_FN, "path": "/slugs" }),
+    ];
+    for case in cases {
+        let r = t.admin_post("/api/functions", case.clone()).await;
+        assert_eq!(r.status(), 422, "should reject: {case}");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["error"]["code"], "unsupported_trigger");
+    }
 }
 
 #[tokio::test]
@@ -767,6 +773,23 @@ async fn redeploying_an_http_function_as_mcp_switches_its_kind() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["kind"], "mcp");
     assert_eq!(v["tools"], json!(["slugify"]));
+}
+
+#[tokio::test]
+async fn redeploying_an_mcp_function_as_http_switches_back() {
+    let t = boot().await;
+    let r = push(&t, "sluggy", MCP_FN).await;
+    assert_eq!(r.status(), 200);
+    let r = push(&t, "sluggy", GREET).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["kind"], "http");
+    let r = t.admin_get("/api/functions/sluggy").await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["kind"], "http");
+    assert!(v.get("tools").is_none(), "http detail must not carry tools");
+    assert!(v.get("public").is_none(), "http detail must not carry public");
 }
 
 #[tokio::test]

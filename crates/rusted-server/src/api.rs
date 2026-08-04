@@ -798,7 +798,7 @@ pub async fn deploy_function(
                         e.to_string(),
                     )
                 })?;
-            return Ok(json!({
+            let mut out = json!({
                 "name": name,
                 "revision": revision.rev,
                 "hash": revision.hash,
@@ -807,7 +807,12 @@ pub async fn deploy_function(
                 "tools": mcp_config.tools.keys().collect::<Vec<_>>(),
                 "public": mcp_config.public,
                 "url": state.data_url(&format!("/f/{name}")),
-            }));
+            });
+            if !mcp_config.public {
+                out["note"] =
+                    json!("connecting requires your API key (Authorization: Bearer <key>)");
+            }
+            return Ok(out);
         }
     };
 
@@ -927,6 +932,7 @@ async fn list_functions(State(state): Shared, headers: HeaderMap) -> Response {
             if record.kind == "mcp" {
                 if let Some(meta) = &record.mcp {
                     entry["tools"] = json!(mcp_tool_names(meta));
+                    entry["public"] = meta["public"].clone();
                 }
             }
             functions.push(entry);
@@ -1348,33 +1354,43 @@ fn mcp_tools() -> Value {
     {
         "name": "deploy",
         "description":
-            "Publish JavaScript at a public HTTPS URL and return that URL. The function \
-             stays live until deleted, and anyone can call it — no key required.\
-             \n\nReach for this when something needs an address rather than an answer: a \
-             webhook endpoint, an API for someone else to call, a tool another agent can \
-             use, or a callback URL for a service that will POST back to you. Deploying \
-             is how you get an inbound URL you would otherwise have no way to obtain.\
-             \n\nThe handler is written exactly as for `execute`, with the same sandbox \
-             and the same limits. It runs per request, so `request.json()` is whatever the \
-             caller sent.\
-             \n\nDeploying the same name again replaces it and keeps the URL. The reply \
-             includes the URL, which methods it answers, and the revision number.",
+            "Publish a JavaScript module at a stable HTTPS URL and return that URL. The \
+             function stays live until deleted. What the module exports decides what it \
+             becomes:\
+             \n\nA module with `export default async function handler(request, context)` \
+             (optionally `export const http = { name, methods, path }`) deploys as an \
+             HTTP endpoint anyone can call — no key required. Reach for this when \
+             something needs an address rather than an answer: a webhook endpoint, an API \
+             for someone else to call, or a callback URL for a service that will POST \
+             back to you. The handler is written exactly as for `execute`, with the same \
+             sandbox and the same limits. It runs per request, so `request.json()` is \
+             whatever the caller sent.\
+             \n\nA module with `export const mcp = { name, public, tools }` and no \
+             default handler deploys as an MCP server, served at its /f/{name} URL. \
+             `tools` maps each tool name to { description, inputSchema, handler }; \
+             `inputSchema` is JSON Schema and arguments are validated against it before \
+             the handler runs. Unless `public: true`, connecting requires the owner's \
+             API key (Authorization: Bearer <key>). A module cannot export both surfaces.\
+             \n\nDeploying the same name again replaces it and keeps the URL — including \
+             switching a function between http and mcp. The reply includes the URL and \
+             revision number, plus which methods it answers (http) or which tools it \
+             serves (mcp).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": { "type": "string", "description": "The ES module to publish." },
                 "name": {
                     "type": "string",
-                    "description": "1-64 chars of a-z, 0-9, '-', '_'. Becomes part of the URL. Optional if the code declares `export const http = { name }`."
+                    "description": "1-64 chars of a-z, 0-9, '-', '_'. Becomes part of the URL. Optional if the code declares it in its `http` or `mcp` export."
                 },
                 "methods": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "HTTP methods it answers, e.g. [\"GET\",\"POST\"]. Defaults to POST."
+                    "description": "HTTP methods it answers, e.g. [\"GET\",\"POST\"]. Defaults to POST. Http modules only — rejected for mcp modules."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional route nested under the function, e.g. '/users/{id}'. Captures arrive in request.params."
+                    "description": "Optional route nested under the function, e.g. '/users/{id}'. Captures arrive in request.params. Http modules only — rejected for mcp modules."
                 }
             },
             "required": ["code"]
@@ -1551,11 +1567,15 @@ async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
         .get("name")
         .and_then(|n| n.as_str())
         .map(|n| n.to_string());
-    let methods = args.get("methods").and_then(|m| m.as_array()).map(|a| {
-        a.iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect::<Vec<_>>()
-    });
+    let methods = args
+        .get("methods")
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|m| !m.is_empty());
     let path = args
         .get("path")
         .and_then(|p| p.as_str())
@@ -1574,7 +1594,12 @@ async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
             if value["kind"] == json!("mcp") {
                 out["kind"] = json!("mcp");
                 out["tools"] = value["tools"].clone();
-                out["note"] = json!("live now as an MCP server at that URL");
+                out["public"] = value["public"].clone();
+                out["note"] = if value["public"] == json!(true) {
+                    json!("live now as an MCP server at that URL, public, no key needed")
+                } else {
+                    json!("live now as an MCP server at that URL; connecting requires the owner's API key (Authorization: Bearer <key>)")
+                };
             } else {
                 out["methods"] = value["methods"].clone();
                 out["note"] = json!("live now, callable by anyone, no key needed");
