@@ -658,8 +658,6 @@ struct PushBody {
     #[serde(default)]
     name: Option<String>,
     source: String,
-    #[serde(default, rename = "type")]
-    trigger_type: Option<String>,
     #[serde(default)]
     methods: Option<Vec<String>>,
     #[serde(default)]
@@ -676,6 +674,14 @@ async fn inspect_source(
     tokio::task::spawn_blocking(move || executor.inspect(&source))
         .await
         .expect("inspect thread never panics")
+}
+
+/// Tool names out of stored mcp metadata (`{"public": ..., "tools": {...}}`).
+fn mcp_tool_names(meta: &Value) -> Vec<String> {
+    meta["tools"]
+        .as_object()
+        .map(|tools| tools.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Why a deploy was refused, carrying the code an API caller expects.
@@ -707,7 +713,6 @@ pub async fn deploy_function(
     name: Option<String>,
     methods: Option<Vec<String>>,
     path: Option<String>,
-    trigger_type: Option<String>,
 ) -> Result<Value, DeployRefused> {
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     if source.len() as i64 > plan.limits.max_script_bytes {
@@ -723,35 +728,22 @@ pub async fn deploy_function(
         ));
     }
 
-    if let Some(t) = &trigger_type {
-        if t != "http" {
-            return Err(DeployRefused::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "unsupported_trigger",
-                format!("trigger type {t} is not supported yet; only http"),
-            ));
-        }
-    }
-
     let surface = inspect_source(state, source.clone())
         .await
         .map_err(|e| DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e))?;
-    let http_config = match surface {
-        rusted_engine::Surface::Http(config) => config,
-        rusted_engine::Surface::Mcp(_) => {
-            return Err(DeployRefused::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "unsupported_trigger",
-                "mcp functions are not deployable yet",
-            ))
-        }
-    };
 
-    let Some(name) = name.or(http_config.name) else {
+    // Everything up to the surface split is shared: the file's declared name
+    // stands in for a missing request name, and the same plan/ownership rules
+    // apply either way.
+    let declared_name = match &surface {
+        rusted_engine::Surface::Http(config) => config.name.clone(),
+        rusted_engine::Surface::Mcp(config) => config.name.clone(),
+    };
+    let Some(name) = name.or(declared_name) else {
         return Err(DeployRefused::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "missing_name",
-            "provide a name, or declare it in `export const http = { name: ... }`",
+            "provide a name, or declare it in the module's `http`/`mcp` config export",
         ));
     };
     if !valid_name(&name) {
@@ -783,6 +775,41 @@ pub async fn deploy_function(
             ));
         }
     }
+
+    let http_config = match surface {
+        rusted_engine::Surface::Http(config) => config,
+        rusted_engine::Surface::Mcp(mcp_config) => {
+            if methods.is_some() || path.is_some() {
+                return Err(DeployRefused::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsupported_trigger",
+                    "an mcp function takes no methods or path",
+                ));
+            }
+            let meta = json!({ "public": mcp_config.public, "tools": mcp_config.tools });
+            let revision = state
+                .store
+                .push_full(&name, &source, None, "mcp", Some(&meta), Some(user_id))
+                .await
+                .map_err(|e| {
+                    DeployRefused::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store_error",
+                        e.to_string(),
+                    )
+                })?;
+            return Ok(json!({
+                "name": name,
+                "revision": revision.rev,
+                "hash": revision.hash,
+                "size_bytes": source.len(),
+                "kind": "mcp",
+                "tools": mcp_config.tools.keys().collect::<Vec<_>>(),
+                "public": mcp_config.public,
+                "url": state.data_url(&format!("/f/{name}")),
+            }));
+        }
+    };
 
     // The file's own declaration stands in for anything the caller left out.
     let methods = methods.or(http_config.methods);
@@ -846,6 +873,7 @@ pub async fn deploy_function(
         "revision": revision.rev,
         "hash": revision.hash,
         "size_bytes": source.len(),
+        "kind": "http",
         "methods": trigger.methods,
         "path": trigger.path,
         "limits": limits_json(state, &plan),
@@ -863,17 +891,7 @@ async fn push_function(
         Err(response) => return response,
     };
     let methods = body.methods.clone().filter(|m| !m.is_empty());
-    match deploy_function(
-        &state,
-        user_id,
-        body.source,
-        body.name,
-        methods,
-        body.path,
-        body.trigger_type,
-    )
-    .await
-    {
+    match deploy_function(&state, user_id, body.source, body.name, methods, body.path).await {
         Ok(value) => Json(value).into_response(),
         Err(refused) => err(refused.status, refused.code, refused.message),
     }
@@ -898,13 +916,20 @@ async fn list_functions(State(state): Shared, headers: HeaderMap) -> Response {
     for name in names {
         if let Ok(Some(record)) = state.store.get(&name).await {
             let current = record.current();
-            functions.push(json!({
+            let mut entry = json!({
                 "name": name,
                 "revision": current.rev,
                 "hash": current.hash,
                 "updated_at": current.created_at,
+                "kind": record.kind,
                 "url": state.data_url(&format!("/f/{name}")),
-            }));
+            });
+            if record.kind == "mcp" {
+                if let Some(meta) = &record.mcp {
+                    entry["tools"] = json!(mcp_tool_names(meta));
+                }
+            }
+            functions.push(entry);
         }
     }
     let now = now_epoch();
@@ -974,9 +999,16 @@ async fn function_detail(
         "revision": record.current().rev,
         "hash": record.current().hash,
         "revisions": record.revisions,
+        "kind": record.kind,
         "url": state.data_url(&format!("/f/{name}")),
         "recent": recent,
     });
+    if record.kind == "mcp" {
+        if let Some(meta) = &record.mcp {
+            body["tools"] = json!(mcp_tool_names(meta));
+            body["public"] = meta["public"].clone();
+        }
+    }
     if let Some(source) = source {
         body["source"] = json!(source);
     }
@@ -1529,23 +1561,25 @@ async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
         .and_then(|p| p.as_str())
         .map(|p| p.to_string());
 
-    match deploy_function(state, user_id, code.to_string(), name, methods, path, None).await {
+    match deploy_function(state, user_id, code.to_string(), name, methods, path).await {
         Ok(value) => {
             // The URL is the reason to deploy, so lead with it and say plainly
             // that it is callable now.
             let url = value["url"].as_str().unwrap_or("").to_string();
-            let methods = value["methods"].clone();
-            mcp_tool_result(
-                json!({
-                    "url": url,
-                    "name": value["name"],
-                    "methods": methods,
-                    "revision": value["revision"],
-                    "note": "live now, callable by anyone, no key needed",
-                })
-                .to_string(),
-                false,
-            )
+            let mut out = json!({
+                "url": url,
+                "name": value["name"],
+                "revision": value["revision"],
+            });
+            if value["kind"] == json!("mcp") {
+                out["kind"] = json!("mcp");
+                out["tools"] = value["tools"].clone();
+                out["note"] = json!("live now as an MCP server at that URL");
+            } else {
+                out["methods"] = value["methods"].clone();
+                out["note"] = json!("live now, callable by anyone, no key needed");
+            }
+            mcp_tool_result(out.to_string(), false)
         }
         Err(refused) => mcp_tool_result(
             json!({ "error": refused.message, "kind": refused.code }).to_string(),

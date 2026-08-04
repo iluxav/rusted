@@ -648,7 +648,6 @@ async fn push_rejects_invalid_trigger_config() {
         json!({ "name": "x", "source": GREET, "methods": ["TELEPORT"] }),
         json!({ "name": "x", "source": GREET, "path": "/a?b=c" }),
         json!({ "name": "x", "source": GREET, "path": "users" }),
-        json!({ "name": "x", "source": GREET, "type": "cron" }),
     ];
     for case in cases {
         let r = t.admin_post("/api/functions", case.clone()).await;
@@ -708,6 +707,66 @@ async fn explicit_fields_override_config_export() {
     assert_eq!(v["methods"], json!(["POST"]));
     // Path still comes from the file config.
     assert_eq!(v["path"], "/ping");
+}
+
+const MCP_FN: &str = r#"
+export const mcp = {
+  name: "sluggy",
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase().replace(/[^a-z0-9]+/g, "-"); },
+    },
+  },
+};
+"#;
+
+#[tokio::test]
+async fn pushing_an_mcp_module_deploys_an_mcp_function() {
+    let t = boot().await;
+    let r = t.admin_post("/api/functions", json!({ "source": MCP_FN })).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["name"], "sluggy");
+    assert_eq!(v["kind"], "mcp");
+    assert_eq!(v["tools"], json!(["slugify"]));
+    assert!(v["url"].as_str().unwrap().ends_with("/f/sluggy"));
+}
+
+#[tokio::test]
+async fn an_mcp_push_refuses_http_trigger_fields() {
+    let t = boot().await;
+    let r = t
+        .admin_post("/api/functions", json!({ "source": MCP_FN, "methods": ["GET"] }))
+        .await;
+    assert_eq!(r.status(), 422);
+}
+
+#[tokio::test]
+async fn a_module_with_both_surfaces_is_a_compile_error() {
+    let t = boot().await;
+    let both = format!("{MCP_FN}\nexport default async function h() {{}}");
+    let r = t.admin_post("/api/functions", json!({ "source": both })).await;
+    assert_eq!(r.status(), 422);
+}
+
+#[tokio::test]
+async fn redeploying_an_http_function_as_mcp_switches_its_kind() {
+    let t = boot().await;
+    let r = push(&t, "sluggy", GREET).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["kind"], "http");
+    let r = push(&t, "sluggy", MCP_FN).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["kind"], "mcp");
+    let r = t.admin_get("/api/functions/sluggy").await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["kind"], "mcp");
+    assert_eq!(v["tools"], json!(["slugify"]));
 }
 
 #[tokio::test]
