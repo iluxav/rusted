@@ -146,6 +146,23 @@ async fn mcp_metadata_round_trips() {
 }
 
 #[tokio::test]
+async fn redeploying_as_http_clears_mcp_metadata() {
+    let (store, _pool, owner) = store().await;
+    let meta = serde_json::json!({"public": true, "tools": {}});
+    store
+        .push_full("flip", "export const mcp = {}", None, "mcp", Some(&meta), Some(owner))
+        .await
+        .unwrap();
+    // A plain push always derives kind from the source being deployed, so the
+    // mcp metadata must not survive the function's return to http.
+    store.push("flip", SRC_A, Some(owner)).await.unwrap();
+    let f = store.fetch("flip").await.unwrap().unwrap();
+    assert_eq!(f.kind, "http");
+    assert!(f.mcp.is_none());
+    assert_eq!(f.rev, 2);
+}
+
+#[tokio::test]
 async fn fetch_caches_and_own_pushes_invalidate() {
     let (store, _pool, owner) = store().await;
     store.push("greet", SRC_A, Some(owner)).await.unwrap();

@@ -132,6 +132,9 @@ impl Store {
     }
 
     /// Push keeping the function's existing trigger (default for new functions).
+    /// Note the asymmetry: the trigger is preserved, but kind and mcp metadata
+    /// are always reset to http/NULL — kind derives from the deployed source,
+    /// so callers deploying an mcp module must use `push_full`.
     pub async fn push(
         &self,
         name: &str,
