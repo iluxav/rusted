@@ -388,7 +388,7 @@ fn push_with_trigger_flags_registers_route() {
 }
 
 #[test]
-fn push_needs_no_flags_when_file_declares_config() {
+fn push_needs_no_flags_when_file_declares_http() {
     let h = boot();
     let script = h.script(
         "selfconfig.js",

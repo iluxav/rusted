@@ -20,7 +20,7 @@ declare namespace Rusted {
 		headers: Record<string, string>;
 		/** Parsed query string. Repeated keys keep the last value. */
 		query: Record<string, string>;
-		/** Captures from the route declared in `config.path`, e.g. `{id}`. */
+		/** Captures from the route declared in `http.path`, e.g. `{id}`. */
 		params: Record<string, string>;
 		/** The raw body. Always a string, empty when there is no body. */
 		body: string;
