@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use rusted_engine::{Executor, HttpRequest, Limits, Outcome, QuickJsExecutor};
+use rusted_engine::{Executor, HttpRequest, Limits, Outcome, QuickJsExecutor, Surface};
 
 fn exec() -> QuickJsExecutor {
     QuickJsExecutor::new()
@@ -262,7 +262,10 @@ fn path_params_are_exposed_to_the_handler() {
 fn inspect_reads_http_export() {
     let src = r#"export const http = { name: "greet", methods: ["GET", "POST"], path: "/user/greet" };
 export default async function handler() { return "ok"; }"#;
-    let cfg = exec().inspect(src).expect("valid source inspects");
+    let cfg = match exec().inspect(src).expect("valid source inspects") {
+        Surface::Http(cfg) => cfg,
+        s => panic!("expected http surface, got {s:?}"),
+    };
     assert_eq!(cfg.name.as_deref(), Some("greet"));
     assert_eq!(
         cfg.methods,
@@ -275,7 +278,7 @@ export default async function handler() { return "ok"; }"#;
 fn inspect_without_http_export_returns_empty_config() {
     let src = r#"export default async function handler() { return "ok"; }"#;
     let cfg = exec().inspect(src).expect("valid source inspects");
-    assert_eq!(cfg, rusted_engine::HttpConfig::default());
+    assert_eq!(cfg, Surface::Http(rusted_engine::HttpConfig::default()));
 }
 
 #[test]
@@ -295,6 +298,112 @@ fn inspect_still_requires_default_export() {
         .inspect("export const http = { name: \"x\" };")
         .expect_err("missing handler must fail");
     assert!(err.contains("default"), "error: {err}");
+}
+
+const MCP_MODULE: &str = r#"
+export const mcp = {
+  name: "my-mcp",
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase(); },
+    },
+  },
+};
+"#;
+
+#[test]
+fn inspect_reads_mcp_surface() {
+    let ex = QuickJsExecutor::new();
+    match ex.inspect(MCP_MODULE).unwrap() {
+        Surface::Mcp(m) => {
+            assert_eq!(m.name.as_deref(), Some("my-mcp"));
+            assert!(!m.public);
+            let tool = &m.tools["slugify"];
+            assert_eq!(tool.description, "Turn a title into a URL slug");
+            assert_eq!(tool.input_schema["type"], "object");
+        }
+        s => panic!("expected mcp surface, got {s:?}"),
+    }
+}
+
+#[test]
+fn inspect_rejects_a_module_with_both_surfaces() {
+    let src = format!("{MCP_MODULE}\nexport default async function h() {{}}");
+    // mcp export + default handler is ambiguous
+    let err = QuickJsExecutor::new().inspect(&src).unwrap_err();
+    assert!(err.contains("default export"), "{err}");
+}
+
+#[test]
+fn inspect_rejects_http_and_mcp_together() {
+    let src = format!("export const http = {{ name: \"x\" }};\n{MCP_MODULE}");
+    let err = QuickJsExecutor::new().inspect(&src).unwrap_err();
+    assert!(err.contains("one surface"), "{err}");
+}
+
+#[test]
+fn inspect_rejects_a_tool_without_a_handler() {
+    let src = r#"export const mcp = { tools: { broken: {
+        description: "no handler", inputSchema: { type: "object" } } } };"#;
+    let err = QuickJsExecutor::new().inspect(src).unwrap_err();
+    assert!(err.contains("broken") && err.contains("handler"), "{err}");
+}
+
+#[test]
+fn inspect_rejects_an_invalid_input_schema() {
+    let src = r#"export const mcp = { tools: { bad: {
+        description: "d", inputSchema: { type: 42 },
+        handler() {} } } };"#;
+    let err = QuickJsExecutor::new().inspect(src).unwrap_err();
+    assert!(err.contains("inputSchema"), "{err}");
+}
+
+#[test]
+fn inspect_rejects_mcp_typos_loudly() {
+    let src = r#"export const mcp = { tols: {} };"#;
+    let err = QuickJsExecutor::new().inspect(src).unwrap_err();
+    assert!(err.contains("tols"), "{err}");
+}
+
+#[test]
+fn inspect_still_returns_http_for_plain_handlers() {
+    let src = "export default async function h() { return 1; }";
+    assert!(matches!(
+        QuickJsExecutor::new().inspect(src).unwrap(),
+        Surface::Http(_)
+    ));
+}
+
+#[test]
+fn inspect_rejects_a_module_with_no_tools() {
+    let src = r#"export const mcp = { name: "empty" };"#;
+    let err = QuickJsExecutor::new().inspect(src).unwrap_err();
+    assert!(err.contains("tool"), "{err}");
+}
+
+#[test]
+fn inspect_rejects_too_many_tools() {
+    let tools: Vec<String> = (0..33)
+        .map(|i| {
+            format!(
+                r#"t{i}: {{ description: "d", inputSchema: {{ type: "object" }}, handler() {{}} }}"#
+            )
+        })
+        .collect();
+    let src = format!("export const mcp = {{ tools: {{ {} }} }};", tools.join(", "));
+    let err = QuickJsExecutor::new().inspect(&src).unwrap_err();
+    assert!(err.contains("too many tools"), "{err}");
+}
+
+#[test]
+fn inspect_rejects_a_bad_tool_name() {
+    let src = r#"export const mcp = { tools: { "Bad Name!": {
+        description: "d", inputSchema: { type: "object" },
+        handler() {} } } };"#;
+    let err = QuickJsExecutor::new().inspect(src).unwrap_err();
+    assert!(err.contains("Bad Name!"), "{err}");
 }
 
 #[test]

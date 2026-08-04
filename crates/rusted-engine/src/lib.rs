@@ -119,6 +119,39 @@ pub struct HttpConfig {
     pub path: Option<String>,
 }
 
+/// One tool's deploy-time metadata. The handler function is checked for
+/// presence at inspect time and stripped by JSON serialization (functions
+/// don't survive JSON.stringify), so it never leaves the engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolConfig {
+    pub description: String,
+    #[serde(rename = "inputSchema")]
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub public: bool,
+    #[serde(default)]
+    pub tools: std::collections::BTreeMap<String, ToolConfig>,
+}
+
+/// What a module declares itself to be. The export name is the declaration:
+/// `http` (or nothing) needs a default handler; `mcp` forbids one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Surface {
+    Http(HttpConfig),
+    Mcp(McpConfig),
+}
+
+pub const MAX_TOOLS: usize = 32;
+
 pub trait Executor: Send + Sync {
     fn execute(&self, source: &str, request: &HttpRequest, limits: &Limits) -> InvocationResult;
 
@@ -126,9 +159,9 @@ pub trait Executor: Send + Sync {
     /// human-readable compile/shape error.
     fn verify(&self, source: &str) -> Result<(), String>;
 
-    /// Like [`Executor::verify`], but also reads the optional `export const
-    /// http` declaration from the module.
-    fn inspect(&self, source: &str) -> Result<HttpConfig, String>;
+    /// Like [`Executor::verify`], but reads which surface the module declares
+    /// (`export const http` / `export const mcp`) and its configuration.
+    fn inspect(&self, source: &str) -> Result<Surface, String>;
 }
 
 /// Installed before module evaluation so top-level `console.log` works and is
@@ -701,11 +734,13 @@ fn install_fetch<'js>(ctx: &Ctx<'js>, budget: Arc<outbound::OutboundBudget>) -> 
         .map_err(|e| exception_message(ctx, e))
 }
 
-fn load_module<'js>(
+/// Evaluates the module without demanding any particular exports. The surface
+/// checks (default handler for http, tools for mcp) are the caller's business.
+fn load_module_raw<'js>(
     ctx: &Ctx<'js>,
     source: &str,
     bytecode: Option<&[u8]>,
-) -> Result<(Module<'js, rquickjs::module::Evaluated>, Value<'js>), String> {
+) -> Result<Module<'js, rquickjs::module::Evaluated>, String> {
     ctx.eval::<(), _>(CONSOLE_PRELUDE)
         .map_err(|e| exception_message(ctx, e))?;
     let declared = match bytecode {
@@ -721,12 +756,29 @@ fn load_module<'js>(
     progress
         .finish::<()>()
         .map_err(|e| exception_message(ctx, e))?;
+    Ok(module)
+}
+
+/// The default export, which must exist and be a function.
+fn default_handler<'js>(
+    module: &Module<'js, rquickjs::module::Evaluated>,
+) -> Result<Value<'js>, String> {
     let handler: Value = module
         .get("default")
         .map_err(|_| "module has no default export".to_string())?;
     if !handler.is_function() {
         return Err("default export is not a function".to_string());
     }
+    Ok(handler)
+}
+
+fn load_module<'js>(
+    ctx: &Ctx<'js>,
+    source: &str,
+    bytecode: Option<&[u8]>,
+) -> Result<(Module<'js, rquickjs::module::Evaluated>, Value<'js>), String> {
+    let module = load_module_raw(ctx, source, bytecode)?;
+    let handler = default_handler(&module)?;
     Ok((module, handler))
 }
 
@@ -985,7 +1037,7 @@ impl Executor for QuickJsExecutor {
         })
     }
 
-    fn inspect(&self, source: &str) -> Result<HttpConfig, String> {
+    fn inspect(&self, source: &str) -> Result<Surface, String> {
         let limits = Limits::default();
         let (rt, _expired) = restricted_runtime(&limits);
         let ctx = Context::full(&rt).expect("quickjs context");
@@ -994,24 +1046,99 @@ impl Executor for QuickJsExecutor {
                 &c,
                 Arc::new(outbound::OutboundBudget::new(limits.outbound.clone())),
             )?;
-            let (module, _handler) = load_module(&c, source, None)?;
-            let config: Value = match module.get("http") {
-                Ok(v) => v,
-                Err(_) => return Ok(HttpConfig::default()),
+            let module = load_module_raw(&c, source, None)?;
+            let export = |name: &str| -> Option<Value> {
+                module
+                    .get::<_, Value>(name)
+                    .ok()
+                    .filter(|v| !v.is_undefined() && !v.is_null())
             };
-            if config.is_undefined() || config.is_null() {
-                return Ok(HttpConfig::default());
+            let mcp = export("mcp");
+            let http = export("http");
+            let has_default = export("default").is_some();
+
+            let Some(mcp) = mcp else {
+                // http (or nothing declared): the default handler is the surface.
+                default_handler(&module)?;
+                let Some(config) = http else {
+                    return Ok(Surface::Http(HttpConfig::default()));
+                };
+                let json = stringify(&c, config, "http")?;
+                return serde_json::from_str::<HttpConfig>(&json)
+                    .map(Surface::Http)
+                    .map_err(|e| format!("invalid http export: {e}"));
+            };
+
+            if has_default {
+                return Err(
+                    "an mcp module must not have a default export; tools are the interface"
+                        .to_string(),
+                );
             }
-            let json = c
-                .json_stringify(config)
-                .map_err(|e| exception_message(&c, e))?
-                .ok_or_else(|| "http export is not JSON-serializable".to_string())?
-                .to_string()
+            if http.is_some() {
+                return Err(
+                    "declare one surface per module: found both http and mcp exports".to_string(),
+                );
+            }
+
+            // Handlers must exist here — JSON.stringify drops them, so serde
+            // can't check. One eval'd probe reports every tool missing one.
+            let probe: Function = c
+                .eval(
+                    r#"(m) => Object.entries((m && m.tools) || {})
+                        .filter(([, t]) => typeof (t && t.handler) !== "function")
+                        .map(([k]) => k)"#,
+                )
                 .map_err(|e| exception_message(&c, e))?;
-            serde_json::from_str::<HttpConfig>(&json)
-                .map_err(|e| format!("invalid http export: {e}"))
+            let missing: Vec<String> = probe
+                .call((mcp.clone(),))
+                .map_err(|e| exception_message(&c, e))?;
+            if let Some(name) = missing.first() {
+                return Err(format!("tool {name} has no handler function"));
+            }
+
+            let json = stringify(&c, mcp, "mcp")?;
+            let config = serde_json::from_str::<McpConfig>(&json)
+                .map_err(|e| format!("invalid mcp export: {e}"))?;
+            if config.tools.is_empty() {
+                return Err("an mcp module must declare at least one tool".to_string());
+            }
+            if config.tools.len() > MAX_TOOLS {
+                return Err(format!(
+                    "too many tools: {} (max {MAX_TOOLS})",
+                    config.tools.len()
+                ));
+            }
+            for (name, tool) in &config.tools {
+                if !valid_tool_name(name) {
+                    return Err(format!(
+                        "invalid tool name {name:?}: 1-64 chars of a-z, 0-9, '-', '_'"
+                    ));
+                }
+                jsonschema::validator_for(&tool.input_schema)
+                    .map_err(|e| format!("tool {name}: invalid inputSchema: {e}"))?;
+            }
+            Ok(Surface::Mcp(config))
         })
     }
+}
+
+/// JSON.stringify an export inside the module's own context; functions are
+/// dropped, symbols/cycles are an error.
+fn stringify<'js>(c: &Ctx<'js>, value: Value<'js>, export: &str) -> Result<String, String> {
+    c.json_stringify(value)
+        .map_err(|e| exception_message(c, e))?
+        .ok_or_else(|| format!("{export} export is not JSON-serializable"))?
+        .to_string()
+        .map_err(|e| exception_message(c, e))
+}
+
+/// Same charset the server accepts for function names.
+fn valid_tool_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]

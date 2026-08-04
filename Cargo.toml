@@ -21,6 +21,7 @@ rolldown = "=1.2.1"
 rolldown_common = "=1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonschema = { version = "0.26", default-features = false }
 rusted-engine = { path = "crates/rusted-engine" }
 rusted-server = { path = "crates/rusted-server" }
 axum = "0.8"

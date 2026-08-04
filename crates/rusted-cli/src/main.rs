@@ -808,7 +808,7 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
     let bundled = rt.block_on(rusted_server::bundler::bundle(&file, sourcemap))?;
 
     // A bundle that won't load is not a build worth writing.
-    let config =
+    let surface =
         rusted_engine::Executor::inspect(&rusted_engine::QuickJsExecutor::new(), &bundled.code)
             .map_err(|e| format!("the bundle does not load: {e}"))?;
 
@@ -828,18 +828,24 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
         format!("{size} bytes")
     };
     println!("built {} ({pretty})", out.display());
-    println!(
-        "  {} /f/{}{}",
-        config
-            .methods
-            .map(|m| m.join(","))
-            .unwrap_or_else(|| "POST".to_string()),
-        config.name.unwrap_or_else(|| out
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default()),
-        config.path.unwrap_or_default()
-    );
+    match surface {
+        rusted_engine::Surface::Http(config) => println!(
+            "  {} /f/{}{}",
+            config
+                .methods
+                .map(|m| m.join(","))
+                .unwrap_or_else(|| "POST".to_string()),
+            config.name.unwrap_or_else(|| out
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()),
+            config.path.unwrap_or_default()
+        ),
+        rusted_engine::Surface::Mcp(config) => println!(
+            "  mcp tools: {}",
+            config.tools.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+    }
     Ok(())
 }
 

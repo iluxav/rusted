@@ -730,6 +730,7 @@ async fn verify_reports_discovered_config() {
     assert_eq!(r.status(), 200);
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["valid"], true);
+    assert_eq!(v["kind"], "http");
     assert_eq!(v["config"]["name"], "cfg-fn");
 
     // A typo in the http export fails verify with a pointed message.

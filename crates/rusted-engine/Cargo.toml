@@ -13,6 +13,7 @@ reqwest = { workspace = true }
 cpu-time = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonschema = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

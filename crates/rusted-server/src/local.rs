@@ -161,7 +161,12 @@ fn load(
     sourcemap_json: Option<String>,
     executor: &QuickJsExecutor,
 ) -> Result<Loaded, String> {
-    let config = executor.inspect(&source)?;
+    let config = match executor.inspect(&source)? {
+        rusted_engine::Surface::Http(config) => config,
+        rusted_engine::Surface::Mcp(_) => {
+            return Err("rusted run cannot serve mcp functions yet".to_string())
+        }
+    };
     let stem = entry
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

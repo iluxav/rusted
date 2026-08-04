@@ -666,11 +666,12 @@ struct PushBody {
     path: Option<String>,
 }
 
-/// Compile-checks the source and reads its `export const http` declaration.
+/// Compile-checks the source and reads which surface it declares
+/// (`export const http` or `export const mcp`).
 async fn inspect_source(
     state: &Arc<AppState>,
     source: String,
-) -> Result<rusted_engine::HttpConfig, String> {
+) -> Result<rusted_engine::Surface, String> {
     let executor = state.executor.clone();
     tokio::task::spawn_blocking(move || executor.inspect(&source))
         .await
@@ -732,9 +733,19 @@ pub async fn deploy_function(
         }
     }
 
-    let http_config = inspect_source(state, source.clone())
+    let surface = inspect_source(state, source.clone())
         .await
         .map_err(|e| DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e))?;
+    let http_config = match surface {
+        rusted_engine::Surface::Http(config) => config,
+        rusted_engine::Surface::Mcp(_) => {
+            return Err(DeployRefused::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_trigger",
+                "mcp functions are not deployable yet",
+            ))
+        }
+    };
 
     let Some(name) = name.or(http_config.name) else {
         return Err(DeployRefused::new(
@@ -1238,7 +1249,13 @@ async fn verify(
         return response;
     }
     match inspect_source(&state, body.source).await {
-        Ok(config) => Json(json!({ "valid": true, "config": config })).into_response(),
+        Ok(surface) => {
+            let (kind, config) = match &surface {
+                rusted_engine::Surface::Http(c) => ("http", json!(c)),
+                rusted_engine::Surface::Mcp(c) => ("mcp", json!(c)),
+            };
+            Json(json!({ "valid": true, "kind": kind, "config": config })).into_response()
+        }
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e),
     }
 }
