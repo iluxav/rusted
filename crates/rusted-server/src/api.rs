@@ -666,11 +666,11 @@ struct PushBody {
     path: Option<String>,
 }
 
-/// Compile-checks the source and reads its `export const config` declaration.
+/// Compile-checks the source and reads its `export const http` declaration.
 async fn inspect_source(
     state: &Arc<AppState>,
     source: String,
-) -> Result<rusted_engine::FileConfig, String> {
+) -> Result<rusted_engine::HttpConfig, String> {
     let executor = state.executor.clone();
     tokio::task::spawn_blocking(move || executor.inspect(&source))
         .await
@@ -732,15 +732,15 @@ pub async fn deploy_function(
         }
     }
 
-    let file_config = inspect_source(state, source.clone())
+    let http_config = inspect_source(state, source.clone())
         .await
         .map_err(|e| DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e))?;
 
-    let Some(name) = name.or(file_config.name) else {
+    let Some(name) = name.or(http_config.name) else {
         return Err(DeployRefused::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "missing_name",
-            "provide a name, or declare it in `export const config = { name: ... }`",
+            "provide a name, or declare it in `export const http = { name: ... }`",
         ));
     };
     if !valid_name(&name) {
@@ -774,8 +774,8 @@ pub async fn deploy_function(
     }
 
     // The file's own declaration stands in for anything the caller left out.
-    let methods = methods.or(file_config.methods);
-    let path = path.or(file_config.path);
+    let methods = methods.or(http_config.methods);
+    let path = path.or(http_config.path);
 
     // A push that names no trigger fields keeps the function's existing route;
     // naming any of them replaces the whole trigger config.
@@ -1316,7 +1316,7 @@ fn mcp_tools() -> Value {
                 "code": { "type": "string", "description": "The ES module to publish." },
                 "name": {
                     "type": "string",
-                    "description": "1-64 chars of a-z, 0-9, '-', '_'. Becomes part of the URL. Optional if the code declares `export const config = { name }`."
+                    "description": "1-64 chars of a-z, 0-9, '-', '_'. Becomes part of the URL. Optional if the code declares `export const http = { name }`."
                 },
                 "methods": {
                     "type": "array",

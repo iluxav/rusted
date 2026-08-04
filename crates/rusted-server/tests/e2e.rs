@@ -672,7 +672,7 @@ async fn push_without_trigger_fields_preserves_existing_route() {
     assert_eq!(r.text().await.unwrap(), "pong");
 }
 
-const CONFIGURED: &str = r#"export const config = { name: "cfg-fn", methods: ["GET"], path: "/ping" };
+const CONFIGURED: &str = r#"export const http = { name: "cfg-fn", methods: ["GET"], path: "/ping" };
 export default async function handler(request, context) { return context.text("pong"); }"#;
 
 #[tokio::test]
@@ -732,8 +732,8 @@ async fn verify_reports_discovered_config() {
     assert_eq!(v["valid"], true);
     assert_eq!(v["config"]["name"], "cfg-fn");
 
-    // A typo in the config export fails verify with a pointed message.
-    let r = t.admin_post("/api/verify", json!({ "source": "export const config = { metods: [\"GET\"] };\nexport default async function handler() {}" })).await;
+    // A typo in the http export fails verify with a pointed message.
+    let r = t.admin_post("/api/verify", json!({ "source": "export const http = { metods: [\"GET\"] };\nexport default async function handler() {}" })).await;
     assert_eq!(r.status(), 422);
     let v: Value = r.json().await.unwrap();
     assert!(v["error"]["message"].as_str().unwrap().contains("metods"));

@@ -124,7 +124,7 @@ struct LocalState {
     plan: RwLock<Option<String>>,
 }
 
-/// Reads the entry file and its `export const config`, falling back to the
+/// Reads the entry file and its `export const http`, falling back to the
 /// file stem for the name and POST for the method.
 /// Produces the source for the current pipeline: bundled in process, or read
 /// from disk after the developer's own build.

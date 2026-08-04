@@ -86,7 +86,7 @@ enum Cmd {
     /// Deploy a persistent function
     Push {
         file: PathBuf,
-        /// Function name; optional when the file declares `export const config = { name }`
+        /// Function name; optional when the file declares `export const http = { name }`
         #[arg(long)]
         name: Option<String>,
         /// Trigger type (only "http" for now)
@@ -258,7 +258,7 @@ fn scaffold(name: &str, js: bool) -> Result<(), String> {
     let entry = format!("index.{ext}");
     let handler = if js {
         format!(
-            "export const config = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
+            "export const http = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
              \n\
              export default async function handler(request, context) {{\n\
              \x20 const {{ name }} = await request.json();\n\
@@ -273,7 +273,7 @@ fn scaffold(name: &str, js: bool) -> Result<(), String> {
              \x20 name?: string;\n\
              }}\n\
              \n\
-             export const config: Rusted.Config = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
+             export const http: Rusted.Http = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
              \n\
              const handler: Rusted.Handler = async (request, context) => {{\n\
              \x20 const {{ name }} = await request.json<Input>();\n\

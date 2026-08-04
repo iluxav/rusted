@@ -105,12 +105,12 @@ pub struct InvocationResult {
     pub outbound_used: u32,
 }
 
-/// Deployment intent a script declares about itself via `export const config`.
+/// Deployment intent a script declares about itself via `export const http`.
 /// Unknown keys are rejected so typos fail at verify time instead of silently
 /// deploying with defaults.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileConfig {
+pub struct HttpConfig {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -127,8 +127,8 @@ pub trait Executor: Send + Sync {
     fn verify(&self, source: &str) -> Result<(), String>;
 
     /// Like [`Executor::verify`], but also reads the optional `export const
-    /// config` declaration from the module.
-    fn inspect(&self, source: &str) -> Result<FileConfig, String>;
+    /// http` declaration from the module.
+    fn inspect(&self, source: &str) -> Result<HttpConfig, String>;
 }
 
 /// Installed before module evaluation so top-level `console.log` works and is
@@ -985,7 +985,7 @@ impl Executor for QuickJsExecutor {
         })
     }
 
-    fn inspect(&self, source: &str) -> Result<FileConfig, String> {
+    fn inspect(&self, source: &str) -> Result<HttpConfig, String> {
         let limits = Limits::default();
         let (rt, _expired) = restricted_runtime(&limits);
         let ctx = Context::full(&rt).expect("quickjs context");
@@ -995,21 +995,21 @@ impl Executor for QuickJsExecutor {
                 Arc::new(outbound::OutboundBudget::new(limits.outbound.clone())),
             )?;
             let (module, _handler) = load_module(&c, source, None)?;
-            let config: Value = match module.get("config") {
+            let config: Value = match module.get("http") {
                 Ok(v) => v,
-                Err(_) => return Ok(FileConfig::default()),
+                Err(_) => return Ok(HttpConfig::default()),
             };
             if config.is_undefined() || config.is_null() {
-                return Ok(FileConfig::default());
+                return Ok(HttpConfig::default());
             }
             let json = c
                 .json_stringify(config)
                 .map_err(|e| exception_message(&c, e))?
-                .ok_or_else(|| "config export is not JSON-serializable".to_string())?
+                .ok_or_else(|| "http export is not JSON-serializable".to_string())?
                 .to_string()
                 .map_err(|e| exception_message(&c, e))?;
-            serde_json::from_str::<FileConfig>(&json)
-                .map_err(|e| format!("invalid config export: {e}"))
+            serde_json::from_str::<HttpConfig>(&json)
+                .map_err(|e| format!("invalid http export: {e}"))
         })
     }
 }

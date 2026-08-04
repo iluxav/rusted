@@ -53,8 +53,8 @@ declare namespace Rusted {
 		text(body: string, init?: ResponseInit): Response;
 	}
 
-	/** `export const config = { … }` — read at deploy time. */
-	interface Config {
+	/** `export const http = { … }` — read at deploy time. */
+	interface Http {
 		/** Defaults to the filename. */
 		name?: string;
 		/** Allowed methods. Defaults to ["POST"]. */

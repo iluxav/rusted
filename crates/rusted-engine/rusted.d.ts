@@ -74,8 +74,8 @@ declare namespace Rusted {
 		inbox?: Inbox;
 	}
 
-	/** `export const config = { … }` — read at deploy time. */
-	interface Config {
+	/** `export const http = { … }` — read at deploy time. */
+	interface Http {
 		/** Defaults to the filename. */
 		name?: string;
 		/** Allowed methods. Defaults to ["POST"]. */

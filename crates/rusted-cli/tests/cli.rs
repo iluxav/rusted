@@ -392,7 +392,7 @@ fn push_needs_no_flags_when_file_declares_config() {
     let h = boot();
     let script = h.script(
         "selfconfig.js",
-        r#"export const config = { name: "selfie", methods: ["GET"], path: "/hi" };
+        r#"export const http = { name: "selfie", methods: ["GET"], path: "/hi" };
 export default async function handler(request, context) { return context.text("hi"); }"#,
     );
     let out = h
@@ -422,7 +422,7 @@ fn run_serves_a_function_locally_without_a_server() {
     let script = dir.path().join("hello.js");
     std::fs::write(
         &script,
-        r#"export const config = { name: "hello", methods: ["POST"] };
+        r#"export const http = { name: "hello", methods: ["POST"] };
 export default async function handler(request, context) {
     console.log("saw", request.body);
     return context.json({ echo: request.body });
@@ -498,7 +498,7 @@ fn run_reports_errors_with_a_stack() {
     let script = dir.path().join("boom.js");
     std::fs::write(
         &script,
-        r#"export const config = { name: "boom" };
+        r#"export const http = { name: "boom" };
 function inner() { throw new Error("kaboom"); }
 export default async function handler() { return inner(); }"#,
     )
@@ -554,7 +554,7 @@ fn run_builds_the_entry_file_when_it_does_not_exist_yet() {
     let src = dir.path().join("src.js");
     std::fs::write(
         &src,
-        r#"export const config = { name: "built" };
+        r#"export const http = { name: "built" };
 export default async function handler(request, context) { return context.text("from build"); }"#,
     )
     .unwrap();
@@ -646,7 +646,7 @@ fn run_bundles_a_file_with_imports_without_any_flags() {
     std::fs::write(
         dir.path().join("index.js"),
         r#"import { greet } from "./greeting.js";
-export const config = { name: "bundled" };
+export const http = { name: "bundled" };
 export default async function handler(request, context) { return context.text(greet("Ada")); }"#,
     )
     .unwrap();
@@ -706,7 +706,7 @@ fn run_serves_an_import_free_file_without_bundling() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("plain.js"),
-        r#"export const config = { name: "plain" };
+        r#"export const http = { name: "plain" };
 export default async function handler(request, context) { return context.text("no bundler"); }"#,
     )
     .unwrap();
@@ -767,7 +767,7 @@ fn run_maps_stack_frames_back_to_source_lines() {
     )
     .unwrap();
     let entry = r#"import { padding } from "./helper.js";
-export const config = { name: "mapped" };
+export const http = { name: "mapped" };
 export default async function handler(request, context) {
     void padding;
     return missingThing.value;
@@ -854,7 +854,7 @@ fn build_bundles_to_dist_and_reports_the_route() {
     std::fs::write(
         dir.path().join("index.js"),
         r#"import { who } from "./lib.js";
-export const config = { name: "greeter", methods: ["GET", "POST"], path: "/say/{word}" };
+export const http = { name: "greeter", methods: ["GET", "POST"], path: "/say/{word}" };
 export default async function handler(request, context) { return context.text(who()); }"#,
     )
     .unwrap();
@@ -894,7 +894,7 @@ fn build_refuses_a_bundle_that_would_not_deploy() {
     // Valid JavaScript, but no handler — pushing this would fail at the server.
     std::fs::write(
         dir.path().join("index.js"),
-        "export const config = { name: \"x\" };",
+        "export const http = { name: \"x\" };",
     )
     .unwrap();
     Command::cargo_bin("rusted")
@@ -921,7 +921,7 @@ fn push_bundles_a_source_file_with_imports() {
     let script = h.script(
         "entry.js",
         r#"import { hello } from "./greeting.js";
-export const config = { name: "bundled-push" };
+export const http = { name: "bundled-push" };
 export default async function handler(request, context) { return context.text(hello()); }"#,
     );
 
@@ -954,7 +954,7 @@ export default async function handler(request, context) { return context.text(he
 #[test]
 fn push_leaves_an_import_free_file_alone() {
     let h = boot();
-    let source = r#"export const config = { name: "plain-push" };
+    let source = r#"export const http = { name: "plain-push" };
 export default async function handler(request, context) { return context.text("as written"); }"#;
     let script = h.script("plain.js", source);
     h.rusted().args(["push", &script]).assert().success();

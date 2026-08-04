@@ -58,7 +58,7 @@ async fn the_two_executors_agree() {
         ),
         (
             "no handler",
-            r#"export const config = { name: "x" };"#,
+            r#"export const http = { name: "x" };"#,
             "{}",
         ),
         (

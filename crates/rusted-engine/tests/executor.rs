@@ -259,8 +259,8 @@ fn path_params_are_exposed_to_the_handler() {
 }
 
 #[test]
-fn inspect_reads_config_export() {
-    let src = r#"export const config = { name: "greet", methods: ["GET", "POST"], path: "/user/greet" };
+fn inspect_reads_http_export() {
+    let src = r#"export const http = { name: "greet", methods: ["GET", "POST"], path: "/user/greet" };
 export default async function handler() { return "ok"; }"#;
     let cfg = exec().inspect(src).expect("valid source inspects");
     assert_eq!(cfg.name.as_deref(), Some("greet"));
@@ -272,15 +272,15 @@ export default async function handler() { return "ok"; }"#;
 }
 
 #[test]
-fn inspect_without_config_export_returns_empty_config() {
+fn inspect_without_http_export_returns_empty_config() {
     let src = r#"export default async function handler() { return "ok"; }"#;
     let cfg = exec().inspect(src).expect("valid source inspects");
-    assert_eq!(cfg, rusted_engine::FileConfig::default());
+    assert_eq!(cfg, rusted_engine::HttpConfig::default());
 }
 
 #[test]
-fn inspect_rejects_config_typos_loudly() {
-    let src = r#"export const config = { metods: ["GET"] };
+fn inspect_rejects_http_typos_loudly() {
+    let src = r#"export const http = { metods: ["GET"] };
 export default async function handler() { return "ok"; }"#;
     let err = exec().inspect(src).expect_err("unknown key must fail");
     assert!(
@@ -292,7 +292,7 @@ export default async function handler() { return "ok"; }"#;
 #[test]
 fn inspect_still_requires_default_export() {
     let err = exec()
-        .inspect("export const config = { name: \"x\" };")
+        .inspect("export const http = { name: \"x\" };")
         .expect_err("missing handler must fail");
     assert!(err.contains("default"), "error: {err}");
 }
@@ -372,7 +372,7 @@ fn fetch_enforces_the_per_execution_quota() {
 
 #[test]
 fn repeated_executions_reuse_compiled_bytecode() {
-    let src = r#"export const config = { name: "cached" };
+    let src = r#"export const http = { name: "cached" };
 export default async function handler(request, context) {
     globalThis.seen = (globalThis.seen || 0) + 1;
     return context.text("run:" + globalThis.seen);

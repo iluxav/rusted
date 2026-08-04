@@ -55,7 +55,7 @@ rusted list | rusted pull greet | rusted verify greet.js | rusted delete greet
 Scripts can carry their own deployment intent, so `rusted push api.js` needs no flags:
 
 ```js
-export const config = {
+export const http = {
   name: "api",
   methods: ["GET", "POST"],
   path: "/users/{id}",
@@ -64,7 +64,7 @@ export const config = {
 export default async function handler(request, context) { ... }
 ```
 
-Explicit flags override the file config. Unknown config keys fail verify — typos can't deploy silently. Being real code (not comments), the config survives bundling.
+Explicit flags override the file's `http` export. Unknown keys fail verify — typos can't deploy silently. Being real code (not comments), the declaration survives bundling.
 
 ## Signing in
 
