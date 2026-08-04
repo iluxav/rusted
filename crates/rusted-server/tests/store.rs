@@ -136,12 +136,22 @@ async fn mcp_metadata_round_trips() {
     let (store, _pool, owner) = store().await;
     let meta = serde_json::json!({"public": false, "tools": {"slugify": {"description": "d", "inputSchema": {"type": "object"}}}});
     store
-        .push_full("m", "export const mcp = {}", None, "mcp", Some(&meta), Some(owner))
+        .push_full(
+            "m",
+            "export const mcp = {}",
+            None,
+            "mcp",
+            Some(&meta),
+            Some(owner),
+        )
         .await
         .unwrap();
     let f = store.fetch("m").await.unwrap().unwrap();
     assert_eq!(f.kind, "mcp");
-    assert_eq!(f.mcp.as_ref().unwrap()["tools"]["slugify"]["description"], "d");
+    assert_eq!(
+        f.mcp.as_ref().unwrap()["tools"]["slugify"]["description"],
+        "d"
+    );
     assert_eq!(f.rev, 1);
 }
 
@@ -150,7 +160,14 @@ async fn redeploying_as_http_clears_mcp_metadata() {
     let (store, _pool, owner) = store().await;
     let meta = serde_json::json!({"public": true, "tools": {}});
     store
-        .push_full("flip", "export const mcp = {}", None, "mcp", Some(&meta), Some(owner))
+        .push_full(
+            "flip",
+            "export const mcp = {}",
+            None,
+            "mcp",
+            Some(&meta),
+            Some(owner),
+        )
         .await
         .unwrap();
     // A plain push always derives kind from the source being deployed, so the

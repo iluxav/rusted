@@ -98,7 +98,12 @@ async fn clobbering_the_log_global_does_not_break_the_envelope() {
         description: "d", inputSchema: { type: "object" },
         handler() { globalThis.__rustedLogs = "not an array"; return "fine"; } } } };"#;
     let r = run(src, "t").await;
-    assert_eq!(r.outcome, Outcome::Success("fine".into()), "{:?}", r.outcome);
+    assert_eq!(
+        r.outcome,
+        Outcome::Success("fine".into()),
+        "{:?}",
+        r.outcome
+    );
 }
 
 #[tokio::test]

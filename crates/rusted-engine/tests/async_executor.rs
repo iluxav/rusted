@@ -58,11 +58,7 @@ async fn the_two_executors_agree() {
             r#"export default async function handler(r, c) { return c.json({ v: nope.x }); }"#,
             "{}",
         ),
-        (
-            "no handler",
-            r#"export const http = { name: "x" };"#,
-            "{}",
-        ),
+        ("no handler", r#"export const http = { name: "x" };"#, "{}"),
         (
             "returns a bare string",
             r#"export default async function handler() { return "plain"; }"#,
@@ -259,7 +255,12 @@ async fn run_tool(source: &str, tool: &str, args: serde_json::Value) -> Invocati
 
 #[tokio::test]
 async fn a_tool_returning_a_string_is_text() {
-    let r = run_tool(MCP_MODULE, "slugify", serde_json::json!({"text": "Hello World"})).await;
+    let r = run_tool(
+        MCP_MODULE,
+        "slugify",
+        serde_json::json!({"text": "Hello World"}),
+    )
+    .await;
     assert_eq!(r.outcome, Outcome::Success("hello world".into()));
     assert_eq!(r.content_type.as_deref(), Some("text/plain"));
 }

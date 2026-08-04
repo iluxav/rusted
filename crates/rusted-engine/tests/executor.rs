@@ -389,7 +389,10 @@ fn inspect_rejects_a_non_object_input_schema() {
         description: "d", inputSchema: true,
         handler() {} } } };"#;
     let err = QuickJsExecutor::new().inspect(src).unwrap_err();
-    assert!(err.contains("loose") && err.contains("inputSchema"), "{err}");
+    assert!(
+        err.contains("loose") && err.contains("inputSchema"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -401,7 +404,10 @@ fn inspect_accepts_exactly_the_tool_limit() {
             )
         })
         .collect();
-    let src = format!("export const mcp = {{ tools: {{ {} }} }};", tools.join(", "));
+    let src = format!(
+        "export const mcp = {{ tools: {{ {} }} }};",
+        tools.join(", ")
+    );
     match QuickJsExecutor::new().inspect(&src).unwrap() {
         Surface::Mcp(m) => assert_eq!(m.tools.len(), 32),
         s => panic!("expected mcp surface, got {s:?}"),
@@ -439,7 +445,10 @@ fn inspect_rejects_too_many_tools() {
             )
         })
         .collect();
-    let src = format!("export const mcp = {{ tools: {{ {} }} }};", tools.join(", "));
+    let src = format!(
+        "export const mcp = {{ tools: {{ {} }} }};",
+        tools.join(", ")
+    );
     let err = QuickJsExecutor::new().inspect(&src).unwrap_err();
     assert!(err.contains("too many tools"), "{err}");
 }

@@ -1051,20 +1051,22 @@ async fn settle_with_deadline<'js>(
     limits: &Limits,
 ) -> (Outcome, Response, Vec<LogEntry>, Option<String>) {
     const GRACE: Duration = Duration::from_millis(50);
-    let settled = tokio::time::timeout_at(
-        (deadline + GRACE).into(),
-        promise.into_future::<String>(),
-    )
-    .await;
+    let settled =
+        tokio::time::timeout_at((deadline + GRACE).into(), promise.into_future::<String>()).await;
     let expired = expired.load(Ordering::Relaxed);
     match settled {
-        Ok(finished) => {
-            outcome_from_envelope(finished.map_err(|e| exception_message(c, e)), expired, limits)
-        }
+        Ok(finished) => outcome_from_envelope(
+            finished.map_err(|e| exception_message(c, e)),
+            expired,
+            limits,
+        ),
         // Feeding `classify_with` the dead-lock shape keeps the wording
         // identical to what the blocking executor says for this situation.
         Err(_) => (
-            classify_with("dead lock: the promise is still pending".to_string(), expired),
+            classify_with(
+                "dead lock: the promise is still pending".to_string(),
+                expired,
+            ),
             Response::default(),
             Vec::new(),
             None,
@@ -1306,8 +1308,8 @@ impl Executor for QuickJsExecutor {
                 #[serde(default)]
                 config: serde_json::Value,
             }
-            let probed: Probed = serde_json::from_str(&raw)
-                .map_err(|e| format!("invalid mcp export: {e}"))?;
+            let probed: Probed =
+                serde_json::from_str(&raw).map_err(|e| format!("invalid mcp export: {e}"))?;
             if let Some(name) = probed.missing.first() {
                 return Err(format!("tool {name} has no handler function"));
             }

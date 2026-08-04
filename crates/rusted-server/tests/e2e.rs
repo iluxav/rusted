@@ -725,7 +725,9 @@ export const mcp = {
 #[tokio::test]
 async fn pushing_an_mcp_module_deploys_an_mcp_function() {
     let t = boot().await;
-    let r = t.admin_post("/api/functions", json!({ "source": MCP_FN })).await;
+    let r = t
+        .admin_post("/api/functions", json!({ "source": MCP_FN }))
+        .await;
     assert_eq!(r.status(), 200);
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["name"], "sluggy");
@@ -753,7 +755,9 @@ async fn an_mcp_push_refuses_http_trigger_fields() {
 async fn a_module_with_both_surfaces_is_a_compile_error() {
     let t = boot().await;
     let both = format!("{MCP_FN}\nexport default async function h() {{}}");
-    let r = t.admin_post("/api/functions", json!({ "source": both })).await;
+    let r = t
+        .admin_post("/api/functions", json!({ "source": both }))
+        .await;
     assert_eq!(r.status(), 422);
 }
 
@@ -789,7 +793,10 @@ async fn redeploying_an_mcp_function_as_http_switches_back() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["kind"], "http");
     assert!(v.get("tools").is_none(), "http detail must not carry tools");
-    assert!(v.get("public").is_none(), "http detail must not carry public");
+    assert!(
+        v.get("public").is_none(),
+        "http detail must not carry public"
+    );
 }
 
 #[tokio::test]

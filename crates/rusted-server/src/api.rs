@@ -1708,7 +1708,10 @@ async fn mcp_dispatch(state: &Arc<AppState>, user_id: Uuid, msg: &Value) -> Opti
                 "delete" => ok(mcp_delete(state, user_id, &args).await),
                 "inbox_create" => ok(mcp_inbox_create(state, user_id, &args).await),
                 "inbox_read" => ok(mcp_inbox_read(state, user_id, &args).await),
-                other => ok(mcp_wire::tool_result(format!("unknown tool: {other}"), true)),
+                other => ok(mcp_wire::tool_result(
+                    format!("unknown tool: {other}"),
+                    true,
+                )),
             }
         }
         other => Some(mcp_wire::err(
