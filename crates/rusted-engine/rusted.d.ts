@@ -84,6 +84,41 @@ declare namespace Rusted {
 		path?: string;
 	}
 
+	/** `export const mcp = { … }` — the mcp surface, read at deploy time. */
+	interface Mcp {
+		/** Defaults to the filename. */
+		name?: string;
+		/** Serve without a key. Default: a rusted API key of the owner is required. */
+		public?: boolean;
+		tools: Record<string, Tool>;
+	}
+
+	/** One tool: the metadata clients list, and the handler that runs. */
+	interface Tool {
+		description: string;
+		/** JSON Schema for the arguments. Must be an object schema. */
+		inputSchema: Record<string, unknown>;
+		/**
+		 * Returning a string sends it as text; returning anything else sends
+		 * it as JSON, with `undefined` becoming `null`. Throwing reports the
+		 * error to the calling model as a tool failure.
+		 */
+		handler: (
+			args: Record<string, unknown>,
+			context: ToolContext,
+		) => unknown | Promise<unknown>;
+	}
+
+	/** What a tool handler is lent. */
+	interface ToolContext {
+		/**
+		 * Present on a deployed function. Absent when running somewhere the
+		 * host lends no services — `rusted run` locally, for instance — so a
+		 * handler that needs it fails saying so rather than finding nothing.
+		 */
+		inbox?: Inbox;
+	}
+
 	/**
 	 * Returning a `Response` sets the content type and status. Returning a
 	 * string sends it as-is; returning anything else sends it as JSON, with

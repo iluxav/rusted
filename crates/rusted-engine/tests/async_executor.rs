@@ -2,7 +2,9 @@
 // how it waits. Anything that holds for only one of them is a hole.
 use std::time::{Duration, Instant};
 
-use rusted_engine::{Executor, HttpRequest, Limits, OutboundPolicy, Outcome, QuickJsExecutor};
+use rusted_engine::{
+    Executor, HttpRequest, InvocationResult, Limits, OutboundPolicy, Outcome, QuickJsExecutor,
+};
 
 fn limits(wall_ms: u64, outbound: u32) -> Limits {
     Limits {
@@ -214,4 +216,114 @@ async fn concurrent_invocations_overlap_while_awaiting() {
         eight < one * 3,
         "eight concurrent awaits took {eight:?} against {one:?} for one — they did not overlap"
     );
+}
+
+// --- One-shot tool execution -------------------------------------------------
+
+const MCP_MODULE: &str = r#"
+export const mcp = {
+  name: "my-mcp",
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase(); },
+    },
+  },
+};
+"#;
+
+async fn run_tool(source: &str, tool: &str, args: serde_json::Value) -> InvocationResult {
+    QuickJsExecutor::new()
+        .execute_tool_with_services(source, tool, &args, &Limits::default(), None)
+        .await
+}
+
+#[tokio::test]
+async fn a_tool_returning_a_string_is_text() {
+    let r = run_tool(MCP_MODULE, "slugify", serde_json::json!({"text": "Hello World"})).await;
+    assert_eq!(r.outcome, Outcome::Success("hello world".into()));
+    assert_eq!(r.content_type.as_deref(), Some("text/plain"));
+}
+
+#[tokio::test]
+async fn a_tool_returning_a_value_is_json() {
+    let src = r#"export const mcp = { tools: { count: {
+        description: "d", inputSchema: { type: "object" },
+        handler({ text }) { return { words: 2 }; } } } };"#;
+    let r = run_tool(src, "count", serde_json::json!({"text": "a b"})).await;
+    assert_eq!(r.outcome, Outcome::Success(r#"{"words":2}"#.into()));
+    assert_eq!(r.content_type.as_deref(), Some("application/json"));
+}
+
+#[tokio::test]
+async fn a_throwing_tool_is_an_error_with_its_message() {
+    let src = r#"export const mcp = { tools: { boom: {
+        description: "d", inputSchema: { type: "object" },
+        handler() { throw new Error("kaput"); } } } };"#;
+    let r = run_tool(src, "boom", serde_json::json!({})).await;
+    assert!(matches!(&r.outcome, Outcome::Error(m) if m.contains("kaput")));
+}
+
+#[tokio::test]
+async fn a_spinning_tool_is_terminated() {
+    let src = r#"export const mcp = { tools: { spin: {
+        description: "d", inputSchema: { type: "object" },
+        handler() { while (true) {} } } } };"#;
+    let r = run_tool(src, "spin", serde_json::json!({})).await;
+    assert!(matches!(r.outcome, Outcome::Terminated(_)));
+}
+
+#[tokio::test]
+async fn an_unknown_tool_is_an_error_naming_it() {
+    let r = run_tool(MCP_MODULE, "nope", serde_json::json!({})).await;
+    assert!(
+        matches!(&r.outcome, Outcome::Error(m) if m.contains("unknown tool: nope")),
+        "{:?}",
+        r.outcome
+    );
+}
+
+#[tokio::test]
+async fn a_tool_returning_undefined_is_json_null() {
+    let src = r#"export const mcp = { tools: { quiet: {
+        description: "d", inputSchema: { type: "object" },
+        handler() {} } } };"#;
+    let r = run_tool(src, "quiet", serde_json::json!({})).await;
+    assert_eq!(r.outcome, Outcome::Success("null".into()));
+    assert_eq!(r.content_type.as_deref(), Some("application/json"));
+}
+
+#[tokio::test]
+async fn tool_console_output_is_captured() {
+    let src = r#"export const mcp = { tools: { noisy: {
+        description: "d", inputSchema: { type: "object" },
+        handler() { console.log("tool speaking"); return "done"; } } } };"#;
+    let r = run_tool(src, "noisy", serde_json::json!({})).await;
+    assert_eq!(r.outcome, Outcome::Success("done".into()));
+    assert!(
+        r.logs.iter().any(|l| l.message.contains("tool speaking")),
+        "console output not captured: {:?}",
+        r.logs
+    );
+}
+
+#[tokio::test]
+async fn an_async_tool_can_fetch() {
+    // The outbound policy refuses private addresses; seeing that refusal as the
+    // tool's error proves fetch is wired through the policy, not absent.
+    let src = r#"export const mcp = { tools: { leak: {
+        description: "d", inputSchema: { type: "object" },
+        async handler() {
+            const r = await fetch("http://127.0.0.1:5432/");
+            return r.text();
+        } } } };"#;
+    let l = limits(2000, 2);
+    let r = QuickJsExecutor::new()
+        .execute_tool_with_services(src, "leak", &serde_json::json!({}), &l, None)
+        .await;
+    match &r.outcome {
+        Outcome::Error(m) => assert!(m.contains("private address"), "{m}"),
+        o => panic!("expected the outbound policy's refusal, got {o:?}"),
+    }
 }

@@ -264,6 +264,46 @@ const GLUE: &str = r#"(handler, requestJson) => {
   );
 }"#;
 
+/// Adapts one mcp tool to `(namespace, toolName, argsJson) -> Promise<envelopeJson>`.
+/// The handler is looked up in the live module namespace at call time — inspect
+/// checked a snapshot at deploy time, but what executes is whatever the module
+/// evaluates to now, so the `typeof` re-check here is the invariant that holds.
+/// Emits the same envelope shape as [`GLUE`] so `outcome_from_envelope` reads
+/// both. A tool returns a value, not an HTTP response, so the context has no
+/// `json`/`text` helpers and the content type is decided by the value's shape.
+const TOOL_GLUE: &str = r#"(ns, toolName, argsJson) => {
+  const logs = globalThis.__rustedLogs || [];
+  const tool = ns.mcp && ns.mcp.tools ? ns.mcp.tools[toolName] : undefined;
+  const context = {
+    // Absent when the host lends no services — reading it then is a clearer
+    // failure than a function that silently finds nothing.
+    inbox: globalThis.__rustedInbox,
+  };
+  return Promise.resolve()
+    .then(() => {
+      if (!tool || typeof tool.handler !== "function")
+        throw new Error("unknown tool: " + toolName);
+      return tool.handler(JSON.parse(argsJson), context);
+    })
+    .then((value) => {
+      let body, contentType;
+      if (typeof value === "string") {
+        body = value;
+        contentType = "text/plain";
+      } else {
+        body = value === undefined ? "null" : JSON.stringify(value);
+        contentType = "application/json";
+      }
+      return JSON.stringify({ ok: true, response: body, contentType, status: null, headers: {}, logs });
+    })
+    .catch((e) => JSON.stringify({
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      stack: e && e.stack ? String(e.stack) : null,
+      logs,
+    }));
+}"#;
+
 #[derive(Deserialize)]
 struct Envelope {
     ok: bool,
@@ -895,34 +935,156 @@ impl QuickJsExecutor {
             (outcome, response, logs, stack, exec_wall)
         });
 
-        let ((outcome, response, logs, stack, exec_wall), cpu) = cpu_metered(body).await;
+        let (parts, cpu) = cpu_metered(body).await;
+        assemble_result(parts, cpu, wall0, limits, &budget)
+    }
 
-        // A failure with neither message nor stack is what running out of heap
-        // looks like from here.
-        let outcome = match &outcome {
-            Outcome::Error(msg) if is_valueless_failure(msg, stack.as_ref()) => {
-                Outcome::Terminated(format!(
-                    "memory limit: the handler failed with no error value, which is what \
-                     exceeding the {} MB heap looks like (throwing a non-Error value is \
-                     indistinguishable from here)",
-                    limits.memory_bytes / (1024 * 1024)
-                ))
+    /// Runs one mcp tool as a one-shot invocation: same runtime, limits, and
+    /// envelope machinery as [`Self::execute_with_services`], but the module is
+    /// loaded without demanding a default export and [`TOOL_GLUE`] resolves the
+    /// named tool's handler in the live namespace instead.
+    pub async fn execute_tool_with_services(
+        &self,
+        source: &str,
+        tool: &str,
+        args: &serde_json::Value,
+        limits: &Limits,
+        services: Option<Arc<dyn HostServices>>,
+    ) -> InvocationResult {
+        let wall0 = Instant::now();
+        let (rt, expired) = restricted_async_runtime(limits).await;
+        let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
+        let args_json = serde_json::to_string(args).expect("serialize args");
+        let bytecode = self.bytecode_for(source).ok();
+        // Fetches share the invocation's budget, so exec_ms bounds total wall
+        // time and not merely the JavaScript.
+        let deadline = wall0 + Duration::from_millis(limits.wall_ms);
+        let budget = Arc::new(outbound::OutboundBudget::with_deadline(
+            limits.outbound.clone(),
+            deadline,
+        ));
+
+        let body = ctx.async_with(async |c| {
+            let zero = Duration::ZERO;
+            if let Err(msg) = install_fetch_async(&c, budget.clone()) {
+                return (
+                    Outcome::Error(msg),
+                    Response::default(),
+                    Vec::new(),
+                    None,
+                    zero,
+                );
             }
-            _ => outcome,
-        };
+            if let Some(services) = services.clone() {
+                if let Err(msg) = install_services(&c, services) {
+                    return (
+                        Outcome::Error(msg),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    );
+                }
+            }
+            let module =
+                match load_module_raw(&c, source, bytecode.as_deref().map(|b| b.as_slice())) {
+                    Ok(module) => module,
+                    Err(msg) => {
+                        return (classify(msg), Response::default(), Vec::new(), None, zero)
+                    }
+                };
+            let ns = match module.namespace() {
+                Ok(ns) => ns,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    )
+                }
+            };
+            let glue: Function = match c.eval(TOOL_GLUE) {
+                Ok(glue) => glue,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    )
+                }
+            };
+            let exec0 = Instant::now();
+            let promise: Promise = match glue.call((ns, tool, args_json.as_str())) {
+                Ok(promise) => promise,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        exec0.elapsed(),
+                    )
+                }
+            };
+            let finished = promise
+                .into_future::<String>()
+                .await
+                .map_err(|e| exception_message(&c, e));
+            let exec_wall = exec0.elapsed();
+            let expired = expired.load(Ordering::Relaxed);
+            let (outcome, response, logs, stack) = outcome_from_envelope(finished, expired, limits);
+            (outcome, response, logs, stack, exec_wall)
+        });
 
-        InvocationResult {
-            outcome,
-            content_type: response.content_type,
-            status: response.status,
-            headers: response.headers,
-            logs,
-            stack,
-            wall: wall0.elapsed(),
-            cpu,
-            exec_wall,
-            outbound_used: budget.used(),
+        let (parts, cpu) = cpu_metered(body).await;
+        assemble_result(parts, cpu, wall0, limits, &budget)
+    }
+}
+
+/// The shared tail of the async execute paths: reinterpret a valueless failure
+/// as the memory limit, then assemble the [`InvocationResult`].
+fn assemble_result(
+    (outcome, response, logs, stack, exec_wall): (
+        Outcome,
+        Response,
+        Vec<LogEntry>,
+        Option<String>,
+        Duration,
+    ),
+    cpu: Duration,
+    wall0: Instant,
+    limits: &Limits,
+    budget: &outbound::OutboundBudget,
+) -> InvocationResult {
+    // A failure with neither message nor stack is what running out of heap
+    // looks like from here.
+    let outcome = match &outcome {
+        Outcome::Error(msg) if is_valueless_failure(msg, stack.as_ref()) => {
+            Outcome::Terminated(format!(
+                "memory limit: the handler failed with no error value, which is what \
+                 exceeding the {} MB heap looks like (throwing a non-Error value is \
+                 indistinguishable from here)",
+                limits.memory_bytes / (1024 * 1024)
+            ))
         }
+        _ => outcome,
+    };
+
+    InvocationResult {
+        outcome,
+        content_type: response.content_type,
+        status: response.status,
+        headers: response.headers,
+        logs,
+        stack,
+        wall: wall0.elapsed(),
+        cpu,
+        exec_wall,
+        outbound_used: budget.used(),
     }
 }
 
@@ -1175,12 +1337,12 @@ mod type_declarations {
     /// The declarations shipped by `rusted types`.
     const DECLARATIONS: &str = include_str!("../rusted.d.ts");
 
-    /// Members of an object literal in [`GLUE`], e.g. `const request = { … }`.
-    fn members_of(binding: &str) -> Vec<String> {
-        let start = super::GLUE
+    /// Members of an object literal in a glue script, e.g. `const request = { … }`.
+    fn members_of(glue: &str, binding: &str) -> Vec<String> {
+        let start = glue
             .find(&format!("const {binding} = {{"))
-            .unwrap_or_else(|| panic!("GLUE no longer defines `{binding}`"));
-        let body = &super::GLUE[start..];
+            .unwrap_or_else(|| panic!("the glue no longer defines `{binding}`"));
+        let body = &glue[start..];
         let end = body.find("\n  };").expect("unterminated object literal");
         body[..end]
             .lines()
@@ -1198,11 +1360,15 @@ mod type_declarations {
     /// does not have: that typechecks and then fails in production.
     #[test]
     fn declarations_cover_everything_the_runtime_exposes() {
-        for (binding, interface) in [("request", "Request"), ("context", "Context")] {
-            let members = members_of(binding);
+        for (glue, binding, interface) in [
+            (super::GLUE, "request", "Request"),
+            (super::GLUE, "context", "Context"),
+            (super::TOOL_GLUE, "context", "ToolContext"),
+        ] {
+            let members = members_of(glue, binding);
             assert!(
                 !members.is_empty(),
-                "parsed no members for `{binding}` — the GLUE shape changed"
+                "parsed no members for `{binding}` — the glue shape changed"
             );
             for member in members {
                 // Declared as a method, a property, or an optional property —
