@@ -426,6 +426,15 @@ export default async function handler(request, context) { return context.text("h
 
 // --- mcp functions -------------------------------------------------------------
 
+/// The printed client-config block must be paste-ready: extract the `{...}`
+/// from the push output and parse it as the JSON an MCP client would read.
+fn client_config_block(out: &str) -> serde_json::Value {
+    let start = out.find('{').expect("no opening brace in output");
+    let end = out.rfind('}').expect("no closing brace in output");
+    serde_json::from_str(&out[start..=end])
+        .unwrap_or_else(|e| panic!("config block is not valid JSON ({e}):\n{out}"))
+}
+
 #[test]
 fn pushing_an_mcp_module_prints_client_config() {
     let h = boot();
@@ -436,10 +445,17 @@ fn pushing_an_mcp_module_prints_client_config() {
         out.contains("deployed mcp function sluggy (rev 1)"),
         "no deploy line:\n{out}"
     );
-    assert!(out.contains("mcpServers"), "no client config block:\n{out}");
-    assert!(out.contains("/f/sluggy"), "no connect URL:\n{out}");
+    let config = client_config_block(&out);
+    let entry = &config["mcpServers"]["sluggy"];
     assert!(
-        out.contains("Authorization"),
+        entry["url"].as_str().unwrap().ends_with("/f/sluggy"),
+        "no connect URL:\n{out}"
+    );
+    assert!(
+        entry["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bearer "),
         "a private function must hint at the key header:\n{out}"
     );
 
@@ -448,10 +464,14 @@ fn pushing_an_mcp_module_prints_client_config() {
     let script = h.script("open.js", &public);
     let assert = h.rusted().args(["push", &script]).assert().success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(out.contains("mcpServers"), "no client config block:\n{out}");
-    assert!(out.contains("/f/open"), "no connect URL:\n{out}");
+    let config = client_config_block(&out);
+    let entry = &config["mcpServers"]["open"];
     assert!(
-        !out.contains("Authorization"),
+        entry["url"].as_str().unwrap().ends_with("/f/open"),
+        "no connect URL:\n{out}"
+    );
+    assert!(
+        entry.get("headers").is_none(),
         "a public function needs no header hint:\n{out}"
     );
 }
@@ -494,7 +514,8 @@ fn mcp_functions_work_with_list_pull_logs_delete_but_not_invoke() {
         .args(["invoke", "sluggy"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("mcp"));
+        .stderr(predicates::str::contains("connect an MCP client to"))
+        .stderr(predicates::str::contains("/f/sluggy"));
 
     // The rest are kind-agnostic.
     h.rusted()

@@ -799,6 +799,24 @@ async fn redeploying_an_mcp_function_as_http_switches_back() {
     );
 }
 
+#[tokio::test]
+async fn invoking_an_mcp_function_as_http_is_refused() {
+    let t = boot().await;
+    push(&t, "sluggy", MCP_FN).await;
+    // /api/invoke runs a module as http; an mcp module has no request handler,
+    // so the mismatch is refused up front rather than surfacing as a script error.
+    let r = t
+        .admin_post("/api/invoke", json!({ "name": "sluggy" }))
+        .await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "kind_mismatch", "{v}");
+    assert!(
+        v["error"]["url"].as_str().unwrap().ends_with("/f/sluggy"),
+        "the refusal should point at the mcp endpoint: {v}"
+    );
+}
+
 // --- Serving deployed MCP functions over Streamable HTTP ---------------------
 
 /// One JSON-RPC message to a deployed mcp function, as its owner.

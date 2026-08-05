@@ -563,24 +563,13 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             })
         }
         Cmd::Invoke { ref name, ref body } => {
-            // /api/invoke runs a function as http; an mcp function has no
-            // request handler to run, so say what to do instead of letting the
-            // execution error surface.
-            if let Ok(detail) = api(&cli, Method::GET, &format!("/api/functions/{name}"), None) {
-                if detail["kind"] == json!("mcp") {
-                    return Err(format!(
-                        "{name} is an mcp function — `rusted invoke` drives http functions.\n\
-                         connect an MCP client to {} instead",
-                        detail["url"].as_str().unwrap_or("")
-                    ));
-                }
-            }
             let v = api(
                 &cli,
                 Method::POST,
                 "/api/invoke",
                 Some(json!({ "name": name, "body": body })),
-            )?;
+            )
+            .map_err(|e| friendly_kind_mismatch(name, &e).unwrap_or(e))?;
             if cli.json {
                 println!("{v}");
                 return Ok(());
@@ -855,6 +844,21 @@ fn api(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<Val
         return Err("not signed in — run `rusted login`".to_string());
     }
     Err(value.to_string())
+}
+
+/// Invoking an mcp function as http is refused by the server with
+/// `kind_mismatch`; turn that envelope into advice. `None` means the error was
+/// something else and should pass through untouched.
+fn friendly_kind_mismatch(name: &str, raw: &str) -> Option<String> {
+    let e: Value = serde_json::from_str(raw).ok()?;
+    if e["error"]["code"] != json!("kind_mismatch") {
+        return None;
+    }
+    let mut message = format!("{name} is an mcp function — `rusted invoke` drives http functions.");
+    if let Some(url) = e["error"]["url"].as_str() {
+        message.push_str(&format!("\nconnect an MCP client to {url} instead"));
+    }
+    Some(message)
 }
 
 /// The deliverable of an mcp push: a config block ready to paste into an MCP

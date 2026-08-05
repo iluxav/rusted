@@ -1176,17 +1176,44 @@ async fn invoke(
         }
     }
     let (key, source) = match (&body.name, body.source) {
-        (Some(name), _) => match state.store.source(name).await {
-            Ok(Some(s)) => (Some(name.clone()), s),
-            Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
-            Err(e) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store_error",
-                    e.to_string(),
-                )
+        (Some(name), _) => {
+            // Invoke runs a module as http. An mcp module has no request
+            // handler, so refuse the mismatch up front — pointing at the
+            // endpoint an MCP client should connect to — rather than letting
+            // it surface as a script error.
+            match state.store.get(name).await {
+                Ok(Some(record)) if record.kind == "mcp" => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": {
+                            "code": "kind_mismatch",
+                            "message": "an mcp function is invoked by its tools, not as an http function",
+                            "url": state.data_url(&format!("/f/{name}")),
+                        }})),
+                    )
+                        .into_response()
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store_error",
+                        e.to_string(),
+                    )
+                }
             }
-        },
+            match state.store.source(name).await {
+                Ok(Some(s)) => (Some(name.clone()), s),
+                Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
+                Err(e) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store_error",
+                        e.to_string(),
+                    )
+                }
+            }
+        }
         // Ad-hoc source: nothing shared to serialize on, nothing to record —
         // deliberately keyless so repeated invokes can't grow server state.
         (None, Some(source)) => (None, source),
