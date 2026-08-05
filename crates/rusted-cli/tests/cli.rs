@@ -1070,7 +1070,9 @@ fn run_serves_an_mcp_function_locally() {
         if !banner.contains("mcpServers") {
             return Err(format!("banner should show client config:\n{banner}"));
         }
-        if banner.contains("Authorization") {
+        // The config block itself must carry no credential — the prose hint
+        // about what changes after push may mention the header by name.
+        if banner.contains("\"headers\"") || banner.contains("Bearer") {
             return Err(format!("local serving needs no auth header:\n{banner}"));
         }
 
