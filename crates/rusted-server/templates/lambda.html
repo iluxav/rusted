@@ -5,9 +5,14 @@
         <p class="eyebrow mb-2">Function / revision {{ revision }}</p>
         <h1 class="font-mono text-2xl font-medium tracking-tight text-cream"><span class="mr-2 text-ember">ƒ</span>{{ name }}</h1>
         <div class="mt-3 flex flex-wrap items-center gap-2">
+          {% if kind == "mcp" %}
+          <span class="rounded border border-ember/20 bg-ember/10 px-2 py-1 font-mono text-[10px] font-semibold text-ember">MCP</span>
+          <span class="rounded border border-copper/20 bg-copper/10 px-2 py-1 font-mono text-[10px] font-semibold text-copper">{{ tools.len() }} tool{% if tools.len() != 1 %}s{% endif %}</span>
+          {% else %}
           {% for method in methods %}
           <span class="rounded border border-ember/20 bg-ember/10 px-2 py-1 font-mono text-[10px] font-semibold text-ember">{{ method }}</span>
           {% endfor %}
+          {% endif %}
           <button onclick="navigator.clipboard.writeText('{{ url }}'); this.querySelector('span').textContent='copied!'; setTimeout(() => this.querySelector('span').textContent='{{ url }}', 1500)"
                   title="Copy URL"
                   class="btn-secondary group flex min-w-0 max-w-full px-3 py-1.5">
@@ -29,6 +34,44 @@
     </div>
     {% endif %}
   </div>
+
+  {% if kind == "mcp" %}
+  <div class="overflow-y-auto border-b border-copper/10 bg-rust-950/70 px-5 py-5 sm:px-8">
+    <p class="eyebrow mb-2">Tools</p>
+    <div class="overflow-x-auto">
+      <table class="w-full min-w-[480px] font-mono text-[12px]">
+        <thead>
+          <tr class="border-b border-copper/[0.07] text-left text-[10px] uppercase tracking-wider text-clay/70">
+            <th class="py-2 pr-4 font-normal">tool</th>
+            <th class="py-2 pr-4 font-normal">description</th>
+            <th class="py-2 font-normal">input schema</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for tool in tools %}
+          <tr class="border-b border-copper/[0.07] align-top last:border-0">
+            <td class="py-3 pr-4 text-cream"><span class="mr-2 text-copper">ƒ</span>{{ tool.name }}</td>
+            <td class="py-3 pr-4 text-clay">{{ tool.description }}</td>
+            <td class="py-3">
+              <details>
+                <summary class="cursor-pointer select-none text-copper hover:text-ember">show</summary>
+                <pre class="mt-2 max-h-56 overflow-auto whitespace-pre rounded-md border border-copper/10 bg-rust-950 px-3 py-2 text-[11px] leading-relaxed text-cream">{{ tool.schema_json }}</pre>
+              </details>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="mt-5">
+      <p class="eyebrow mb-2">Client config</p>
+      <pre class="overflow-x-auto rounded-md border border-copper/10 bg-rust-950 px-4 py-3 font-mono text-[11px] leading-relaxed text-cream">{{ client_config }}</pre>
+      <p class="mt-2 font-mono text-[10px] text-clay">
+        {% if mcp_public %}public — any MCP client can connect, no Authorization header needed{% else %}connecting requires your API key — <a href="/console/keys" class="text-copper hover:text-ember">manage keys →</a>{% endif %}
+      </p>
+    </div>
+  </div>
+  {% endif %}
 
   <div id="editor" class="min-h-0 flex-1"></div>
 </div>
@@ -72,8 +115,17 @@
     </div>
 
     <div class="mt-5" id="body-section">
+      {% if kind == "mcp" %}
+      <div class="mb-2 flex items-center justify-between">
+        <p class="eyebrow">Body — tools/call</p>
+        <select id="mcp-tool" onchange="fillMcpBody()" class="field px-3 py-1.5 font-mono text-xs text-ember">
+          {% for tool in tools %}<option>{{ tool.name }}</option>{% endfor %}
+        </select>
+      </div>
+      {% else %}
       <p class="eyebrow mb-2">Body</p>
-      <textarea name="body" rows="5" spellcheck="false" placeholder='{"name": "Ada"}'
+      {% endif %}
+      <textarea name="body" id="test-body" rows="5" spellcheck="false" placeholder='{"name": "Ada"}'
                 class="field w-full px-4 py-3 font-mono text-[12px] text-cream"></textarea>
     </div>
 
@@ -151,6 +203,17 @@
       ['POST', 'PUT', 'PATCH'].includes(method) ? '' : 'none';
   };
   toggleBody();
+
+  // MCP functions speak JSON-RPC: picking a tool rewrites the body to a
+  // ready-to-send tools/call envelope — fill in the arguments and go.
+  const toolSelect = document.getElementById('mcp-tool');
+  window.fillMcpBody = () => {
+    document.getElementById('test-body').value = JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: toolSelect.value, arguments: {} },
+    }, null, 2);
+  };
+  if (toolSelect) fillMcpBody();
 
   // Kept for the tab's lifetime only — a bearer token doesn't belong in
   // localStorage, but retyping it for every test does nobody any favours.

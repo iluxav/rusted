@@ -1511,6 +1511,69 @@ async fn every_console_page_renders() {
     }
 }
 
+/// The lambda page for an mcp function swaps the http affordances for the
+/// tools table, the client-config block, and the tools/call test template.
+#[tokio::test]
+async fn console_lambda_page_renders_mcp_tools() {
+    let t = boot().await;
+    let r = t
+        .admin_post("/api/functions", json!({ "source": MCP_FN }))
+        .await;
+    assert_eq!(r.status(), 200);
+
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .get(format!(
+            "http://{}/console/lambda/sluggy",
+            t.handle.admin_addr
+        ))
+        .header("cookie", format!("rusted_session={session}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("slugify"), "tool name should render");
+    assert!(
+        body.contains("Turn a title into a URL slug"),
+        "tool description should render"
+    );
+    assert!(body.contains("mcpServers"), "client config should render");
+    assert!(
+        body.contains("Authorization"),
+        "a non-public function's config should mention the key header"
+    );
+
+    // The tester posts the tools/call envelope through the console proxy; the
+    // token field must carry the key a non-public mcp function requires.
+    let r = t
+        .client
+        .post(format!("http://{}/console/test", t.handle.admin_addr))
+        .header("cookie", format!("rusted_session={session}"))
+        .form(&[
+            ("method", "POST".to_string()),
+            ("url", t.data("/f/sluggy")),
+            ("token", t.key.clone()),
+            (
+                "body",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slugify","arguments":{"text":"Hello World"}}}"#
+                    .to_string(),
+            ),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let result = r.text().await.unwrap();
+    assert!(
+        result.contains("hello-world"),
+        "the tool should run through the tester: {result}"
+    );
+}
+
 #[tokio::test]
 async fn console_pages_redirect_when_signed_out() {
     let t = boot().await;

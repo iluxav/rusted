@@ -489,6 +489,13 @@ struct CheckoutT {
     cardholder: String,
 }
 
+/// One tool of an mcp function, ready to render: schema pretty-printed.
+struct ToolRow {
+    name: String,
+    description: String,
+    schema_json: String,
+}
+
 #[derive(Template)]
 #[template(path = "lambda.html")]
 struct LambdaT {
@@ -500,6 +507,13 @@ struct LambdaT {
     size: String,
     hidden_kb: usize,
     code_json: String,
+    /// Data-plane protocol: `"http"` or `"mcp"`.
+    kind: String,
+    /// Empty for http functions.
+    tools: Vec<ToolRow>,
+    mcp_public: bool,
+    /// Paste-ready MCP client config block; empty for http functions.
+    client_config: String,
 }
 
 #[derive(Template)]
@@ -1232,6 +1246,34 @@ async fn page_lambda(
     let code_json = serde_json::json!({ "user": user_code, "full": source })
         .to_string()
         .replace("</", "<\\/");
+    let meta = hit.mcp.clone().unwrap_or(serde_json::Value::Null);
+    let tools: Vec<ToolRow> = meta["tools"]
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .map(|(tool, spec)| ToolRow {
+                    name: tool.clone(),
+                    description: spec["description"].as_str().unwrap_or("").to_string(),
+                    schema_json: serde_json::to_string_pretty(&spec["inputSchema"])
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mcp_public = meta["public"].as_bool().unwrap_or(false);
+    let client_config = if hit.kind == "mcp" {
+        // Same shape the CLI prints after an mcp push — paste-ready.
+        let headers = if mcp_public {
+            ""
+        } else {
+            ",\n      \"headers\": { \"Authorization\": \"Bearer <your rusted api key>\" }"
+        };
+        format!(
+            "{{\n  \"mcpServers\": {{\n    \"{name}\": {{\n      \"url\": \"{url}\"{headers}\n    }}\n  }}\n}}"
+        )
+    } else {
+        String::new()
+    };
     let inner = LambdaT {
         name: name.clone(),
         methods: trigger.methods.clone(),
@@ -1241,6 +1283,10 @@ async fn page_lambda(
         size: pretty_size(source.len()),
         hidden_kb: hidden / 1024,
         code_json,
+        kind: hit.kind.clone(),
+        tools,
+        mcp_public,
+        client_config,
     }
     .render()
     .expect("lambda renders");
