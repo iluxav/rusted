@@ -221,9 +221,13 @@ async fn call_tool(
             let mut out = json!({ "content": [{ "type": "text", "text": body }] });
             // A tool that returned a value (not a string) came back as JSON;
             // carry it as structuredContent too so clients need not re-parse.
+            // The spec types structuredContent as an object, so scalars and
+            // arrays travel only as text.
             if result.content_type.as_deref() == Some("application/json") {
                 if let Ok(parsed) = serde_json::from_str::<Value>(&body) {
-                    out["structuredContent"] = parsed;
+                    if parsed.is_object() {
+                        out["structuredContent"] = parsed;
+                    }
                 }
             }
             out

@@ -284,7 +284,7 @@ pub(crate) async fn execute_serialized(
         },
         detail: match (&tool, base_detail) {
             (Some(tool), Some(detail)) => Some(format!("tool {tool}: {detail}")),
-            (Some(tool), None) => Some(format!("tool: {tool}")),
+            (Some(tool), None) => Some(format!("tool {tool}")),
             (None, detail) => detail,
         },
         wall_ms: result.wall.as_secs_f64() * 1000.0,
