@@ -86,12 +86,10 @@ enum Cmd {
     /// Deploy a persistent function
     Push {
         file: PathBuf,
-        /// Function name; optional when the file declares `export const http = { name }`
+        /// Function name; optional when the file declares one
+        /// (`export const http = { name }` or `export const mcp = { name }`)
         #[arg(long)]
         name: Option<String>,
-        /// Trigger type (only "http" for now)
-        #[arg(long = "type", default_value = "http")]
-        trigger_type: String,
         /// Allowed HTTP methods, comma-separated (e.g. GET,POST); default POST
         #[arg(long = "method", value_delimiter = ',')]
         methods: Vec<String>,
@@ -178,6 +176,9 @@ enum Cmd {
         /// Plain JavaScript instead of TypeScript
         #[arg(long)]
         js: bool,
+        /// An MCP server (`export const mcp` with tools) instead of an HTTP handler
+        #[arg(long)]
+        mcp: bool,
     },
 }
 
@@ -241,7 +242,7 @@ const DECLARATIONS: &str = include_str!("../../rusted-engine/rusted.d.ts");
 
 /// Everything needed to run one function, and nothing else. No install step:
 /// `rusted run` bundles in-process, so this is ready the moment it is written.
-fn scaffold(name: &str, js: bool) -> Result<(), String> {
+fn scaffold(name: &str, js: bool, mcp: bool) -> Result<(), String> {
     if name.is_empty() || name.contains(['/', '\\', '.']) {
         return Err(format!(
             "'{name}' is not a usable directory name — letters, digits and dashes work best"
@@ -256,7 +257,35 @@ fn scaffold(name: &str, js: bool) -> Result<(), String> {
 
     let ext = if js { "js" } else { "ts" };
     let entry = format!("index.{ext}");
-    let handler = if js {
+    let handler = if mcp {
+        // Tool handlers, not a request handler — the file *is* an MCP server.
+        let (reference, annotation) = if js {
+            ("", "")
+        } else {
+            (
+                "/// <reference path=\"./rusted.d.ts\" />\n\n",
+                ": Rusted.Mcp",
+            )
+        };
+        format!(
+            "{reference}export const mcp{annotation} = {{\n\
+             \x20 name: \"{name}\",\n\
+             \x20 tools: {{\n\
+             \x20   hello: {{\n\
+             \x20     description: \"Say hello\",\n\
+             \x20     inputSchema: {{\n\
+             \x20       type: \"object\",\n\
+             \x20       properties: {{ name: {{ type: \"string\" }} }},\n\
+             \x20       required: [\"name\"],\n\
+             \x20     }},\n\
+             \x20     async handler({{ name }}) {{\n\
+             \x20       return `Hello, ${{name}}!`;\n\
+             \x20     }},\n\
+             \x20   }},\n\
+             \x20 }},\n\
+             }};\n"
+        )
+    } else if js {
         format!(
             "export const http = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
              \n\
@@ -443,12 +472,11 @@ fn dispatch(cli: Cli) -> Result<(), String> {
         Cmd::Push {
             ref file,
             ref name,
-            ref trigger_type,
             ref methods,
             ref path,
         } => {
             let source = deployable_source(file)?;
-            let mut payload = json!({ "source": source, "type": trigger_type });
+            let mut payload = json!({ "source": source });
             if let Some(name) = name {
                 payload["name"] = json!(name);
             }
@@ -459,6 +487,9 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 payload["path"] = json!(path);
             }
             let v = api(&cli, Method::POST, "/api/functions", Some(payload))?;
+            if v["kind"] == json!("mcp") {
+                return emit(&cli, &v, mcp_push_summary);
+            }
             emit(&cli, &v, |v| {
                 let l = &v["limits"];
                 let methods = v["methods"]
@@ -532,6 +563,18 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             })
         }
         Cmd::Invoke { ref name, ref body } => {
+            // /api/invoke runs a function as http; an mcp function has no
+            // request handler to run, so say what to do instead of letting the
+            // execution error surface.
+            if let Ok(detail) = api(&cli, Method::GET, &format!("/api/functions/{name}"), None) {
+                if detail["kind"] == json!("mcp") {
+                    return Err(format!(
+                        "{name} is an mcp function — `rusted invoke` drives http functions.\n\
+                         connect an MCP client to {} instead",
+                        detail["url"].as_str().unwrap_or("")
+                    ));
+                }
+            }
             let v = api(
                 &cli,
                 Method::POST,
@@ -567,17 +610,44 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 "/api/verify",
                 Some(json!({ "source": source })),
             )?;
-            emit(&cli, &v, |_| "ok".to_string())
+            emit(&cli, &v, |v| match v["kind"].as_str() {
+                Some("mcp") => {
+                    let tools = v["config"]["tools"]
+                        .as_object()
+                        .map(|m| m.keys().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    format!("ok — mcp function, tools: {tools}")
+                }
+                Some(kind) => format!("ok — {kind} function"),
+                None => "ok".to_string(),
+            })
         }
         Cmd::List => {
             let v = api(&cli, Method::GET, "/api/functions", None)?;
             emit(&cli, &v, |v| {
                 let mut lines = Vec::new();
                 for f in v["functions"].as_array().into_iter().flatten() {
+                    // An mcp entry names its kind and tools; http stays terse.
+                    let kind = match f["kind"].as_str() {
+                        Some("mcp") => {
+                            let tools = f["tools"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|t| t.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
+                                .unwrap_or_default();
+                            format!("mcp[{tools}]  ")
+                        }
+                        _ => String::new(),
+                    };
                     lines.push(format!(
-                        "{}  rev {}  {}",
+                        "{}  rev {}  {}{}",
                         f["name"].as_str().unwrap_or(""),
                         f["revision"],
+                        kind,
                         f["url"].as_str().unwrap_or("")
                     ));
                 }
@@ -627,7 +697,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             )?;
             emit(&cli, &v, |_| format!("deleted {name}"))
         }
-        Cmd::New { ref name, js } => scaffold(name, js),
+        Cmd::New { ref name, js, mcp } => scaffold(name, js, mcp),
         Cmd::Types { ref out } => {
             let path = out.clone().unwrap_or_else(|| PathBuf::from("rusted.d.ts"));
             std::fs::write(&path, DECLARATIONS)
@@ -785,6 +855,33 @@ fn api(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<Val
         return Err("not signed in — run `rusted login`".to_string());
     }
     Err(value.to_string())
+}
+
+/// The deliverable of an mcp push: a config block ready to paste into an MCP
+/// client. A private function needs the owner's key on every request, so the
+/// block carries the header hint; a public one must not suggest a key it
+/// would ignore.
+fn mcp_push_summary(v: &Value) -> String {
+    let name = v["name"].as_str().unwrap_or("");
+    let url = v["url"].as_str().unwrap_or("");
+    let headers = if v["public"] == json!(true) {
+        ""
+    } else {
+        ",\n      \"headers\": { \"Authorization\": \"Bearer <your rusted api key>\" }"
+    };
+    format!(
+        "deployed mcp function {name} (rev {rev})\n\
+         \n\
+         add to your MCP client config:\n\
+         {{\n\
+         \x20 \"mcpServers\": {{\n\
+         \x20   \"{name}\": {{\n\
+         \x20     \"url\": \"{url}\"{headers}\n\
+         \x20   }}\n\
+         \x20 }}\n\
+         }}",
+        rev = v["revision"]
+    )
 }
 
 fn emit(cli: &Cli, v: &Value, human: impl Fn(&Value) -> String) -> Result<(), String> {

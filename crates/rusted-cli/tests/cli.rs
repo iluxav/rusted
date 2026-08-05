@@ -6,6 +6,19 @@ const GREET: &str = r#"export default async function handler(request, context) {
     return context.json({ message: `Hello, ${input.name}` });
 }"#;
 
+const MCP_FN: &str = r#"
+export const mcp = {
+  name: "sluggy",
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase().replace(/[^a-z0-9]+/g, "-"); },
+    },
+  },
+};
+"#;
+
 struct Harness {
     admin: String,
     key: String,
@@ -365,8 +378,6 @@ fn push_with_trigger_flags_registers_route() {
             &script,
             "--name",
             "ping",
-            "--type",
-            "http",
             "--method",
             "get,post",
             "--path",
@@ -411,6 +422,155 @@ export default async function handler(request, context) { return context.text("h
         .unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().unwrap(), "hi");
+}
+
+// --- mcp functions -------------------------------------------------------------
+
+#[test]
+fn pushing_an_mcp_module_prints_client_config() {
+    let h = boot();
+    let script = h.script("sluggy.js", MCP_FN);
+    let assert = h.rusted().args(["push", &script]).assert().success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("deployed mcp function sluggy (rev 1)"),
+        "no deploy line:\n{out}"
+    );
+    assert!(out.contains("mcpServers"), "no client config block:\n{out}");
+    assert!(out.contains("/f/sluggy"), "no connect URL:\n{out}");
+    assert!(
+        out.contains("Authorization"),
+        "a private function must hint at the key header:\n{out}"
+    );
+
+    // A public module needs no key, so the hint would be misleading.
+    let public = MCP_FN.replace("name: \"sluggy\",", "name: \"open\",\n  public: true,");
+    let script = h.script("open.js", &public);
+    let assert = h.rusted().args(["push", &script]).assert().success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("mcpServers"), "no client config block:\n{out}");
+    assert!(out.contains("/f/open"), "no connect URL:\n{out}");
+    assert!(
+        !out.contains("Authorization"),
+        "a public function needs no header hint:\n{out}"
+    );
+}
+
+#[test]
+fn mcp_push_json_mode_prints_the_raw_response() {
+    let h = boot();
+    let script = h.script("sluggy.js", MCP_FN);
+    let out = h
+        .rusted()
+        .args(["push", &script, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["kind"], "mcp");
+    assert_eq!(v["tools"], serde_json::json!(["slugify"]));
+}
+
+#[test]
+fn mcp_functions_work_with_list_pull_logs_delete_but_not_invoke() {
+    let h = boot();
+    let script = h.script("sluggy.js", MCP_FN);
+    h.rusted().args(["push", &script]).assert().success();
+
+    // list names the kind and the tools.
+    let assert = h.rusted().arg("list").assert().success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("sluggy"), "{out}");
+    assert!(out.contains("mcp"), "list should show the kind:\n{out}");
+    assert!(
+        out.contains("slugify"),
+        "list should show the tools:\n{out}"
+    );
+
+    // invoke drives http functions; an mcp target gets a pointer, not a crash.
+    h.rusted()
+        .args(["invoke", "sluggy"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("mcp"));
+
+    // The rest are kind-agnostic.
+    h.rusted()
+        .args(["pull", "sluggy"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("slugify"));
+    h.rusted()
+        .args(["logs", "sluggy"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no invocations"));
+    h.rusted().args(["delete", "sluggy"]).assert().success();
+}
+
+#[test]
+fn verify_names_the_kind_and_tools() {
+    let h = boot();
+    let script = h.script("sluggy.js", MCP_FN);
+    let assert = h.rusted().args(["verify", &script]).assert().success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("mcp"), "verify should name the kind:\n{out}");
+    assert!(
+        out.contains("slugify"),
+        "verify should list the tools:\n{out}"
+    );
+
+    let script = h.script("greet.js", GREET);
+    h.rusted()
+        .args(["verify", &script])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("http"));
+}
+
+#[test]
+fn new_mcp_scaffolds_a_working_server() {
+    let h = boot();
+    h.rusted()
+        .args(["new", "my-mcp", "--mcp"])
+        .current_dir(h.dir_path())
+        .assert()
+        .success();
+    let root = h.dir_path().join("my-mcp");
+    for f in ["index.ts", "rusted.d.ts", "tsconfig.json", "package.json"] {
+        assert!(root.join(f).is_file(), "{f} was not created");
+    }
+    let source = std::fs::read_to_string(root.join("index.ts")).unwrap();
+    assert!(source.contains("export const mcp"), "{source}");
+    assert!(
+        source.contains("my-mcp"),
+        "config does not name the project"
+    );
+
+    // The scaffold is the first thing a new user deploys; it has to verify.
+    let entry = root.join("index.ts");
+    h.rusted()
+        .args(["verify", entry.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mcp"));
+
+    // And the same in plain JavaScript.
+    h.rusted()
+        .args(["new", "my-mcp-js", "--mcp", "--js"])
+        .current_dir(h.dir_path())
+        .assert()
+        .success();
+    let entry = h.dir_path().join("my-mcp-js").join("index.js");
+    let source = std::fs::read_to_string(&entry).unwrap();
+    assert!(source.contains("export const mcp"), "{source}");
+    h.rusted()
+        .args(["verify", entry.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mcp"));
 }
 
 #[test]
