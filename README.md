@@ -1,6 +1,6 @@
 # rusted
 
-A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint in seconds, executed by QuickJS inside a restricted Rust runtime.
+A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint — or a live MCP server — in seconds, executed by QuickJS inside a restricted Rust runtime.
 
 `rusted becomes the MCP server that lets agents write their own tools`
 
@@ -65,6 +65,47 @@ export default async function handler(request, context) { ... }
 ```
 
 Explicit flags override the file's `http` export. Unknown keys fail verify — typos can't deploy silently. Being real code (not comments), the declaration survives bundling.
+
+### MCP functions
+
+The other surface a file can export: tools instead of a request handler. The same push makes it a live MCP server at the same `/f/<name>` URL:
+
+```js
+export const mcp = {
+  name: "slugger",
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase().replace(/[^a-z0-9]+/g, "-"); },
+    },
+  },
+};
+```
+
+You write handlers; the platform speaks the protocol. `initialize` and `tools/list` are answered from deploy-time metadata, arguments are validated against each tool's `inputSchema` before any sandbox boots, and a thrown error comes back as an `isError` tool result the model can read and retry — never a protocol error. Return a string for text content; any other value is sent as JSON with `structuredContent`.
+
+The push prints its deliverable — the block to paste into a client:
+
+```
+deployed mcp function slugger (rev 1)
+
+add to your MCP client config:
+{
+  "mcpServers": {
+    "slugger": {
+      "url": "http://127.0.0.1:7411/f/slugger",
+      "headers": { "Authorization": "Bearer <your rusted api key>" }
+    }
+  }
+}
+```
+
+The endpoint demands an API key of the owner unless the file says `public: true`. A tool call is one invocation under your plan's limits; `initialize` and `tools/list` are free. A module exports `http` or `mcp`, never both — pushing one over the other switches the function's kind.
+
+The dev loop is the http one: `rusted run index.js` serves the tools locally with hot reload and prints the same config block — connect a client, edit, push when it works. `rusted new my-tools --mcp` scaffolds a starting point, and [examples/mcp-server](examples/mcp-server) is a complete file.
+
+This is distinct from the platform's own MCP server on the admin port (`/mcp`), whose tools — execute, deploy, list, delete, inbox_create, inbox_read — an agent uses to build on rusted. An mcp *function* is what such an agent (or you) deploys: it serves the tools in the file, under the owner's key and limits.
 
 ## Signing in
 

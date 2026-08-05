@@ -1,7 +1,8 @@
 # MCP server
 
 An [MCP](https://modelcontextprotocol.io) tool server in one file, with no
-dependencies.
+dependencies. The `mcp` export declares the tools; the platform speaks the
+protocol, so the file is nothing but handlers.
 
 ```bash
 rusted run index.js
@@ -22,40 +23,29 @@ claude mcp add --transport http rusted-demo http://127.0.0.1:7400/f/mcp
 npx @modelcontextprotocol/inspector --cli http://127.0.0.1:7400/f/mcp --transport http --method tools/list
 ```
 
-## Why this works
+When it works, `rusted push index.js` deploys it and prints the config block
+to paste into a client. The deployed endpoint requires your API key unless
+the file says `public: true`.
+
+## What the platform handles
 
 MCP's Streamable HTTP transport lets a server answer a POST with a single
-`application/json` JSON-RPC response instead of opening an SSE stream. That is
-exactly the shape of a rusted function: one request in, one response out. A
-stateless tool server needs nothing more.
+`application/json` JSON-RPC response instead of opening an SSE stream — which
+is exactly the shape of a rusted function. The platform serves `initialize`,
+`ping`, and `tools/list` from deploy-time metadata, validates `tools/call`
+arguments against the tool's `inputSchema` before any sandbox boots, and
+turns a thrown error into an `isError: true` result the calling model can
+read and retry — never a protocol error. A handler returning a string sends
+text content; any other value is sent as JSON and mirrored in
+`structuredContent`, which is what `word_count` does here.
 
-`initialize`, `ping`, `tools/list`, and `tools/call` are all request/response,
-so the whole useful surface of a tool provider fits. Tool failures come back as
-results with `isError: true` rather than protocol errors, which is what lets a
-model see what went wrong and try again.
-
-This was checked against the official SDK client rather than assumed: the MCP
-inspector connects, negotiates `initialize`, lists these tools, and calls them,
-with no stream involved. A client's `GET` for the optional server-initiated
-stream gets a `405`, which is what the spec prescribes for a server that
-doesn't offer one — so nothing waits on a stream that will never open.
-
-## What doesn't work yet
-
-- **Server-initiated messages.** No SSE, so no progress notifications, no
-  `tools/list_changed`, and no `GET` stream. Requests the client makes are
-  answered; the server can't speak first. A client's `GET` gets a `405`, which
-  is what the spec prescribes for a server that offers no stream.
-- **Real sessions.** The `Mcp-Session-Id` header is echoed rather than backed by
-  stored state, because this function keeps none. Enough for clients that expect
-  the header; not enough for per-client state.
-
-Everything else the transport asks of a stateless server is here: `202` with no
-body for notifications, `400` for malformed JSON, and a session header on
-replies — all through `context.json(body, { status, headers })`.
+This file used to hand-roll all of that — ~110 lines of JSON-RPC dispatch
+over the http surface. Git history has the before; the tools are unchanged.
 
 ## Keep in mind
 
+- **What counts.** A tool call is one invocation under your plan's limits;
+  `initialize` and `tools/list` are metadata reads and cost nothing.
 - **Execution budget.** These tools run in ~0.05 ms, well inside the Dev plan's
   100 ms. A tool that calls an API needs `fetch`, which the free tier allows
   (2 calls per invocation).

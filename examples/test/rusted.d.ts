@@ -45,12 +45,33 @@ declare namespace Rusted {
 		readonly __rustedResponse: true;
 	}
 
+	/** Reading what has arrived at one of your inboxes. */
+	interface Inbox {
+		/**
+		 * Messages waiting at `name`, oldest first. Each is the parsed JSON a
+		 * sender posted, or the raw string if it was not JSON.
+		 *
+		 * Throws if the inbox has expired, been drained, or never existed —
+		 * those are one case on purpose, so a name reveals nothing.
+		 *
+		 * Scoped to whoever deployed the function, not to what is asked for:
+		 * naming another account's inbox finds nothing.
+		 */
+		get<T = unknown>(name: string): Promise<T[]>;
+	}
+
 	/** Helpers for building a response. */
 	interface Context {
 		/** `application/json`. */
 		json(body: unknown, init?: ResponseInit): Response;
 		/** `text/plain; charset=utf-8`. */
 		text(body: string, init?: ResponseInit): Response;
+		/**
+		 * Present on a deployed function. Absent when running somewhere the
+		 * host lends no services — `rusted run` locally, for instance — so a
+		 * handler that needs it fails saying so rather than finding nothing.
+		 */
+		inbox?: Inbox;
 	}
 
 	/** `export const http = { … }` — read at deploy time. */
@@ -61,6 +82,41 @@ declare namespace Rusted {
 		methods?: string[];
 		/** Route nested under /f/<name>, e.g. "/users/{id}". */
 		path?: string;
+	}
+
+	/** `export const mcp = { … }` — the mcp surface, read at deploy time. */
+	interface Mcp {
+		/** Defaults to the filename. */
+		name?: string;
+		/** Serve without a key. Default: a rusted API key of the owner is required. */
+		public?: boolean;
+		tools: Record<string, Tool>;
+	}
+
+	/** One tool: the metadata clients list, and the handler that runs. */
+	interface Tool {
+		description: string;
+		/** JSON Schema for the arguments. Must be an object schema. */
+		inputSchema: Record<string, unknown>;
+		/**
+		 * Returning a string sends it as text; returning anything else sends
+		 * it as JSON, with `undefined` becoming `null`. Throwing reports the
+		 * error to the calling model as a tool failure.
+		 */
+		handler: (
+			args: Record<string, unknown>,
+			context: ToolContext,
+		) => unknown | Promise<unknown>;
+	}
+
+	/** What a tool handler is lent. */
+	interface ToolContext {
+		/**
+		 * Present on a deployed function. Absent when running somewhere the
+		 * host lends no services — `rusted run` locally, for instance — so a
+		 * handler that needs it fails saying so rather than finding nothing.
+		 */
+		inbox?: Inbox;
 	}
 
 	/**

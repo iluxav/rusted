@@ -1236,6 +1236,75 @@ export const mcp = {
     assert_eq!(parsed["count"], json!(3), "{v}");
 }
 
+/// The shipped example deploys and behaves exactly like the hand-rolled http
+/// server it replaced: same two tools, same slugify output, word_count's
+/// counts now doubling as structured content.
+#[tokio::test]
+async fn deploying_the_example_mcp_server_works() {
+    let t = boot().await;
+    let example = include_str!("../../../examples/mcp-server/index.js");
+    let r = t
+        .admin_post("/api/functions", json!({ "source": example }))
+        .await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["name"], "mcp");
+    assert_eq!(v["kind"], "mcp");
+
+    let (s, v) = mcp_fn(
+        &t,
+        "mcp",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["serverInfo"]["name"], "mcp", "{v}");
+
+    let (_, v) = mcp_fn(
+        &t,
+        "mcp",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    let mut names: Vec<&str> = v["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["slugify", "word_count"], "{v}");
+
+    let (_, v) = mcp_fn(
+        &t,
+        "mcp",
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"slugify","arguments":{"text":"Hello World"}}}),
+    )
+    .await;
+    assert_eq!(v["result"]["content"][0]["text"], "hello-world", "{v}");
+    assert_ne!(v["result"]["isError"], json!(true), "{v}");
+
+    // The old server returned the counts as JSON text; the mcp surface sends
+    // the same object, mirrored into structuredContent.
+    let (_, v) = mcp_fn(
+        &t,
+        "mcp",
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+        "params":{"name":"word_count","arguments":{"text":"one two\nthree"}}}),
+    )
+    .await;
+    assert_ne!(v["result"]["isError"], json!(true), "{v}");
+    assert_eq!(
+        v["result"]["structuredContent"],
+        json!({"words": 3, "characters": 13, "lines": 2}),
+        "{v}"
+    );
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["words"], json!(3), "{v}");
+}
+
 #[tokio::test]
 async fn push_without_any_name_is_rejected() {
     let t = boot().await;
