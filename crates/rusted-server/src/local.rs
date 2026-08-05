@@ -307,6 +307,10 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
             println!("      \"{name}\": {{ \"url\": \"http://{addr}/f/{name}\" }}");
             println!("    }}");
             println!("  }}");
+            let public = meta["public"].as_bool().unwrap_or(false);
+            if !public {
+                println!("  after `rusted push`: same block plus your API key in an Authorization header");
+            }
         }
     }
     println!(
@@ -390,8 +394,21 @@ async fn watch_loop(state: Arc<LocalState>, entry: PathBuf, pipeline: Pipeline) 
         match load(&entry, produced.0, produced.1, &state.executor) {
             Ok(next) => {
                 let bytes = next.source.len();
+                // Name the surface so an accidental flip (an mcp export
+                // deleted, a default handler added) is visible at the moment
+                // it happens, not when a client starts getting nonsense.
+                let surface = match &next.surface {
+                    Served::Http(_) => "http".to_string(),
+                    Served::Mcp(meta) => {
+                        let tools = meta["tools"]
+                            .as_object()
+                            .map(|t| t.keys().cloned().collect::<Vec<_>>().join(", "))
+                            .unwrap_or_default();
+                        format!("mcp, tools: {tools}")
+                    }
+                };
                 println!(
-                    "\x1b[38;5;150m✓ reloaded {} ({bytes} bytes)\x1b[0m\n",
+                    "\x1b[38;5;150m✓ reloaded {} ({bytes} bytes, {surface})\x1b[0m\n",
                     next.name
                 );
                 *state.loaded.write().unwrap() = next;
