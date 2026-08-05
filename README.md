@@ -83,7 +83,9 @@ export const mcp = {
 };
 ```
 
-You write handlers; the platform speaks the protocol. `initialize` and `tools/list` are answered from deploy-time metadata, arguments are validated against each tool's `inputSchema` before any sandbox boots, and a thrown error comes back as an `isError` tool result the model can read and retry — never a protocol error. Return a string for text content; any other value is sent as JSON with `structuredContent`.
+You write handlers; the platform speaks the protocol. `initialize` and `tools/list` are answered from deploy-time metadata, arguments are validated against each tool's `inputSchema` before any sandbox boots, and a thrown error comes back as an `isError` tool result the model can read and retry — never a protocol error. Return a string for text content; any other value is sent as JSON text, and an object result is mirrored in `structuredContent` too (the spec types it as an object, so arrays and scalars travel as text only).
+
+The declaration is checked at verify time, so a module that won't serve can't deploy: tool names are 1–64 chars of `a-z 0-9 - _` (`word_count`, not `wordCount`), at most 32 tools, and a tool entry is exactly `description`, `inputSchema`, and `handler` — spec extras like `title`, `annotations`, or `outputSchema` are rejected rather than silently dropped. An mcp module must not have a default export; tools are the interface.
 
 The push prints its deliverable — the block to paste into a client:
 
@@ -103,7 +105,14 @@ add to your MCP client config:
 
 The endpoint demands an API key of the owner unless the file says `public: true`. A tool call is one invocation under your plan's limits; `initialize` and `tools/list` are free. A module exports `http` or `mcp`, never both — pushing one over the other switches the function's kind.
 
-The dev loop is the http one: `rusted run index.js` serves the tools locally with hot reload and prints the same config block — connect a client, edit, push when it works. `rusted new my-tools --mcp` scaffolds a starting point, and [examples/mcp-server](examples/mcp-server) is a complete file.
+What an mcp function is not:
+
+- **No SSE or streaming.** Every request gets one JSON response; a `GET` for the server-initiated stream gets a `405`, as the spec prescribes for a server that offers none.
+- **No sessions.** The `Mcp-Session-Id` header is echoed back, not backed by stored state.
+- **No `listChanged` notifications.** The server never speaks first; the tool list changes only when you push.
+- **No unbounded work.** A tool call runs under your plan's execution budget like any invocation.
+
+The dev loop is the http one: `rusted run index.js` serves the tools locally with hot reload and prints a config block of its own — same shape, minus the auth header, since local serving is trusted, plus a note that the pushed endpoint will want your key. Connect a client, edit, push when it works. `rusted new my-tools --mcp` scaffolds a starting point, and [examples/mcp-server](examples/mcp-server) is a complete file.
 
 This is distinct from the platform's own MCP server on the admin port (`/mcp`), whose tools — execute, deploy, list, delete, inbox_create, inbox_read — an agent uses to build on rusted. An mcp *function* is what such an agent (or you) deploys: it serves the tools in the file, under the owner's key and limits.
 
@@ -171,13 +180,13 @@ It refuses to write a bundle that wouldn't deploy — no handler, or code that w
 Local runs get the most permissive plan's limits — 30s execution, 25 outbound calls — so nothing blocks you mid-thought. Each run then reports what it _would_ cost:
 
 ```
-✓ 200 POST /convert/1   wall 1024ms · exec 1002ms
-  ⚠ needs Extra — 1000ms exec over 50ms on Dev
+✓ 200 POST /convert/1   wall 1550ms · exec 1502ms
+  ⚠ needs Pro — 1502ms exec over 1000ms on Dev
 ```
 
-With `RUSTED_API_KEY` set, rusted looks up your actual plan in the background — never blocking startup — and the warning names it directly: `over your Pro plan: 1000ms exec over 500ms`.
+With `RUSTED_API_KEY` set, rusted looks up your actual plan in the background — never blocking startup — and the warning names it directly: `over your Dev plan: 1502ms exec over 1000ms`.
 
-Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline. To develop against a specific tier, set both: `--exec-ms 100 --outbound 2` is the Dev plan.
+Useful flags for `run`: `--port`, `--exec-ms` (execution budget), `--outbound` (fetch calls allowed per invocation), and `--build 'your command'` to replace the built-in bundling with your own pipeline. To develop against a specific tier, set both: `--exec-ms 1000 --outbound 2` is the Dev plan.
 
 ## Controlling the response
 

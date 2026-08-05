@@ -1703,11 +1703,22 @@ async fn mcp_list(state: &Arc<AppState>, user_id: Uuid) -> Value {
                 name,
                 record.trigger.path.as_deref().unwrap_or("")
             );
-            functions.push(json!({
+            let mut entry = json!({
                 "name": name,
                 "url": state.data_url(&route),
-                "methods": record.trigger.methods,
-            }));
+                "kind": record.kind,
+            });
+            // An mcp function answers protocol, not HTTP methods: listing the
+            // methods it would 405 misleads the model reading this.
+            if record.kind == "mcp" {
+                if let Some(meta) = &record.mcp {
+                    entry["tools"] = json!(mcp_tool_names(meta));
+                    entry["public"] = meta["public"].clone();
+                }
+            } else {
+                entry["methods"] = json!(record.trigger.methods);
+            }
+            functions.push(entry);
         }
     }
     let inboxes = crate::inbox::list(state, user_id).await.unwrap_or_default();

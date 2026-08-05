@@ -2738,6 +2738,56 @@ async fn mcp_deploy_returns_a_url_that_answers() {
     );
 }
 
+/// The platform's list tool must describe an mcp function as one — kind and
+/// tool names — not pretend it answers HTTP methods it would 405.
+#[tokio::test]
+async fn mcp_list_describes_each_function_by_its_kind() {
+    let t = boot().await;
+    let (_, deployed) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"deploy",
+            "arguments":{ "code": MCP_FN }}}),
+    )
+    .await;
+    assert_ne!(
+        deployed["result"]["isError"],
+        serde_json::json!(true),
+        "{deployed}"
+    );
+    push(&t, "greeter", GREET).await;
+
+    let (_, listed) = mcp(
+        &t,
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                           "params":{"name":"list","arguments":{}}}),
+    )
+    .await;
+    let payload: Value =
+        serde_json::from_str(listed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let entry = |name: &str| -> Value {
+        payload["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from {payload}"))
+            .clone()
+    };
+
+    let sluggy = entry("sluggy");
+    assert_eq!(sluggy["kind"], "mcp", "{sluggy}");
+    assert_eq!(sluggy["tools"], serde_json::json!(["slugify"]), "{sluggy}");
+    assert!(
+        sluggy.get("methods").is_none(),
+        "an mcp entry has no HTTP methods: {sluggy}"
+    );
+
+    let greeter = entry("greeter");
+    assert_eq!(greeter["kind"], "http", "{greeter}");
+    assert!(greeter["methods"].is_array(), "{greeter}");
+}
+
 /// Deleting is scoped to what you deployed. Saying "not found" rather than
 /// "forbidden" also avoids confirming that someone else's function exists.
 #[tokio::test]

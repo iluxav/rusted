@@ -36,8 +36,10 @@ is exactly the shape of a rusted function. The platform serves `initialize`,
 arguments against the tool's `inputSchema` before any sandbox boots, and
 turns a thrown error into an `isError: true` result the calling model can
 read and retry — never a protocol error. A handler returning a string sends
-text content; any other value is sent as JSON and mirrored in
-`structuredContent`, which is what `word_count` does here.
+text content; any other value is sent as JSON text, and an object — like
+`word_count`'s result here — is mirrored in `structuredContent` too. The
+spec types `structuredContent` as an object, so arrays, numbers, and
+booleans travel as JSON text only.
 
 This file used to hand-roll all of that — ~110 lines of JSON-RPC dispatch
 over the http surface. Git history has the before; the tools are unchanged.
@@ -47,7 +49,7 @@ over the http surface. Git history has the before; the tools are unchanged.
 - **What counts.** A tool call is one invocation under your plan's limits;
   `initialize` and `tools/list` are metadata reads and cost nothing.
 - **Execution budget.** These tools run in ~0.05 ms, well inside the Dev plan's
-  100 ms. A tool that calls an API needs `fetch`, which the free tier allows
+  1000 ms. A tool that calls an API needs `fetch`, which the free tier allows
   (2 calls per invocation).
 - **Concurrency.** Agents fan tool calls out in parallel; each plan sets how
   many run at once (Dev 2, Pro 5, Extra 20). Beyond that, calls queue and then
