@@ -1294,6 +1294,9 @@ async fn page_lambda(
 }
 
 fn missing_lambda(name: &str) -> String {
+    // The name is whatever the URL said, not a deployed function — escape it
+    // because this string is rendered through `inner|safe`.
+    let name = escape_html(name);
     format!(
         r#"<div class="mx-auto max-w-3xl px-8 py-16 text-center">
              <h1 class="font-display text-2xl font-light">ƒ {name} isn't deployed</h1>

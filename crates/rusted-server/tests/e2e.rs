@@ -1574,6 +1574,36 @@ async fn console_lambda_page_renders_mcp_tools() {
     );
 }
 
+/// The missing-lambda page echoes the requested name, which is raw URL input
+/// rendered through `inner|safe` — it must arrive HTML-escaped.
+#[tokio::test]
+async fn missing_lambda_page_escapes_the_requested_name() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .get(format!(
+            "http://{}/console/lambda/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
+            t.handle.admin_addr
+        ))
+        .header("cookie", format!("rusted_session={session}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().await.unwrap();
+    assert!(
+        !body.contains("<img src=x"),
+        "the URL's name must not land in the page as markup"
+    );
+    assert!(
+        body.contains("&lt;img src=x onerror=alert(1)&gt;"),
+        "the name should render escaped"
+    );
+}
+
 #[tokio::test]
 async fn console_pages_redirect_when_signed_out() {
     let t = boot().await;
