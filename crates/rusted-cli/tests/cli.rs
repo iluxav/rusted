@@ -1025,6 +1025,165 @@ export default async function handler(request, context) {
 }
 
 #[test]
+fn run_serves_an_mcp_function_locally() {
+    use std::io::BufRead;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("sluggy.js");
+    std::fs::write(&script, MCP_FN).unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rusted"))
+        .args(["run", script.to_str().unwrap(), "--port", "7439"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = tx.send(line);
+        }
+    });
+
+    // The banner carries a paste-ready client config instead of route lines.
+    let mut banner = String::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            banner.push_str(&line);
+            banner.push('\n');
+            if line.contains("ctrl-c") {
+                break;
+            }
+        }
+    }
+    // Drain the reporter so the child never blocks on a full stdout pipe.
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let checks = (|| -> Result<(), String> {
+        if !banner.contains("/f/sluggy") {
+            return Err(format!("no mcp banner:\n{banner}"));
+        }
+        if !banner.contains("mcpServers") {
+            return Err(format!("banner should show client config:\n{banner}"));
+        }
+        if banner.contains("Authorization") {
+            return Err(format!("local serving needs no auth header:\n{banner}"));
+        }
+
+        let client = reqwest::blocking::Client::new();
+        let post = |msg: &serde_json::Value| -> Result<(u16, serde_json::Value), String> {
+            let r = client
+                .post("http://127.0.0.1:7439/f/sluggy")
+                .json(msg)
+                .send()
+                .map_err(|e| e.to_string())?;
+            let status = r.status().as_u16();
+            let body = r.json().unwrap_or(serde_json::json!(null));
+            Ok((status, body))
+        };
+
+        // initialize: same shape as the deployed server, version is a reload counter.
+        let (s, v) = post(&serde_json::json!(
+            {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+        ))?;
+        if s != 200 || v["result"]["serverInfo"]["name"] != "sluggy" {
+            return Err(format!("bad initialize ({s}): {v}"));
+        }
+        if v["result"]["serverInfo"]["version"] != "rev-1" {
+            return Err(format!("first load should be rev-1: {v}"));
+        }
+        // tools/list from the inspected metadata.
+        let (_, v) = post(&serde_json::json!(
+            {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+        ))?;
+        if v["result"]["tools"][0]["name"] != "slugify"
+            || v["result"]["tools"][0]["inputSchema"]["type"] != "object"
+        {
+            return Err(format!("bad tools/list: {v}"));
+        }
+        // tools/call runs the handler.
+        let (_, v) = post(&serde_json::json!(
+            {"jsonrpc":"2.0","id":3,"method":"tools/call",
+             "params":{"name":"slugify","arguments":{"text":"Hello World"}}}
+        ))?;
+        if v["result"]["content"][0]["text"] != "hello-world"
+            || v["result"]["isError"] == serde_json::json!(true)
+        {
+            return Err(format!("bad tools/call: {v}"));
+        }
+        // Schema violations come back as a model-visible tool result.
+        let (s, v) = post(&serde_json::json!(
+            {"jsonrpc":"2.0","id":4,"method":"tools/call",
+             "params":{"name":"slugify","arguments":{"text": 42}}}
+        ))?;
+        if s != 200 || v["result"]["isError"] != serde_json::json!(true) {
+            return Err(format!("bad arguments should be a tool result: {v}"));
+        }
+        // Everything is protocol, and protocol is POST.
+        let r = client
+            .get("http://127.0.0.1:7439/f/sluggy")
+            .send()
+            .map_err(|e| e.to_string())?;
+        if r.status().as_u16() != 405 {
+            return Err(format!("GET should be refused, got {}", r.status()));
+        }
+
+        // --watch: a change reloads the tools and bumps the version.
+        std::fs::write(
+            &script,
+            MCP_FN.replace(
+                "slugify: {",
+                r#"shout: {
+      description: "Uppercase",
+      inputSchema: { type: "object" },
+      async handler() { return "HI"; },
+    },
+    slugify: {"#,
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut version = serde_json::json!(null);
+        while Instant::now() < deadline {
+            let (_, v) = post(&serde_json::json!(
+                {"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}
+            ))?;
+            version = v["result"]["serverInfo"]["version"].clone();
+            if version == "rev-2" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if version != "rev-2" {
+            return Err(format!("reload should bump the version, got {version}"));
+        }
+        let (_, v) = post(&serde_json::json!(
+            {"jsonrpc":"2.0","id":6,"method":"tools/list"}
+        ))?;
+        let names: Vec<&str> = v["result"]["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| t["name"].as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if names != ["shout", "slugify"] {
+            return Err(format!("reloaded tool list is wrong: {v}"));
+        }
+        Ok(())
+    })();
+    child.kill().ok();
+    child.wait().ok();
+    checks.unwrap();
+}
+
+#[test]
 fn build_bundles_to_dist_and_reports_the_route() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

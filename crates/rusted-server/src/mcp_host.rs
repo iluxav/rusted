@@ -216,6 +216,14 @@ async fn call_tool(
             return mcp_wire::tool_result(text, true);
         }
     };
+    invocation_tool_result(result)
+}
+
+/// Maps a finished tool invocation to the result the model sees. Shared by
+/// the deployed server and `rusted run`, so local semantics match production
+/// exactly: a thrown error is model-visible, a terminated run says only that
+/// a limit was exceeded.
+pub fn invocation_tool_result(result: rusted_engine::InvocationResult) -> Value {
     match result.outcome {
         Outcome::Success(body) => {
             let mut out = json!({ "content": [{ "type": "text", "text": body }] });

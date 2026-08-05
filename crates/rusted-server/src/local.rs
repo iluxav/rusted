@@ -102,10 +102,20 @@ fn resolve_pipeline(config: &LocalConfig) -> Result<Pipeline, String> {
     })
 }
 
+/// Which surface the loaded module declares, resolved at inspect time.
+#[derive(Clone)]
+enum Served {
+    Http(HttpTrigger),
+    /// The same metadata shape the deployed server stores
+    /// (`{"public": ..., "tools": {...}}`), so `mcp_host` reads it
+    /// identically. `public` is carried but not enforced: local is trusted.
+    Mcp(serde_json::Value),
+}
+
 struct Loaded {
     source: String,
     name: String,
-    trigger: HttpTrigger,
+    surface: Served,
     /// Maps bundled positions back to your files, so a stack frame names
     /// `index.js:12` rather than `handler:2919`.
     sourcemap: Option<Arc<sourcemap::SourceMap>>,
@@ -115,6 +125,9 @@ struct Loaded {
 
 struct LocalState {
     loaded: RwLock<Loaded>,
+    /// Reload counter, reported as `serverInfo.version` (`rev-N`) so an MCP
+    /// client can tell whether it is talking to the file it just saved.
+    rev: std::sync::atomic::AtomicU64,
     /// Shared so the bytecode cache stays warm across requests.
     executor: Arc<QuickJsExecutor>,
     limits: Limits,
@@ -161,35 +174,38 @@ fn load(
     sourcemap_json: Option<String>,
     executor: &QuickJsExecutor,
 ) -> Result<Loaded, String> {
-    let config = match executor.inspect(&source)? {
-        rusted_engine::Surface::Http(config) => config,
-        rusted_engine::Surface::Mcp(_) => {
-            return Err("rusted run cannot serve mcp functions yet".to_string())
-        }
-    };
     let stem = entry
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "function".to_string());
-    let name = config.name.unwrap_or(stem);
+    let (name, surface) = match executor.inspect(&source)? {
+        rusted_engine::Surface::Http(config) => (
+            config.name.unwrap_or(stem),
+            Served::Http(HttpTrigger {
+                methods: config
+                    .methods
+                    .map(|m| m.iter().map(|s| s.to_uppercase()).collect())
+                    .unwrap_or_else(|| vec!["POST".to_string()]),
+                path: config.path,
+            }),
+        ),
+        rusted_engine::Surface::Mcp(config) => (
+            config.name.clone().unwrap_or(stem),
+            Served::Mcp(json!({ "public": config.public, "tools": config.tools })),
+        ),
+    };
     let sourcemap = sourcemap_json
         .and_then(|json| sourcemap::SourceMap::from_reader(json.as_bytes()).ok())
         .map(Arc::new);
     Ok(Loaded {
         source,
         name,
+        surface,
         sourcemap,
         // The map's sources are relative to the entry's own directory.
         sourcemap_base: match entry.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
-        },
-        trigger: HttpTrigger {
-            methods: config
-                .methods
-                .map(|m| m.iter().map(|s| s.to_uppercase()).collect())
-                .unwrap_or_else(|| vec!["POST".to_string()]),
-            path: config.path,
         },
     })
 }
@@ -249,14 +265,11 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
     }
     let (source, sourcemap) = produce(&pipeline).await?;
     let loaded = load(&config.entry, source, sourcemap, &executor)?;
-    let route = format!(
-        "/f/{}{}",
-        loaded.name,
-        loaded.trigger.path.as_deref().unwrap_or("")
-    );
-    let methods = loaded.trigger.methods.join(",");
+    let name = loaded.name.clone();
+    let surface = loaded.surface.clone();
     let state = Arc::new(LocalState {
         loaded: RwLock::new(loaded),
+        rev: std::sync::atomic::AtomicU64::new(1),
         executor: executor.clone(),
         limits: config.limits.clone(),
         plan: RwLock::new(None),
@@ -273,7 +286,29 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
     let addr: SocketAddr = listener.local_addr().map_err(|e| e.to_string())?;
 
     println!("\x1b[1;38;5;209mrusted\x1b[0m dev server");
-    println!("  \x1b[38;5;209m{methods}\x1b[0m http://{addr}{route}");
+    match &surface {
+        Served::Http(trigger) => {
+            let route = format!("/f/{name}{}", trigger.path.as_deref().unwrap_or(""));
+            let methods = trigger.methods.join(",");
+            println!("  \x1b[38;5;209m{methods}\x1b[0m http://{addr}{route}");
+        }
+        Served::Mcp(meta) => {
+            // The deliverable is the same as a deployed push: a config block
+            // ready to paste into an MCP client — minus the auth header,
+            // because local serving is trusted.
+            let tools = meta["tools"]
+                .as_object()
+                .map(|t| t.keys().cloned().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            println!("  \x1b[38;5;209mMCP\x1b[0m http://{addr}/f/{name}  (tools: {tools})");
+            println!("  add to your MCP client config:");
+            println!("  {{");
+            println!("    \"mcpServers\": {{");
+            println!("      \"{name}\": {{ \"url\": \"http://{addr}/f/{name}\" }}");
+            println!("    }}");
+            println!("  }}");
+        }
+    }
     println!(
         "  limits: {} wall · {} outbound — the most any plan allows; yours may allow less",
         human_ms(config.limits.wall_ms),
@@ -360,6 +395,7 @@ async fn watch_loop(state: Arc<LocalState>, entry: PathBuf, pipeline: Pipeline) 
                     next.name
                 );
                 *state.loaded.write().unwrap() = next;
+                state.rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => {
                 println!("\x1b[1;38;5;203m✗ {e}\x1b[0m — still serving the last good version\n");
@@ -399,12 +435,12 @@ async fn dispatch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (source, expected_name, trigger, sourcemap, sourcemap_base) = {
+    let (source, expected_name, surface, sourcemap, sourcemap_base) = {
         let loaded = state.loaded.read().unwrap();
         (
             loaded.source.clone(),
             loaded.name.clone(),
-            loaded.trigger.clone(),
+            loaded.surface.clone(),
             loaded.sourcemap.clone(),
             loaded.sourcemap_base.clone(),
         )
@@ -416,6 +452,38 @@ async fn dispatch(
             format!("this server serves /f/{expected_name}"),
         );
     }
+    let trigger = match surface {
+        Served::Http(trigger) => trigger,
+        // Every POST to the root is protocol; the messages inside decide what
+        // happens — the same split the deployed data plane makes.
+        Served::Mcp(meta) => {
+            if rest.is_some() {
+                return problem(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    format!("an mcp function serves only /f/{expected_name}"),
+                );
+            }
+            if method != Method::POST {
+                return problem(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "allowed: POST".to_string(),
+                );
+            }
+            return dispatch_mcp(
+                &state,
+                &meta,
+                &expected_name,
+                &source,
+                &headers,
+                &body,
+                sourcemap.as_deref(),
+                &sourcemap_base,
+            )
+            .await;
+        }
+    };
     if !trigger.methods.iter().any(|m| m == method.as_str()) {
         return problem(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -546,6 +614,53 @@ async fn dispatch(
         )
             .into_response(),
     }
+}
+
+/// Answers one MCP POST locally: the same message dispatch and outcome
+/// mapping as the deployed server, with no auth (local is trusted), no rate
+/// limit, and the local limits. `serverInfo.version` is the reload counter,
+/// so a client can tell it is talking to the file it just saved.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_mcp(
+    state: &Arc<LocalState>,
+    meta: &serde_json::Value,
+    name: &str,
+    source: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+    sourcemap: Option<&sourcemap::SourceMap>,
+    sourcemap_base: &Path,
+) -> Response {
+    let rev = state.rev.load(std::sync::atomic::Ordering::Relaxed);
+    crate::mcp_wire::respond(body, headers, move |msg| async move {
+        crate::mcp_host::handle_message(meta, name, rev, msg, move |tool, args| async move {
+            let result = state
+                .executor
+                .execute_tool_with_services(source, &tool, &args, &state.limits, None)
+                .await;
+            let stack = result
+                .stack
+                .as_deref()
+                .map(|stack| remap_stack(stack, sourcemap, sourcemap_base));
+            let usage = crate::tiers::Usage {
+                exec_ms: result.exec_wall.as_millis() as u64,
+                outbound_reqs: result.outbound_used,
+                script_bytes: source.len(),
+            };
+            let plan = state.plan.read().unwrap().clone();
+            let advisory = crate::tiers::warning(&usage, plan.as_deref());
+            report(
+                &Method::POST,
+                Some(&format!("tools/{tool}")),
+                &result,
+                stack.as_deref(),
+                advisory.as_deref(),
+            );
+            crate::mcp_host::invocation_tool_result(result)
+        })
+        .await
+    })
+    .await
 }
 
 /// Rewrites `at handler (handler:2919:31)` into `at handler (index.js:12:31)`.
