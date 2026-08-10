@@ -148,6 +148,27 @@ Every command takes `--json` for stable machine-readable output.
 
 The engine choice (QuickJS over Boa) came out of a measured spike — cold start, throughput, memory, and whether hostile code can actually be stopped. QuickJS won on all four, decisively on the last: it can interrupt a runaway script uncatchably and cap its heap, which Boa cannot.
 
+## Starting a new function
+
+`rusted new` scaffolds a directory that is ready to run:
+
+```bash
+rusted new my-fn           # TypeScript (the default)
+cd my-fn
+rusted run index.ts        # develop at http://127.0.0.1:7400/f/my-fn
+```
+
+What lands in it: `index.ts` with a typed handler, `rusted.d.ts` describing exactly what the runtime has (and nothing it doesn't — no DOM, no Node), a strict `tsconfig.json` wired to those declarations, a `package.json` with `dev` and `deploy` scripts, and a `.gitignore`. No install step — `rusted run` bundles in-process, and `npm i <pkg>` works the moment you import something.
+
+Two flags change the shape:
+
+```bash
+rusted new my-fn --js          # plain JavaScript: just index.js, no tsconfig or declarations
+rusted new my-tools --mcp      # an MCP server (export const mcp with a sample tool) instead of an HTTP handler
+```
+
+The directory name becomes the function's declared name, so `npm run deploy` (or `rusted push index.ts`) publishes it as `/f/my-fn` without further flags.
+
 ## Developing a function
 
 `rusted run` serves one function locally with hot reload — no server, no database, no API key:
