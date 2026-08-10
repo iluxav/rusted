@@ -175,6 +175,16 @@ rusted build index.js --sourcemap
 
 It refuses to write a bundle that wouldn't deploy — no handler, or code that won't load — and prints the route the file declares.
 
+### Secrets while developing
+
+`rusted run` has no database and no master key, so there is nothing to decrypt: a module that declares [`config.secrets`](#secrets) starts with a note saying so, and `context.env` stays `undefined`. It's typed as optional for exactly this reason — TypeScript points at every unguarded read before it fails locally. The pragmatic pattern is an explicit fallback:
+
+```js
+const clientSecret = context.env?.GITHUB_CLIENT_SECRET ?? "dev-placeholder";
+```
+
+which develops against the placeholder and picks up the real value once deployed. To exercise the real path end to end, run the full server locally — `rusted serve` with Postgres and `RUSTED_SECRETS_KEY` set — and its console has the same Secrets page, injecting exactly as the deployed one does.
+
 ### Limits while developing
 
 Local runs get the most permissive plan's limits — 30s execution, 25 outbound calls — so nothing blocks you mid-thought. Each run then reports what it _would_ cost:
