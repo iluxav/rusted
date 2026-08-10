@@ -297,6 +297,8 @@ rusted push index.js      # deploy it — bundled on the way
 
 Bundling targets a neutral platform, so a dependency reaching for a Node builtin (`fs`, `http`, …) fails at build time rather than at runtime — those don't exist here. Pure-JS libraries work; keep an eye on bundle size, since source-size limits are part of the platform's design.
 
+That includes crypto. There is no `node:crypto`, no `Buffer`, and no WebCrypto either — `crypto.subtle` is a browser/Node API this runtime doesn't have. For hashing, HMAC, or signing (cookie signatures, webhook verification), pick a pure-JS implementation such as [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) rather than anything wrapping a platform API; it bundles in a few KB. An OAuth token exchange needs none of this — that's plain `fetch` with a form body, plus [secrets](#secrets) for the client secret.
+
 ## License
 
 Open source, split along the line between your machine and the service:
