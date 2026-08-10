@@ -34,8 +34,11 @@ check: fmt-check lint test ## Everything a CI gate would run
 serve: build ## Run the server (functions on :7411, admin API on :7412)
 	$(BIN) serve
 
+# --locked: rolldown's crates don't follow semver, so a fresh resolution mixes
+# oxc versions that don't compile together. The workspace lockfile is the one
+# combination known to build.
 install: ## Install `rusted` into ~/.cargo/bin
-	$(CARGO) install --path crates/rusted-cli
+	$(CARGO) install --locked --path crates/rusted-cli
 
 i: build install ## Shorthand: build and install
 
