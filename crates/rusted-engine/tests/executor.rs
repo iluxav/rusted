@@ -262,7 +262,7 @@ fn path_params_are_exposed_to_the_handler() {
 fn inspect_reads_http_export() {
     let src = r#"export const http = { name: "greet", methods: ["GET", "POST"], path: "/user/greet" };
 export default async function handler() { return "ok"; }"#;
-    let cfg = match exec().inspect(src).expect("valid source inspects") {
+    let cfg = match exec().inspect(src).expect("valid source inspects").surface {
         Surface::Http(cfg) => cfg,
         s => panic!("expected http surface, got {s:?}"),
     };
@@ -278,7 +278,11 @@ export default async function handler() { return "ok"; }"#;
 fn inspect_without_http_export_returns_empty_config() {
     let src = r#"export default async function handler() { return "ok"; }"#;
     let cfg = exec().inspect(src).expect("valid source inspects");
-    assert_eq!(cfg, Surface::Http(rusted_engine::HttpConfig::default()));
+    assert_eq!(
+        cfg.surface,
+        Surface::Http(rusted_engine::HttpConfig::default())
+    );
+    assert!(cfg.config.secrets.is_empty());
 }
 
 #[test]
@@ -316,7 +320,7 @@ export const mcp = {
 #[test]
 fn inspect_reads_mcp_surface() {
     let ex = QuickJsExecutor::new();
-    match ex.inspect(MCP_MODULE).unwrap() {
+    match ex.inspect(MCP_MODULE).unwrap().surface {
         Surface::Mcp(m) => {
             assert_eq!(m.name.as_deref(), Some("my-mcp"));
             assert!(!m.public);
@@ -371,7 +375,7 @@ fn inspect_rejects_mcp_typos_loudly() {
 fn inspect_still_returns_http_for_plain_handlers() {
     let src = "export default async function h() { return 1; }";
     assert!(matches!(
-        QuickJsExecutor::new().inspect(src).unwrap(),
+        QuickJsExecutor::new().inspect(src).unwrap().surface,
         Surface::Http(_)
     ));
 }
@@ -408,7 +412,7 @@ fn inspect_accepts_exactly_the_tool_limit() {
         "export const mcp = {{ tools: {{ {} }} }};",
         tools.join(", ")
     );
-    match QuickJsExecutor::new().inspect(&src).unwrap() {
+    match QuickJsExecutor::new().inspect(&src).unwrap().surface {
         Surface::Mcp(m) => assert_eq!(m.tools.len(), 32),
         s => panic!("expected mcp surface, got {s:?}"),
     }
@@ -425,7 +429,7 @@ fn inspect_snapshots_tools_in_one_read() {
         let reads = 0;
         export const mcp = { name: "shifty", get tools() { return reads++ === 0 ? checked : ghost; } };
     "#;
-    match QuickJsExecutor::new().inspect(src) {
+    match QuickJsExecutor::new().inspect(src).map(|i| i.surface) {
         // The snapshot that was handler-checked is the one stored.
         Ok(Surface::Mcp(m)) => {
             assert_eq!(m.tools.keys().collect::<Vec<_>>(), vec!["good"]);
@@ -460,6 +464,45 @@ fn inspect_rejects_a_bad_tool_name() {
         handler() {} } } };"#;
     let err = QuickJsExecutor::new().inspect(src).unwrap_err();
     assert!(err.contains("Bad Name!"), "{err}");
+}
+
+#[test]
+fn inspect_reads_config_secrets() {
+    let src = r#"export const config = { secrets: ["GITHUB_CLIENT_SECRET", "OAUTH_COOKIE_KEY_CURRENT"] };
+export default async function handler() { return "ok"; }"#;
+    let inspection = exec().inspect(src).expect("valid source inspects");
+    assert_eq!(
+        inspection.config.secrets,
+        vec!["GITHUB_CLIENT_SECRET", "OAUTH_COOKIE_KEY_CURRENT"]
+    );
+}
+
+#[test]
+fn inspect_reads_config_on_mcp_modules_too() {
+    let src = format!("export const config = {{ secrets: [\"API_KEY\"] }};\n{MCP_MODULE}");
+    let inspection = QuickJsExecutor::new().inspect(&src).unwrap();
+    assert_eq!(inspection.config.secrets, vec!["API_KEY"]);
+    assert!(matches!(inspection.surface, Surface::Mcp(_)));
+}
+
+#[test]
+fn inspect_rejects_bad_secret_declarations() {
+    let handler = "export default async function handler() { return \"ok\"; }";
+    for (config, expected) in [
+        // Env-style names only, so the console and the module always agree.
+        (r#"{ secrets: ["lowercase"] }"#, "lowercase"),
+        (
+            r#"{ secrets: ["9STARTS_WITH_DIGIT"] }"#,
+            "9STARTS_WITH_DIGIT",
+        ),
+        (r#"{ secrets: ["TWIN", "TWIN"] }"#, "twice"),
+        // Unknown keys fail at verify time instead of silently deploying.
+        (r#"{ secrit: ["A"] }"#, "secrit"),
+    ] {
+        let src = format!("export const config = {config};\n{handler}");
+        let err = exec().inspect(&src).expect_err("must be refused");
+        assert!(err.contains(expected), "{config}: {err}");
+    }
 }
 
 #[test]

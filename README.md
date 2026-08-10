@@ -260,6 +260,29 @@ Messages are served from memory and written through to Postgres on the same call
 
 > `context.inbox` is only present on a deployed function. `rusted run` lends no host services, so a handler that uses it works deployed and fails locally; it's typed as optional so that's visible before you ship.
 
+## Secrets
+
+Credentials don't belong in source — a deployed function's code is stored, revisioned, and visible in the console. A secret is set once, encrypted, and injected only into functions that ask:
+
+```js
+export const config = {
+  secrets: ["GITHUB_CLIENT_SECRET", "OAUTH_COOKIE_KEY_CURRENT"],
+};
+
+export default async function handler(request, context) {
+  const secret = context.env.GITHUB_CLIENT_SECRET;
+  // …
+}
+```
+
+Set the values in the console under **Secrets**. Names are env-style — `A-Z`, `0-9`, `_`, not starting with a digit — and a value is never shown again after saving; re-enter it to rotate.
+
+**Asking is the grant.** A function that declares no `config.secrets` gets no `context.env` at all, even if the account holds secrets — so a handler can't quietly read credentials it never declared, and what a function can see is visible in its source. Declared names are all-or-nothing: if one isn't set, the invocation is refused before the handler runs, with the missing names in the owner's logs (`rusted logs`) and a generic `missing_secrets` error to the caller. The same applies to mcp functions — tools read `context.env` exactly the same way.
+
+Values are sealed with AES-256-GCM before they reach Postgres, under a key from the server's environment (`RUSTED_SECRETS_KEY`, 64 hex chars — `openssl rand -hex 32`). The database never holds a plaintext credential and the key never lives in the database, so neither alone reveals anything. A server without the key refuses to store secrets and says what to configure.
+
+> Like `context.inbox`, `context.env` is absent under `rusted run` — local mode has no store to decrypt from, and says so at startup if the module requests secrets.
+
 ## Using npm packages
 
 The runtime executes exactly one file — `import` is rejected at push time. `rusted run` and `rusted build` bundle for you, so npm packages just work:

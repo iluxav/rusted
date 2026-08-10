@@ -20,7 +20,7 @@ async fn store() -> (Store, sqlx::PgPool, uuid::Uuid) {
 #[tokio::test]
 async fn push_creates_revision_and_artifact() {
     let (store, pool, owner) = store().await;
-    let rev = store.push("greet", SRC_A, Some(owner)).await.unwrap();
+    let rev = store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
     assert_eq!(rev.rev, 1);
     assert_eq!(rev.hash, sha256_hex(SRC_A));
     let source: String = sqlx::query("SELECT source FROM artifacts WHERE hash = $1")
@@ -35,8 +35,8 @@ async fn push_creates_revision_and_artifact() {
 #[tokio::test]
 async fn identical_source_dedupes_artifact_but_adds_revision() {
     let (store, pool, owner) = store().await;
-    let r1 = store.push("greet", SRC_A, Some(owner)).await.unwrap();
-    let r2 = store.push("greet", SRC_A, Some(owner)).await.unwrap();
+    let r1 = store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
+    let r2 = store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
     assert_eq!((r1.rev, r2.rev), (1, 2));
     assert_eq!(r1.hash, r2.hash);
     let artifacts: i64 = sqlx::query("SELECT count(*) AS n FROM artifacts")
@@ -50,8 +50,8 @@ async fn identical_source_dedupes_artifact_but_adds_revision() {
 #[tokio::test]
 async fn new_source_moves_current_revision() {
     let (store, _pool, owner) = store().await;
-    store.push("greet", SRC_A, Some(owner)).await.unwrap();
-    store.push("greet", SRC_B, Some(owner)).await.unwrap();
+    store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
+    store.push("greet", SRC_B, Some(owner), &[]).await.unwrap();
     let record = store.get("greet").await.unwrap().unwrap();
     assert_eq!(record.current_rev, 2);
     assert_eq!(record.revisions.len(), 2);
@@ -61,7 +61,7 @@ async fn new_source_moves_current_revision() {
 #[tokio::test]
 async fn functions_visible_from_a_second_store_instance() {
     let (store, pool, owner) = store().await;
-    store.push("greet", SRC_A, Some(owner)).await.unwrap();
+    store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
     let other = Store::new(pool);
     assert_eq!(other.names().await.unwrap(), vec!["greet".to_string()]);
     assert_eq!(other.source("greet").await.unwrap().unwrap(), SRC_A);
@@ -70,7 +70,7 @@ async fn functions_visible_from_a_second_store_instance() {
 #[tokio::test]
 async fn delete_removes_function_but_keeps_artifacts() {
     let (store, pool, owner) = store().await;
-    let rev = store.push("greet", SRC_A, Some(owner)).await.unwrap();
+    let rev = store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
     assert!(store.delete("greet").await.unwrap());
     assert!(store.get("greet").await.unwrap().is_none());
     assert!(store.source("greet").await.unwrap().is_none());
@@ -101,6 +101,7 @@ async fn trigger_config_persists() {
                 path: Some("/users/{id}".into()),
             },
             Some(owner),
+            &[],
         )
         .await
         .unwrap();
@@ -122,10 +123,11 @@ async fn plain_push_preserves_existing_trigger() {
                 path: Some("/ping".into()),
             },
             Some(owner),
+            &[],
         )
         .await
         .unwrap();
-    store.push("api", SRC_B, Some(owner)).await.unwrap();
+    store.push("api", SRC_B, Some(owner), &[]).await.unwrap();
     let trigger = store.get("api").await.unwrap().unwrap().trigger;
     assert_eq!(trigger.methods, vec!["GET"]);
     assert_eq!(trigger.path.as_deref(), Some("/ping"));
@@ -143,6 +145,7 @@ async fn mcp_metadata_round_trips() {
             "mcp",
             Some(&meta),
             Some(owner),
+            &[],
         )
         .await
         .unwrap();
@@ -167,12 +170,13 @@ async fn redeploying_as_http_clears_mcp_metadata() {
             "mcp",
             Some(&meta),
             Some(owner),
+            &[],
         )
         .await
         .unwrap();
     // A plain push always derives kind from the source being deployed, so the
     // mcp metadata must not survive the function's return to http.
-    store.push("flip", SRC_A, Some(owner)).await.unwrap();
+    store.push("flip", SRC_A, Some(owner), &[]).await.unwrap();
     let f = store.fetch("flip").await.unwrap().unwrap();
     assert_eq!(f.kind, "http");
     assert!(f.mcp.is_none());
@@ -182,12 +186,12 @@ async fn redeploying_as_http_clears_mcp_metadata() {
 #[tokio::test]
 async fn fetch_caches_and_own_pushes_invalidate() {
     let (store, _pool, owner) = store().await;
-    store.push("greet", SRC_A, Some(owner)).await.unwrap();
+    store.push("greet", SRC_A, Some(owner), &[]).await.unwrap();
     let first = store.fetch("greet").await.unwrap().unwrap();
     assert_eq!(first.source, SRC_A);
     assert_eq!(first.kind, "http");
     assert!(first.mcp.is_none());
-    store.push("greet", SRC_B, Some(owner)).await.unwrap();
+    store.push("greet", SRC_B, Some(owner), &[]).await.unwrap();
     let second = store.fetch("greet").await.unwrap().unwrap();
     assert_eq!(second.source, SRC_B);
 }

@@ -249,7 +249,7 @@ export const mcp = {
 
 async fn run_tool(source: &str, tool: &str, args: serde_json::Value) -> InvocationResult {
     QuickJsExecutor::new()
-        .execute_tool_with_services(source, tool, &args, &Limits::default(), None)
+        .execute_tool_with_services(source, tool, &args, &Limits::default(), None, None)
         .await
 }
 
@@ -339,10 +339,82 @@ async fn an_async_tool_can_fetch() {
         } } } };"#;
     let l = limits(2000, 2);
     let r = QuickJsExecutor::new()
-        .execute_tool_with_services(src, "leak", &serde_json::json!({}), &l, None)
+        .execute_tool_with_services(src, "leak", &serde_json::json!({}), &l, None, None)
         .await;
     match &r.outcome {
         Outcome::Error(m) => assert!(m.contains("private address"), "{m}"),
         o => panic!("expected the outbound policy's refusal, got {o:?}"),
     }
+}
+
+#[tokio::test]
+async fn env_reaches_the_handler_only_when_the_host_hands_it_in() {
+    let ex = QuickJsExecutor::new();
+    let src = r#"export const config = { secrets: ["API_TOKEN"] };
+export default async function handler(request, context) {
+    return context.json({
+        present: context.env !== undefined,
+        token: context.env ? context.env.API_TOKEN : null,
+    });
+}"#;
+    let req = HttpRequest::post_json("{}".to_string());
+    let l = limits(2000, 0);
+
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("API_TOKEN".to_string(), "s3cr3t".to_string());
+    let with = ex
+        .execute_with_services(src, &req, &l, None, Some(&env))
+        .await;
+    assert_eq!(
+        shape(&with.outcome),
+        r#"success:{"present":true,"token":"s3cr3t"}"#
+    );
+
+    // Nothing handed in: context.env must be undefined, not an empty object —
+    // absence is how a handler learns this host injects nothing.
+    let without = ex.execute_with_services(src, &req, &l, None, None).await;
+    assert_eq!(
+        shape(&without.outcome),
+        r#"success:{"present":false,"token":null}"#
+    );
+}
+
+#[tokio::test]
+async fn env_reaches_tool_handlers_the_same_way() {
+    let src = r#"export const mcp = { tools: { peek: {
+        description: "d", inputSchema: { type: "object" },
+        handler(args, context) { return context.env ? context.env.KEY : "absent"; } } } };"#;
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("KEY".to_string(), "v".to_string());
+    let ex = QuickJsExecutor::new();
+    let with = ex
+        .execute_tool_with_services(
+            src,
+            "peek",
+            &serde_json::json!({}),
+            &limits(1000, 0),
+            None,
+            Some(&env),
+        )
+        .await;
+    assert!(
+        matches!(&with.outcome, Outcome::Success(s) if s == "v"),
+        "{:?}",
+        with.outcome
+    );
+    let without = ex
+        .execute_tool_with_services(
+            src,
+            "peek",
+            &serde_json::json!({}),
+            &limits(1000, 0),
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(&without.outcome, Outcome::Success(s) if s == "absent"),
+        "{:?}",
+        without.outcome
+    );
 }

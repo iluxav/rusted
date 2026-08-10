@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Json, Response};
 use rusted_engine::Outcome;
 use serde_json::{json, Value};
 
-use crate::api::{execute_serialized, plan_for_owner, Job};
+use crate::api::{env_for_function, execute_serialized, plan_for_owner, record_refusal, Job};
 use crate::mcp_wire;
 use crate::state::AppState;
 use crate::store::Fetched;
@@ -192,6 +192,15 @@ async fn call_tool(
             true,
         );
     }
+    // Model-visible on purpose: the secret names are deploy metadata, and
+    // naming what is missing is how the owner (or their agent) fixes it.
+    let env = match env_for_function(state, fetched).await {
+        Ok(env) => env,
+        Err(detail) => {
+            record_refusal(state, name, fetched.owner, detail.clone());
+            return mcp_wire::tool_result(detail, true);
+        }
+    };
     let result = match execute_serialized(
         state,
         name,
@@ -200,6 +209,7 @@ async fn call_tool(
         limits,
         fetched.owner,
         plan.limits.concurrency,
+        env,
     )
     .await
     {

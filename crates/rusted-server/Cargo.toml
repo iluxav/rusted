@@ -1,6 +1,6 @@
 [package]
 name = "rusted-server"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "The rusted server: data plane, admin API, and web console."
@@ -8,6 +8,7 @@ repository = "https://github.com/iluxav/rusted"
 
 [dependencies]
 rusted-engine = { workspace = true }
+aes-gcm = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

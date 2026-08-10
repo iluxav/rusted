@@ -151,7 +151,64 @@ pub enum Surface {
     Mcp(McpConfig),
 }
 
+/// Runtime needs a module declares via `export const config`, independent of
+/// which surface it serves. Today that is only `secrets`: the names the host
+/// must decrypt and hand in as `context.env`. Unknown keys are rejected so
+/// typos fail at verify time instead of silently deploying without.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub secrets: Vec<String>,
+}
+
+/// Everything [`Executor::inspect`] learns about a module: the surface it
+/// declares and the runtime config that applies to either surface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inspection {
+    pub surface: Surface,
+    pub config: RuntimeConfig,
+}
+
 pub const MAX_TOOLS: usize = 32;
+/// Enough for any sane handler; a bound so a module cannot demand the host
+/// decrypt an unbounded list per invocation.
+pub const MAX_SECRETS: usize = 32;
+
+/// Environment-variable shape: uppercase letters, digits and underscores, not
+/// starting with a digit. Shared with the server's secret store so a name that
+/// deploys is a name that can be set.
+pub fn valid_secret_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn vet_secrets(secrets: &[String]) -> Result<(), String> {
+    if secrets.len() > MAX_SECRETS {
+        return Err(format!(
+            "too many secrets: {} (max {MAX_SECRETS})",
+            secrets.len()
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for name in secrets {
+        if !valid_secret_name(name) {
+            return Err(format!(
+                "invalid secret name {name:?}: 1-64 chars of A-Z, 0-9, '_', not starting with a digit"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("secret {name} is listed twice"));
+        }
+    }
+    Ok(())
+}
 
 pub trait Executor: Send + Sync {
     fn execute(&self, source: &str, request: &HttpRequest, limits: &Limits) -> InvocationResult;
@@ -161,8 +218,9 @@ pub trait Executor: Send + Sync {
     fn verify(&self, source: &str) -> Result<(), String>;
 
     /// Like [`Executor::verify`], but reads which surface the module declares
-    /// (`export const http` / `export const mcp`) and its configuration.
-    fn inspect(&self, source: &str) -> Result<Surface, String>;
+    /// (`export const http` / `export const mcp`), its configuration, and the
+    /// runtime config (`export const config`).
+    fn inspect(&self, source: &str) -> Result<Inspection, String>;
 }
 
 /// Installed before module evaluation so top-level `console.log` works and is
@@ -212,10 +270,12 @@ const CONSOLE_PRELUDE: &str = r#"(() => {
   globalThis.__rustedLogs = logs;
 })()"#;
 
-/// Adapts `handler(request, context)` to `(handler, requestJson) -> Promise<envelopeJson>`.
+/// Adapts `handler(request, context)` to `(handler, requestJson, envJson) -> Promise<envelopeJson>`.
 /// The envelope carries the response (or error) plus the logs collected by the
-/// console prelude, so the host only ever marshals strings.
-const GLUE: &str = r#"(handler, requestJson) => {
+/// console prelude, so the host only ever marshals strings. `envJson` is the
+/// decrypted secrets the host chose to lend; empty means `context.env` stays
+/// undefined, so a handler that was not granted secrets fails saying so.
+const GLUE: &str = r#"(handler, requestJson, envJson) => {
   const req = JSON.parse(requestJson);
   const logs = globalThis.__rustedLogs || [];
   const request = {
@@ -239,6 +299,8 @@ const GLUE: &str = r#"(handler, requestJson) => {
     // Absent when the host lends no services — reading it then is a clearer
     // failure than a function that silently finds nothing.
     inbox: globalThis.__rustedInbox,
+    // Only the secrets the module asked for via `export const config`.
+    env: envJson ? JSON.parse(envJson) : undefined,
   };
   return Promise.resolve(handler(request, context)).then(
     (r) => {
@@ -264,20 +326,22 @@ const GLUE: &str = r#"(handler, requestJson) => {
   );
 }"#;
 
-/// Adapts one mcp tool to `(namespace, toolName, argsJson) -> Promise<envelopeJson>`.
+/// Adapts one mcp tool to `(namespace, toolName, argsJson, envJson) -> Promise<envelopeJson>`.
 /// The handler is looked up in the live module namespace at call time — inspect
 /// checked a snapshot at deploy time, but what executes is whatever the module
 /// evaluates to now, so the `typeof` re-check here is the invariant that holds.
 /// Emits the same envelope shape as [`GLUE`] so `outcome_from_envelope` reads
 /// both. A tool returns a value, not an HTTP response, so the context has no
 /// `json`/`text` helpers and the content type is decided by the value's shape.
-const TOOL_GLUE: &str = r#"(ns, toolName, argsJson) => {
+const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson) => {
   const logs = globalThis.__rustedLogs || [];
   const tool = ns.mcp && ns.mcp.tools ? ns.mcp.tools[toolName] : undefined;
   const context = {
     // Absent when the host lends no services — reading it then is a clearer
     // failure than a function that silently finds nothing.
     inbox: globalThis.__rustedInbox,
+    // Only the secrets the module asked for via `export const config`.
+    env: envJson ? JSON.parse(envJson) : undefined,
   };
   return Promise.resolve()
     .then(() => {
@@ -846,20 +910,25 @@ impl QuickJsExecutor {
         request: &HttpRequest,
         limits: &Limits,
     ) -> InvocationResult {
-        self.execute_with_services(source, request, limits, None)
+        self.execute_with_services(source, request, limits, None, None)
             .await
     }
 
     /// As [`Self::execute_async`], with whatever the host chooses to lend the
-    /// handler. `None` means only `fetch`, which is what tests and local
-    /// development get.
+    /// handler. `None` services means only `fetch`, which is what tests and
+    /// local development get. `env` is the decrypted secrets the module asked
+    /// for; `None` leaves `context.env` undefined.
     pub async fn execute_with_services(
         &self,
         source: &str,
         request: &HttpRequest,
         limits: &Limits,
         services: Option<Arc<dyn HostServices>>,
+        env: Option<&BTreeMap<String, String>>,
     ) -> InvocationResult {
+        let env_json = env
+            .map(|env| serde_json::to_string(env).expect("serialize env"))
+            .unwrap_or_default();
         let wall0 = Instant::now();
         let (rt, expired) = restricted_async_runtime(limits).await;
         let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
@@ -913,18 +982,19 @@ impl QuickJsExecutor {
                 }
             };
             let exec0 = Instant::now();
-            let promise: Promise = match glue.call((handler, request_json.as_str())) {
-                Ok(promise) => promise,
-                Err(e) => {
-                    return (
-                        classify(exception_message(&c, e)),
-                        Response::default(),
-                        Vec::new(),
-                        None,
-                        exec0.elapsed(),
-                    )
-                }
-            };
+            let promise: Promise =
+                match glue.call((handler, request_json.as_str(), env_json.as_str())) {
+                    Ok(promise) => promise,
+                    Err(e) => {
+                        return (
+                            classify(exception_message(&c, e)),
+                            Response::default(),
+                            Vec::new(),
+                            None,
+                            exec0.elapsed(),
+                        )
+                    }
+                };
             let (outcome, response, logs, stack) =
                 settle_with_deadline(&c, promise, deadline, &expired, limits).await;
             (outcome, response, logs, stack, exec0.elapsed())
@@ -945,7 +1015,11 @@ impl QuickJsExecutor {
         args: &serde_json::Value,
         limits: &Limits,
         services: Option<Arc<dyn HostServices>>,
+        env: Option<&BTreeMap<String, String>>,
     ) -> InvocationResult {
+        let env_json = env
+            .map(|env| serde_json::to_string(env).expect("serialize env"))
+            .unwrap_or_default();
         let wall0 = Instant::now();
         let (rt, expired) = restricted_async_runtime(limits).await;
         let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
@@ -1013,18 +1087,19 @@ impl QuickJsExecutor {
                 }
             };
             let exec0 = Instant::now();
-            let promise: Promise = match glue.call((ns, tool, args_json.as_str())) {
-                Ok(promise) => promise,
-                Err(e) => {
-                    return (
-                        classify(exception_message(&c, e)),
-                        Response::default(),
-                        Vec::new(),
-                        None,
-                        exec0.elapsed(),
-                    )
-                }
-            };
+            let promise: Promise =
+                match glue.call((ns, tool, args_json.as_str(), env_json.as_str())) {
+                    Ok(promise) => promise,
+                    Err(e) => {
+                        return (
+                            classify(exception_message(&c, e)),
+                            Response::default(),
+                            Vec::new(),
+                            None,
+                            exec0.elapsed(),
+                        )
+                    }
+                };
             let (outcome, response, logs, stack) =
                 settle_with_deadline(&c, promise, deadline, &expired, limits).await;
             (outcome, response, logs, stack, exec0.elapsed())
@@ -1229,7 +1304,7 @@ impl Executor for QuickJsExecutor {
         })
     }
 
-    fn inspect(&self, source: &str) -> Result<Surface, String> {
+    fn inspect(&self, source: &str) -> Result<Inspection, String> {
         let limits = Limits::default();
         let (rt, _expired) = restricted_runtime(&limits);
         let ctx = Context::full(&rt).expect("quickjs context");
@@ -1249,15 +1324,33 @@ impl Executor for QuickJsExecutor {
             let http = export("http");
             let has_default = export("default").is_some();
 
+            // Surface-independent: an http handler and an mcp tool ask for
+            // secrets the same way.
+            let runtime_config = match export("config") {
+                None => RuntimeConfig::default(),
+                Some(value) => {
+                    let json = stringify(&c, value, "config")?;
+                    let parsed = serde_json::from_str::<RuntimeConfig>(&json)
+                        .map_err(|e| format!("invalid config export: {e}"))?;
+                    vet_secrets(&parsed.secrets)?;
+                    parsed
+                }
+            };
+            let inspected = |surface: Surface| Inspection {
+                surface,
+                config: runtime_config.clone(),
+            };
+
             let Some(mcp) = mcp else {
                 // http (or nothing declared): the default handler is the surface.
                 default_handler(&module)?;
                 let Some(config) = http else {
-                    return Ok(Surface::Http(HttpConfig::default()));
+                    return Ok(inspected(Surface::Http(HttpConfig::default())));
                 };
                 let json = stringify(&c, config, "http")?;
                 return serde_json::from_str::<HttpConfig>(&json)
                     .map(Surface::Http)
+                    .map(inspected)
                     .map_err(|e| format!("invalid http export: {e}"));
             };
 
@@ -1338,7 +1431,7 @@ impl Executor for QuickJsExecutor {
                 jsonschema::validator_for(&tool.input_schema)
                     .map_err(|e| format!("tool {name}: invalid inputSchema: {e}"))?;
             }
-            Ok(Surface::Mcp(config))
+            Ok(inspected(Surface::Mcp(config)))
         })
     }
 }

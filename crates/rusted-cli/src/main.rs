@@ -909,7 +909,7 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
     let bundled = rt.block_on(rusted_server::bundler::bundle(&file, sourcemap))?;
 
     // A bundle that won't load is not a build worth writing.
-    let surface =
+    let inspection =
         rusted_engine::Executor::inspect(&rusted_engine::QuickJsExecutor::new(), &bundled.code)
             .map_err(|e| format!("the bundle does not load: {e}"))?;
 
@@ -929,7 +929,7 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
         format!("{size} bytes")
     };
     println!("built {} ({pretty})", out.display());
-    match surface {
+    match inspection.surface {
         rusted_engine::Surface::Http(config) => println!(
             "  {} /f/{}{}",
             config
@@ -946,6 +946,9 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
             "  mcp tools: {}",
             config.tools.keys().cloned().collect::<Vec<_>>().join(", ")
         ),
+    }
+    if !inspection.config.secrets.is_empty() {
+        println!("  secrets: {}", inspection.config.secrets.join(", "));
     }
     Ok(())
 }

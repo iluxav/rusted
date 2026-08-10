@@ -19,6 +19,7 @@ sourcemap = "9"
 # Rolldown's Rust crates explicitly do not follow semver — pin exactly.
 rolldown = "=1.2.1"
 rolldown_common = "=1.2.1"
+aes-gcm = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonschema = { version = "0.26", default-features = false }

@@ -1534,10 +1534,16 @@ async fn admin_api_rejects_calls_without_a_key() {
 /// column type changing under them used to surface only in the browser.
 #[tokio::test]
 async fn every_console_page_renders() {
+    enable_secret_store();
     let t = boot().await;
     push(&t, "greet", GREET).await;
-    // A key and an invocation so the keys/lambda pages have real rows to render.
+    // A key, a secret, and an invocation so the keys/secrets/lambda pages have
+    // real rows to render.
     rusted_server::auth::create_key(&t.pool, t.user_id, "smoke")
+        .await
+        .unwrap();
+    rusted_server::secrets::SecretStore::new(t.pool.clone())
+        .set(t.user_id, "SMOKE_SECRET", "v")
         .await
         .unwrap();
     t.client
@@ -1557,6 +1563,7 @@ async fn every_console_page_renders() {
         "/console",
         "/console/dashboard",
         "/console/keys",
+        "/console/secrets",
         "/console/billing",
         "/console/checkout/pro",
         "/console/lambda/greet",
@@ -3152,4 +3159,153 @@ async fn a_function_cannot_reach_another_accounts_inbox() {
         body["refused"].as_str().unwrap_or("").contains("private"),
         "{body}"
     );
+}
+
+// ------------------------------------------------------------------- secrets
+
+/// A fixed key for tests: setting the same value from every test is safe even
+/// though the environment is process-global.
+fn enable_secret_store() {
+    std::env::set_var(
+        rusted_server::secrets::KEY_ENV,
+        "8e5c1b6f7a2d4e9c0b3a5d7f1e8c2a4b6d9f0e1c3a5b7d9f2e4c6a8b0d1f3e5c",
+    );
+}
+
+const SECRET_READER: &str = r#"export const config = { secrets: ["API_TOKEN"] };
+export default async function handler(request, context) {
+    return context.json({ token: context.env.API_TOKEN });
+}"#;
+
+#[tokio::test]
+async fn a_function_that_requests_secrets_gets_them_decrypted() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault
+        .set(t.user_id, "API_TOKEN", "tok_live_123")
+        .await
+        .unwrap();
+    assert_eq!(push(&t, "envy", SECRET_READER).await.status(), 200);
+
+    let r = t.client.post(t.data("/f/envy")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["token"], "tok_live_123");
+}
+
+#[tokio::test]
+async fn a_missing_secret_refuses_the_invocation_before_the_handler_runs() {
+    enable_secret_store();
+    let t = boot().await;
+    assert_eq!(push(&t, "needy", SECRET_READER).await.status(), 200);
+
+    let r = t.client.post(t.data("/f/needy")).send().await.unwrap();
+    assert_eq!(r.status(), 500);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "missing_secrets");
+    // The caller learns nothing specific; the owner's records do.
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("API_TOKEN"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_function_that_does_not_ask_sees_no_env_at_all() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault.set(t.user_id, "API_TOKEN", "tok").await.unwrap();
+    let src = r#"export default async function handler(request, context) {
+        return context.json({ env: typeof context.env });
+    }"#;
+    assert_eq!(push(&t, "plain-env", src).await.status(), 200);
+
+    let r = t.client.post(t.data("/f/plain-env")).send().await.unwrap();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["env"], "undefined");
+}
+
+#[tokio::test]
+async fn updating_a_secret_reaches_the_next_invocation() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault.set(t.user_id, "API_TOKEN", "before").await.unwrap();
+    assert_eq!(push(&t, "rotating", SECRET_READER).await.status(), 200);
+
+    let r = t.client.post(t.data("/f/rotating")).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["token"], "before");
+
+    // The vault writes through Postgres and NOTIFYs; the server's cache must
+    // drop the old value. The listener is async, so poll briefly.
+    vault.set(t.user_id, "API_TOKEN", "after").await.unwrap();
+    let mut latest = String::new();
+    for _ in 0..40 {
+        let r = t.client.post(t.data("/f/rotating")).send().await.unwrap();
+        latest = r.json::<Value>().await.unwrap()["token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if latest == "after" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(latest, "after");
+}
+
+#[tokio::test]
+async fn secrets_never_reach_the_database_in_the_clear() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault
+        .set(t.user_id, "DB_CHECK", "plaintext-canary")
+        .await
+        .unwrap();
+    let stored: Vec<u8> = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT ciphertext FROM secrets WHERE user_id = $1 AND name = 'DB_CHECK'",
+    )
+    .bind(t.user_id)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    let haystack = String::from_utf8_lossy(&stored);
+    assert!(
+        !haystack.contains("plaintext-canary"),
+        "the stored blob contains the plaintext"
+    );
+    // And a deploy declaring a name that is set still round-trips through the
+    // console-style listing without exposing the value.
+    let listed = vault.list(t.user_id).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "DB_CHECK");
+}
+
+#[tokio::test]
+async fn mcp_tools_get_env_the_same_way() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault.set(t.user_id, "SIGNING_KEY", "sk_42").await.unwrap();
+    let src = r#"export const config = { secrets: ["SIGNING_KEY"] };
+export const mcp = { tools: { sign: {
+    description: "d", inputSchema: { type: "object" },
+    handler(args, context) { return context.env.SIGNING_KEY; } } } };"#;
+    assert_eq!(push(&t, "signer", src).await.status(), 200);
+    let (s, v) = mcp_fn(
+        &t,
+        "signer",
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"sign","arguments":{}}}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["result"]["content"][0]["text"], "sk_42", "{v}");
+    assert_ne!(v["result"]["isError"], json!(true), "{v}");
 }

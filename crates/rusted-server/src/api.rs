@@ -174,6 +174,7 @@ async fn execute_raw(
     job: Job,
     limits: rusted_engine::Limits,
     owner: Option<Uuid>,
+    env: Option<BTreeMap<String, String>>,
 ) -> Result<InvocationResult, Response> {
     // Before queueing for a slot: if the process is already using more memory
     // than it should, another invocation makes that worse rather than better.
@@ -213,15 +214,16 @@ async fn execute_raw(
     Ok(state
         .exec_runtime
         .spawn(async move {
+            let env = env.as_ref();
             match job {
                 Job::Http(request) => {
                     executor
-                        .execute_with_services(&source, &request, &limits, services)
+                        .execute_with_services(&source, &request, &limits, services, env)
                         .await
                 }
                 Job::Tool { name, args } => {
                     executor
-                        .execute_tool_with_services(&source, &name, &args, &limits, services)
+                        .execute_tool_with_services(&source, &name, &args, &limits, services, env)
                         .await
                 }
             }
@@ -231,6 +233,9 @@ async fn execute_raw(
 }
 
 /// Runs `source` with concurrency 1 per `key` and records the invocation.
+/// `env` is the function's decrypted secrets, resolved by the caller from the
+/// stored record — never from anything the request sent.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_serialized(
     state: &Arc<AppState>,
     key: &str,
@@ -239,6 +244,7 @@ pub(crate) async fn execute_serialized(
     limits: rusted_engine::Limits,
     owner: Option<uuid::Uuid>,
     concurrency: usize,
+    env: Option<BTreeMap<String, String>>,
 ) -> Result<InvocationResult, Response> {
     let allowed = concurrency.max(1);
     let gate = {
@@ -267,7 +273,7 @@ pub(crate) async fn execute_serialized(
     })?
     .expect("semaphore never closed");
     let tool = job.tool().map(|t| t.to_string());
-    let result = execute_raw(state, source, job, limits, owner).await?;
+    let result = execute_raw(state, source, job, limits, owner, env).await?;
     debug_print(state, key, &result);
 
     let base_detail = match &result.outcome {
@@ -308,6 +314,58 @@ pub(crate) async fn execute_serialized(
     ring.truncate(RECORD_CAP);
 
     Ok(result)
+}
+
+/// The decrypted environment a function's stored record asks for. `Ok(None)`
+/// when the module requested no secrets — `context.env` then stays undefined.
+/// The names come from the deploy-time record and the owner from the store,
+/// never from anything the caller sent.
+pub(crate) async fn env_for_function(
+    state: &Arc<AppState>,
+    fetched: &crate::store::Fetched,
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    if fetched.secrets.is_empty() {
+        return Ok(None);
+    }
+    let Some(owner) = fetched.owner else {
+        return Err("this function has no owner, so its secrets cannot be resolved".to_string());
+    };
+    state
+        .secrets
+        .env_for(owner, &fetched.secrets)
+        .await
+        .map(Some)
+}
+
+/// A refusal before execution — missing secrets — still needs to reach the
+/// owner's logs: record it like an errored invocation so `rusted logs` and the
+/// console explain it, whatever generic answer the caller gets.
+pub(crate) fn record_refusal(
+    state: &Arc<AppState>,
+    key: &str,
+    owner: Option<uuid::Uuid>,
+    detail: String,
+) {
+    state.analytics.record(crate::analytics::Invocation {
+        function_name: key.to_string(),
+        user_id: owner,
+        outcome: "error".into(),
+        detail: Some(detail.clone()),
+        wall_ms: 0.0,
+        cpu_ms: 0.0,
+        exec_ms: 0.0,
+    });
+    let mut records = state.records.lock().unwrap();
+    let ring = records.entry(key.to_string()).or_default();
+    ring.push_front(InvocationRecord {
+        at: now_epoch(),
+        outcome: "error".into(),
+        detail: Some(detail),
+        wall_ms: 0.0,
+        cpu_ms: 0.0,
+        logs: Vec::new(),
+    });
+    ring.truncate(RECORD_CAP);
 }
 
 /// Engine limits for a plan: execution budget and outbound allowance.
@@ -597,6 +655,20 @@ async fn serve_function(
         Ok(request) => request,
         Err(response) => return *response,
     };
+    // Resolved before spending an execution slot: a function whose secrets
+    // cannot be produced would only fail inside the handler, less clearly.
+    let env = match env_for_function(&state, &fetched).await {
+        Ok(env) => env,
+        Err(detail) => {
+            record_refusal(&state, &name, owner, detail);
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "missing_secrets",
+                "this function requests secrets that are not configured; \
+                 its owner must add them in the console",
+            );
+        }
+    };
     match execute_serialized(
         &state,
         &name,
@@ -605,6 +677,7 @@ async fn serve_function(
         limits,
         owner,
         plan.limits.concurrency,
+        env,
     )
     .await
     {
@@ -648,6 +721,7 @@ async fn call_run(
         limits,
         None,
         plan.limits.concurrency,
+        None,
     )
     .await
     {
@@ -725,11 +799,12 @@ struct PushBody {
 }
 
 /// Compile-checks the source and reads which surface it declares
-/// (`export const http` or `export const mcp`).
+/// (`export const http` or `export const mcp`) plus the runtime config
+/// (`export const config`).
 async fn inspect_source(
     state: &Arc<AppState>,
     source: String,
-) -> Result<rusted_engine::Surface, String> {
+) -> Result<rusted_engine::Inspection, String> {
     let executor = state.executor.clone();
     tokio::task::spawn_blocking(move || executor.inspect(&source))
         .await
@@ -788,9 +863,11 @@ pub async fn deploy_function(
         ));
     }
 
-    let surface = inspect_source(state, source.clone())
+    let inspection = inspect_source(state, source.clone())
         .await
         .map_err(|e| DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e))?;
+    let secrets = inspection.config.secrets;
+    let surface = inspection.surface;
 
     // Everything up to the surface split is shared: the file's declared name
     // stands in for a missing request name, and the same plan/ownership rules
@@ -849,7 +926,15 @@ pub async fn deploy_function(
             let meta = json!({ "public": mcp_config.public, "tools": mcp_config.tools });
             let revision = state
                 .store
-                .push_full(&name, &source, None, "mcp", Some(&meta), Some(user_id))
+                .push_full(
+                    &name,
+                    &source,
+                    None,
+                    "mcp",
+                    Some(&meta),
+                    Some(user_id),
+                    &secrets,
+                )
                 .await
                 .map_err(|e| {
                     DeployRefused::new(
@@ -866,6 +951,7 @@ pub async fn deploy_function(
                 "kind": "mcp",
                 "tools": mcp_config.tools.keys().collect::<Vec<_>>(),
                 "public": mcp_config.public,
+                "secrets": secrets,
                 "url": state.data_url(&format!("/f/{name}")),
             });
             if !mcp_config.public {
@@ -900,10 +986,15 @@ pub async fn deploy_function(
         Some(trigger) => {
             state
                 .store
-                .push_with_trigger(&name, &source, trigger, Some(user_id))
+                .push_with_trigger(&name, &source, trigger, Some(user_id), &secrets)
                 .await
         }
-        None => state.store.push(&name, &source, Some(user_id)).await,
+        None => {
+            state
+                .store
+                .push(&name, &source, Some(user_id), &secrets)
+                .await
+        }
     };
     let (revision, trigger) = match pushed {
         Ok(revision) => match state.store.get(&name).await {
@@ -941,6 +1032,7 @@ pub async fn deploy_function(
         "kind": "http",
         "methods": trigger.methods,
         "path": trigger.path,
+        "secrets": secrets,
         "limits": limits_json(state, &plan),
         "url": state.data_url(&route),
     }))
@@ -1066,6 +1158,7 @@ async fn function_detail(
         "hash": record.current().hash,
         "revisions": record.revisions,
         "kind": record.kind,
+        "secrets": record.secrets,
         "url": state.data_url(&format!("/f/{name}")),
         "recent": recent,
     });
@@ -1175,14 +1268,14 @@ async fn invoke(
             return err(StatusCode::NOT_FOUND, "not_found", "no such function");
         }
     }
-    let (key, source) = match (&body.name, body.source) {
+    let (key, source, env) = match (&body.name, body.source) {
         (Some(name), _) => {
-            // Invoke runs a module as http. An mcp module has no request
-            // handler, so refuse the mismatch up front — pointing at the
-            // endpoint an MCP client should connect to — rather than letting
-            // it surface as a script error.
-            match state.store.get(name).await {
-                Ok(Some(record)) if record.kind == "mcp" => {
+            match state.store.fetch(name).await {
+                // Invoke runs a module as http. An mcp module has no request
+                // handler, so refuse the mismatch up front — pointing at the
+                // endpoint an MCP client should connect to — rather than
+                // letting it surface as a script error.
+                Ok(Some(hit)) if hit.kind == "mcp" => {
                     return (
                         StatusCode::UNPROCESSABLE_ENTITY,
                         Json(json!({ "error": {
@@ -1193,17 +1286,22 @@ async fn invoke(
                     )
                         .into_response()
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store_error",
-                        e.to_string(),
-                    )
+                Ok(Some(hit)) => {
+                    // The caller here is the owner, so the refusal can say
+                    // exactly which secrets are missing.
+                    let env = match env_for_function(&state, &hit).await {
+                        Ok(env) => env,
+                        Err(detail) => {
+                            record_refusal(&state, name, hit.owner, detail.clone());
+                            return err(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "missing_secrets",
+                                detail,
+                            );
+                        }
+                    };
+                    (Some(name.clone()), hit.source.clone(), env)
                 }
-            }
-            match state.store.source(name).await {
-                Ok(Some(s)) => (Some(name.clone()), s),
                 Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
                 Err(e) => {
                     return err(
@@ -1216,7 +1314,7 @@ async fn invoke(
         }
         // Ad-hoc source: nothing shared to serialize on, nothing to record —
         // deliberately keyless so repeated invokes can't grow server state.
-        (None, Some(source)) => (None, source),
+        (None, Some(source)) => (None, source, None),
         (None, None) => {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -1238,11 +1336,21 @@ async fn invoke(
                 limits,
                 Some(user_id),
                 plan.limits.concurrency,
+                env,
             )
             .await
         }
         None => {
-            match execute_raw(&state, source, Job::Http(request), limits, Some(user_id)).await {
+            match execute_raw(
+                &state,
+                source,
+                Job::Http(request),
+                limits,
+                Some(user_id),
+                None,
+            )
+            .await
+            {
                 Ok(result) => {
                     debug_print(&state, "ad-hoc", &result);
                     Ok(result)
@@ -1376,12 +1484,18 @@ async fn verify(
         return response;
     }
     match inspect_source(&state, body.source).await {
-        Ok(surface) => {
-            let (kind, config) = match &surface {
+        Ok(inspection) => {
+            let (kind, config) = match &inspection.surface {
                 rusted_engine::Surface::Http(c) => ("http", json!(c)),
                 rusted_engine::Surface::Mcp(c) => ("mcp", json!(c)),
             };
-            Json(json!({ "valid": true, "kind": kind, "config": config })).into_response()
+            Json(json!({
+                "valid": true,
+                "kind": kind,
+                "config": config,
+                "secrets": inspection.config.secrets,
+            }))
+            .into_response()
         }
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e),
     }
@@ -1591,6 +1705,7 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
         Job::Http(HttpRequest::post_json(input)),
         limits,
         Some(user_id),
+        None,
     )
     .await
     {

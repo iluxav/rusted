@@ -54,6 +54,10 @@ pub struct FunctionRecord {
     /// Deploy-time MCP tool metadata (handlers stripped); NULL for http.
     #[serde(default)]
     pub mcp: Option<serde_json::Value>,
+    /// Secret names the module requested via `export const config`, captured
+    /// at deploy time so invocation needs no re-inspection.
+    #[serde(default)]
+    pub secrets: Vec<String>,
 }
 
 fn default_kind() -> String {
@@ -78,6 +82,8 @@ pub struct Fetched {
     pub owner: Option<Uuid>,
     pub kind: String,
     pub mcp: Option<serde_json::Value>,
+    /// Secret names to decrypt into `context.env` for every invocation.
+    pub secrets: Vec<String>,
     pub rev: u64,
 }
 
@@ -134,12 +140,14 @@ impl Store {
     /// Push keeping the function's existing trigger (default for new functions).
     /// Note the asymmetry: the trigger is preserved, but kind and mcp metadata
     /// are always reset to http/NULL — kind derives from the deployed source,
-    /// so callers deploying an mcp module must use `push_full`.
+    /// so callers deploying an mcp module must use `push_full`. Secrets always
+    /// come from the deployed source too, so they are never preserved.
     pub async fn push(
         &self,
         name: &str,
         source: &str,
         user_id: Option<Uuid>,
+        secrets: &[String],
     ) -> sqlx::Result<Revision> {
         let existing: Option<HttpTrigger> =
             sqlx::query("SELECT methods, path FROM functions WHERE name = $1")
@@ -150,7 +158,7 @@ impl Store {
                     methods: row.get("methods"),
                     path: row.get("path"),
                 });
-        self.push_with_trigger(name, source, existing.unwrap_or_default(), user_id)
+        self.push_with_trigger(name, source, existing.unwrap_or_default(), user_id, secrets)
             .await
     }
 
@@ -161,14 +169,16 @@ impl Store {
         source: &str,
         trigger: HttpTrigger,
         user_id: Option<Uuid>,
+        secrets: &[String],
     ) -> sqlx::Result<Revision> {
-        self.push_full(name, source, Some(&trigger), "http", None, user_id)
+        self.push_full(name, source, Some(&trigger), "http", None, user_id, secrets)
             .await
     }
 
     /// The full push: kind selects the data-plane protocol (`"http"` or
     /// `"mcp"`), mcp carries the tool metadata for mcp functions. A missing
     /// trigger stores the default (mcp functions ignore it).
+    #[allow(clippy::too_many_arguments)]
     pub async fn push_full(
         &self,
         name: &str,
@@ -177,6 +187,7 @@ impl Store {
         kind: &str,
         mcp: Option<&serde_json::Value>,
         user_id: Option<Uuid>,
+        secrets: &[String],
     ) -> sqlx::Result<Revision> {
         let default_trigger = HttpTrigger::default();
         let trigger = trigger.unwrap_or(&default_trigger);
@@ -199,11 +210,11 @@ impl Store {
         .await?
         .get("next");
         sqlx::query(
-            "INSERT INTO functions (name, current_rev, methods, path, user_id, kind, mcp)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO functions (name, current_rev, methods, path, user_id, kind, mcp, secrets)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (name) DO UPDATE
                  SET current_rev = $2, methods = $3, path = $4, updated_at = now(),
-                     user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7",
+                     user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7, secrets = $8",
         )
         .bind(name)
         .bind(rev)
@@ -212,6 +223,7 @@ impl Store {
         .bind(user_id)
         .bind(kind)
         .bind(mcp)
+        .bind(secrets.to_vec())
         .execute(&mut *tx)
         .await?;
         let created_at: i64 = sqlx::query(
@@ -247,7 +259,8 @@ impl Store {
 
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
-            "SELECT current_rev, methods, path, user_id, kind, mcp FROM functions WHERE name = $1",
+            "SELECT current_rev, methods, path, user_id, kind, mcp, secrets
+             FROM functions WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -279,6 +292,7 @@ impl Store {
             user_id: function.get("user_id"),
             kind: function.get("kind"),
             mcp: function.get("mcp"),
+            secrets: function.get("secrets"),
         }))
     }
 
@@ -312,6 +326,7 @@ impl Store {
             owner: record.user_id,
             kind: record.kind,
             mcp: record.mcp,
+            secrets: record.secrets,
             rev: record.current_rev,
         });
         self.cache

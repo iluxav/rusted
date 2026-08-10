@@ -19,7 +19,14 @@ fn limits(wall_ms: u64) -> Limits {
 
 async fn run(source: &str, tool: &str) -> rusted_engine::InvocationResult {
     QuickJsExecutor::new()
-        .execute_tool_with_services(source, tool, &serde_json::json!({}), &limits(1000), None)
+        .execute_tool_with_services(
+            source,
+            tool,
+            &serde_json::json!({}),
+            &limits(1000),
+            None,
+            None,
+        )
         .await
 }
 
@@ -143,7 +150,7 @@ async fn a_handler_returning_a_never_settling_promise_is_terminated() {
         description: "d", inputSchema: { type: "object" },
         handler() { return new Promise(() => {}); } } } };"#;
     let r = QuickJsExecutor::new()
-        .execute_tool_with_services(src, "t", &serde_json::json!({}), &limits(300), None)
+        .execute_tool_with_services(src, "t", &serde_json::json!({}), &limits(300), None, None)
         .await;
     assert!(
         matches!(&r.outcome, Outcome::Terminated(m) if m.contains("never")),

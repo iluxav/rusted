@@ -16,6 +16,7 @@ pub mod mcp_wire;
 pub mod memory;
 pub mod oauth;
 pub mod plans;
+pub mod secrets;
 pub mod state;
 pub mod store;
 pub mod testsupport;

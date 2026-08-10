@@ -178,7 +178,18 @@ fn load(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "function".to_string());
-    let (name, surface) = match executor.inspect(&source)? {
+    let inspection = executor.inspect(&source)?;
+    // Local mode has no database, so there is nothing to decrypt from —
+    // context.env stays undefined, and the handler fails saying so if it reads
+    // it. Saying it up front beats a puzzling undefined at request time.
+    if !inspection.config.secrets.is_empty() {
+        println!(
+            "\x1b[38;5;180m▸ this module requests secrets ({}); local mode does not inject \
+             them, so context.env is undefined\x1b[0m",
+            inspection.config.secrets.join(", ")
+        );
+    }
+    let (name, surface) = match inspection.surface {
         rusted_engine::Surface::Http(config) => (
             config.name.unwrap_or(stem),
             Served::Http(HttpTrigger {
@@ -653,7 +664,7 @@ async fn dispatch_mcp(
         crate::mcp_host::handle_message(meta, name, rev, msg, move |tool, args| async move {
             let result = state
                 .executor
-                .execute_tool_with_services(source, &tool, &args, &state.limits, None)
+                .execute_tool_with_services(source, &tool, &args, &state.limits, None, None)
                 .await;
             let stack = result
                 .stack

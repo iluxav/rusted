@@ -48,6 +48,9 @@ pub struct InvocationRecord {
 pub struct AppState {
     pub store: Store,
     pub pool: PgPool,
+    /// Encrypted per-account secrets, decrypted into `context.env` for
+    /// functions that request them.
+    pub secrets: crate::secrets::SecretStore,
     pub auth: AuthCaches,
     pub analytics: Recorder,
     pub plan_cache: PlanCache,
@@ -193,6 +196,7 @@ impl AppState {
         let workers = worker_slots();
         Self {
             store,
+            secrets: crate::secrets::SecretStore::new(pool.clone()),
             pool,
             auth: AuthCaches::default(),
             analytics,

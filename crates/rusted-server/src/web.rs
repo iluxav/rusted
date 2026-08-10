@@ -74,6 +74,8 @@ pub fn router(state: WebState) -> Router {
         .route("/console/dashboard", get(page_dashboard))
         .route("/console/invocations", get(page_invocations))
         .route("/console/keys", get(page_keys).post(key_create))
+        .route("/console/secrets", get(page_secrets).post(secret_set))
+        .route("/console/secrets/{name}", delete(secret_delete))
         .route("/console/billing", get(page_billing))
         .route(
             "/console/checkout/{code}",
@@ -444,6 +446,23 @@ struct KeysT {
 struct KeyCreatedT {
     name: String,
     token: String,
+}
+
+pub struct SecretRow {
+    name: String,
+    created: String,
+    updated: String,
+}
+
+#[derive(Template)]
+#[template(path = "secrets.html")]
+struct SecretsT {
+    /// Whether this server holds a master key at all; off, the page explains
+    /// what to configure instead of offering a form that would be refused.
+    enabled: bool,
+    /// Why the last set/delete was refused, shown above the form.
+    error: Option<String>,
+    rows: Vec<SecretRow>,
 }
 
 pub struct PlanCard {
@@ -1030,6 +1049,82 @@ async fn key_revoke(
     };
     let _ = auth::revoke_key(&state.0.app.pool, &state.0.app.auth, user.id, id).await;
     Html(String::new()).into_response()
+}
+
+// ------------------------------------------------------------------- secrets
+
+/// The whole page fragment: set and delete re-render it, so the list, the
+/// form, and any error always agree.
+async fn secrets_inner(state: &WebState, user: &User, error: Option<String>) -> String {
+    let store = &state.0.app.secrets;
+    let rows = store
+        .list(user.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|meta| SecretRow {
+            name: meta.name,
+            created: ago(meta.created_at as i64),
+            updated: ago(meta.updated_at as i64),
+        })
+        .collect();
+    SecretsT {
+        enabled: store.enabled(),
+        error,
+        rows,
+    }
+    .render()
+    .expect("secrets renders")
+}
+
+async fn page_secrets(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    match require_user(&state, &headers).await {
+        Ok(user) => {
+            let inner = secrets_inner(&state, &user, None).await;
+            console_page(&state, &headers, &user, "secrets", inner).await
+        }
+        Err(redirect) => redirect,
+    }
+}
+
+#[derive(Deserialize)]
+struct SecretForm {
+    name: String,
+    value: String,
+}
+
+async fn secret_set(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Form(form): Form<SecretForm>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    // Trimmed because paste brings whitespace along; a credential that
+    // genuinely needs surrounding whitespace does not exist.
+    let error = state
+        .0
+        .app
+        .secrets
+        .set(user.id, form.name.trim(), form.value.trim())
+        .await
+        .err();
+    Html(secrets_inner(&state, &user, error).await).into_response()
+}
+
+async fn secret_delete(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let error = state.0.app.secrets.delete(user.id, &name).await.err();
+    Html(secrets_inner(&state, &user, error).await).into_response()
 }
 
 // ------------------------------------------------------------------- billing

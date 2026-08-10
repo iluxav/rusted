@@ -72,6 +72,28 @@ declare namespace Rusted {
 		 * handler that needs it fails saying so rather than finding nothing.
 		 */
 		inbox?: Inbox;
+		/**
+		 * The secrets this module requested via `export const config`,
+		 * decrypted. Present only when the module declares `config.secrets`
+		 * and runs on a server with a secret store; each declared name is
+		 * guaranteed to be set, or the invocation is refused before the
+		 * handler runs.
+		 */
+		env?: Record<string, string>;
+	}
+
+	/**
+	 * `export const config = { … }` — read at deploy time, valid on either
+	 * surface.
+	 */
+	interface Config {
+		/**
+		 * Names of secrets to decrypt into `context.env`, e.g.
+		 * `["GITHUB_CLIENT_SECRET"]`. Set the values in the console under
+		 * Secrets. 1–64 chars of A-Z, 0-9, '_', not starting with a digit;
+		 * at most 32 names.
+		 */
+		secrets?: string[];
 	}
 
 	/** `export const http = { … }` — read at deploy time. */
@@ -117,6 +139,13 @@ declare namespace Rusted {
 		 * handler that needs it fails saying so rather than finding nothing.
 		 */
 		inbox?: Inbox;
+		/**
+		 * The secrets this module requested via `export const config`,
+		 * decrypted. Present only when the module declares `config.secrets`
+		 * and runs on a server with a secret store; each declared name is
+		 * guaranteed to be set, or the call is refused before the tool runs.
+		 */
+		env?: Record<string, string>;
 	}
 
 	/**
