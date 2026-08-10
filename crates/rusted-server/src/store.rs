@@ -58,6 +58,10 @@ pub struct FunctionRecord {
     /// at deploy time so invocation needs no re-inspection.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Callable without an API key even under --require-auth. Captured at
+    /// deploy time from the module's own declaration, for either kind.
+    #[serde(default)]
+    pub public: bool,
 }
 
 fn default_kind() -> String {
@@ -84,6 +88,8 @@ pub struct Fetched {
     pub mcp: Option<serde_json::Value>,
     /// Secret names to decrypt into `context.env` for every invocation.
     pub secrets: Vec<String>,
+    /// Whether the auth gate lets keyless callers through to this function.
+    pub public: bool,
     pub rev: u64,
 }
 
@@ -140,14 +146,16 @@ impl Store {
     /// Push keeping the function's existing trigger (default for new functions).
     /// Note the asymmetry: the trigger is preserved, but kind and mcp metadata
     /// are always reset to http/NULL — kind derives from the deployed source,
-    /// so callers deploying an mcp module must use `push_full`. Secrets always
-    /// come from the deployed source too, so they are never preserved.
+    /// so callers deploying an mcp module must use `push_full`. Secrets and
+    /// publicness always come from the deployed source too, so they are never
+    /// preserved.
     pub async fn push(
         &self,
         name: &str,
         source: &str,
         user_id: Option<Uuid>,
         secrets: &[String],
+        public: bool,
     ) -> sqlx::Result<Revision> {
         let existing: Option<HttpTrigger> =
             sqlx::query("SELECT methods, path FROM functions WHERE name = $1")
@@ -158,11 +166,19 @@ impl Store {
                     methods: row.get("methods"),
                     path: row.get("path"),
                 });
-        self.push_with_trigger(name, source, existing.unwrap_or_default(), user_id, secrets)
-            .await
+        self.push_with_trigger(
+            name,
+            source,
+            existing.unwrap_or_default(),
+            user_id,
+            secrets,
+            public,
+        )
+        .await
     }
 
     /// Push an http function with an explicit trigger.
+    #[allow(clippy::too_many_arguments)]
     pub async fn push_with_trigger(
         &self,
         name: &str,
@@ -170,9 +186,19 @@ impl Store {
         trigger: HttpTrigger,
         user_id: Option<Uuid>,
         secrets: &[String],
+        public: bool,
     ) -> sqlx::Result<Revision> {
-        self.push_full(name, source, Some(&trigger), "http", None, user_id, secrets)
-            .await
+        self.push_full(
+            name,
+            source,
+            Some(&trigger),
+            "http",
+            None,
+            user_id,
+            secrets,
+            public,
+        )
+        .await
     }
 
     /// The full push: kind selects the data-plane protocol (`"http"` or
@@ -188,6 +214,7 @@ impl Store {
         mcp: Option<&serde_json::Value>,
         user_id: Option<Uuid>,
         secrets: &[String],
+        public: bool,
     ) -> sqlx::Result<Revision> {
         let default_trigger = HttpTrigger::default();
         let trigger = trigger.unwrap_or(&default_trigger);
@@ -210,11 +237,13 @@ impl Store {
         .await?
         .get("next");
         sqlx::query(
-            "INSERT INTO functions (name, current_rev, methods, path, user_id, kind, mcp, secrets)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "INSERT INTO functions
+                 (name, current_rev, methods, path, user_id, kind, mcp, secrets, public)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (name) DO UPDATE
                  SET current_rev = $2, methods = $3, path = $4, updated_at = now(),
-                     user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7, secrets = $8",
+                     user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7,
+                     secrets = $8, public = $9",
         )
         .bind(name)
         .bind(rev)
@@ -224,6 +253,7 @@ impl Store {
         .bind(kind)
         .bind(mcp)
         .bind(secrets.to_vec())
+        .bind(public)
         .execute(&mut *tx)
         .await?;
         let created_at: i64 = sqlx::query(
@@ -259,7 +289,7 @@ impl Store {
 
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
-            "SELECT current_rev, methods, path, user_id, kind, mcp, secrets
+            "SELECT current_rev, methods, path, user_id, kind, mcp, secrets, public
              FROM functions WHERE name = $1",
         )
         .bind(name)
@@ -293,6 +323,7 @@ impl Store {
             kind: function.get("kind"),
             mcp: function.get("mcp"),
             secrets: function.get("secrets"),
+            public: function.get("public"),
         }))
     }
 
@@ -327,6 +358,7 @@ impl Store {
             kind: record.kind,
             mcp: record.mcp,
             secrets: record.secrets,
+            public: record.public,
             rev: record.current_rev,
         });
         self.cache

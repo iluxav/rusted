@@ -3309,3 +3309,61 @@ export const mcp = { tools: { sign: {
     assert_eq!(v["result"]["content"][0]["text"], "sk_42", "{v}");
     assert_ne!(v["result"]["isError"], json!(true), "{v}");
 }
+
+// ------------------------------------------------------- public functions
+
+#[tokio::test]
+async fn a_public_function_skips_the_bearer_gate() {
+    let database_url = rusted_server::testsupport::create_test_database().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = boot_full(dir, 1500, database_url, true).await;
+    let callback = r#"export const http = { public: true };
+export default async function handler(request, context) {
+    return context.json({ state: context.randomBase64Url(32) });
+}"#;
+    assert_eq!(push(&t, "oauth-cb", callback).await.status(), 200);
+    push(&t, "greet", GREET).await;
+
+    // The public function answers keyless callers — that's its point.
+    let r = t.client.post(t.data("/f/oauth-cb")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let first = r.json::<Value>().await.unwrap()["state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(first.len(), 43, "32 bytes of base64url");
+
+    // Fresh entropy per invocation, not a cached value.
+    let r = t.client.post(t.data("/f/oauth-cb")).send().await.unwrap();
+    assert_ne!(r.json::<Value>().await.unwrap()["state"], json!(first));
+
+    // A function that did not opt in still demands a key.
+    let r = t.client.post(t.data("/f/greet")).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+
+    // A missing function answers exactly like a private one.
+    let r = t.client.post(t.data("/f/nope")).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+#[tokio::test]
+async fn a_public_mcp_function_passes_the_gate_too() {
+    let database_url = rusted_server::testsupport::create_test_database().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = boot_full(dir, 1500, database_url, true).await;
+    let src = r#"export const mcp = { public: true, tools: { ping: {
+        description: "d", inputSchema: { type: "object" },
+        handler() { return "pong"; } } } };"#;
+    assert_eq!(push(&t, "open-tools", src).await.status(), 200);
+
+    let r = t
+        .client
+        .post(t.data("/f/open-tools"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["result"]["tools"][0]["name"], "ping", "{v}");
+}

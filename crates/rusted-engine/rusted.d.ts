@@ -80,6 +80,18 @@ declare namespace Rusted {
 		 * handler runs.
 		 */
 		env?: Record<string, string>;
+		/**
+		 * `length` bytes from the operating system's cryptographic random
+		 * source — for OAuth state, PKCE verifiers, nonces, and keys, where
+		 * `Math.random()` must never be used. Always present, local runs
+		 * included. Length is 1 to 1024.
+		 */
+		randomBytes(length: number): Uint8Array;
+		/**
+		 * `length` random bytes as unpadded base64url — URL- and cookie-safe.
+		 * 32 bytes (256 bits) encodes to 43 characters.
+		 */
+		randomBase64Url(length: number): string;
 	}
 
 	/**
@@ -104,6 +116,13 @@ declare namespace Rusted {
 		methods?: string[];
 		/** Route nested under /f/<name>, e.g. "/users/{id}". */
 		path?: string;
+		/**
+		 * Callable without an API key even when the server requires auth.
+		 * What an OAuth callback or webhook target needs — the third party
+		 * calling it cannot present your key. Default: whatever the server's
+		 * auth mode demands.
+		 */
+		public?: boolean;
 	}
 
 	/** `export const mcp = { … }` — the mcp surface, read at deploy time. */
@@ -146,6 +165,18 @@ declare namespace Rusted {
 		 * guaranteed to be set, or the call is refused before the tool runs.
 		 */
 		env?: Record<string, string>;
+		/**
+		 * `length` bytes from the operating system's cryptographic random
+		 * source — for OAuth state, PKCE verifiers, nonces, and keys, where
+		 * `Math.random()` must never be used. Always present, local runs
+		 * included. Length is 1 to 1024.
+		 */
+		randomBytes(length: number): Uint8Array;
+		/**
+		 * `length` random bytes as unpadded base64url — URL- and cookie-safe.
+		 * 32 bytes (256 bits) encodes to 43 characters.
+		 */
+		randomBase64Url(length: number): string;
 	}
 
 	/**

@@ -12,7 +12,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use rquickjs::{
-    AsyncContext, AsyncRuntime, Context, Ctx, Function, Module, Promise, Runtime, Value,
+    AsyncContext, AsyncRuntime, Context, Ctx, Exception, Function, Module, Promise, Runtime, Value,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -117,6 +117,11 @@ pub struct HttpConfig {
     pub methods: Option<Vec<String>>,
     #[serde(default)]
     pub path: Option<String>,
+    /// Callable without an API key even when the server requires auth —
+    /// what an OAuth callback or webhook target needs, since the third
+    /// party calling it cannot present a key.
+    #[serde(default)]
+    pub public: bool,
 }
 
 /// One tool's deploy-time metadata. At inspect time the handler function is
@@ -301,6 +306,9 @@ const GLUE: &str = r#"(handler, requestJson, envJson) => {
     inbox: globalThis.__rustedInbox,
     // Only the secrets the module asked for via `export const config`.
     env: envJson ? JSON.parse(envJson) : undefined,
+    // OS-backed CSPRNG — Math.random() must never mint credentials.
+    randomBytes: (n) => new Uint8Array(globalThis.__rustedRandomBytes(n)),
+    randomBase64Url: (n) => globalThis.__rustedRandomBase64Url(n),
   };
   return Promise.resolve(handler(request, context)).then(
     (r) => {
@@ -342,6 +350,9 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson) => {
     inbox: globalThis.__rustedInbox,
     // Only the secrets the module asked for via `export const config`.
     env: envJson ? JSON.parse(envJson) : undefined,
+    // OS-backed CSPRNG — Math.random() must never mint credentials.
+    randomBytes: (n) => new Uint8Array(globalThis.__rustedRandomBytes(n)),
+    randomBase64Url: (n) => globalThis.__rustedRandomBase64Url(n),
   };
   return Promise.resolve()
     .then(() => {
@@ -799,6 +810,46 @@ fn install_fetch_async<'js>(
         .map_err(|e| exception_message(ctx, e))
 }
 
+/// Backs `context.randomBytes` / `context.randomBase64Url` with the OS's
+/// CSPRNG. Engine-provided rather than a host service on purpose: randomness
+/// has no owner to scope to, so it exists everywhere — local runs included —
+/// and QuickJS's `Math.random()` never has to be trusted with OAuth state,
+/// PKCE verifiers, or nonces.
+fn install_random(ctx: &Ctx<'_>) -> Result<(), String> {
+    fn fill(ctx: &Ctx<'_>, len: f64) -> rquickjs::Result<Vec<u8>> {
+        // Bounded because every byte is a syscall-backed allocation; 1024 is
+        // far beyond any nonce, state, or key a handler legitimately mints.
+        if len.fract() != 0.0 || !(1.0..=1024.0).contains(&len) {
+            return Err(Exception::throw_message(
+                ctx,
+                "random length must be an integer from 1 to 1024",
+            ));
+        }
+        let mut buf = vec![0u8; len as usize];
+        getrandom::fill(&mut buf).expect("the OS random source is available");
+        Ok(buf)
+    }
+    let bytes = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, len: f64| -> rquickjs::Result<Vec<u8>> { fill(&ctx, len) },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedRandomBytes", bytes)
+        .map_err(|e| exception_message(ctx, e))?;
+    let base64url = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, len: f64| -> rquickjs::Result<String> {
+            use base64::Engine as _;
+            fill(&ctx, len).map(|buf| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf))
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedRandomBase64Url", base64url)
+        .map_err(|e| exception_message(ctx, e))
+}
+
 fn restricted_runtime(limits: &Limits) -> (Runtime, Arc<AtomicBool>) {
     let rt = Runtime::new().expect("quickjs runtime");
     rt.set_memory_limit(limits.memory_bytes);
@@ -848,6 +899,10 @@ fn load_module_raw<'js>(
 ) -> Result<Module<'js, rquickjs::module::Evaluated>, String> {
     ctx.eval::<(), _>(CONSOLE_PRELUDE)
         .map_err(|e| exception_message(ctx, e))?;
+    // Before evaluation, so top-level code can already draw randomness. This
+    // is the choke point every path — execute, tools, verify, inspect — goes
+    // through, which is what keeps the capability universally present.
+    install_random(ctx)?;
     let declared = match bytecode {
         // SAFETY: the bytes came from `compile` in this same process, so the
         // QuickJS build that reads them is the one that wrote them.

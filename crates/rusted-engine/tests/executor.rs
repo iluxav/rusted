@@ -765,3 +765,38 @@ export default async function handler(request, context) { return context.json({}
         "should say what to do instead: {message}"
     );
 }
+
+#[test]
+fn random_bytes_come_from_the_host_and_never_repeat() {
+    let src = r#"export default async function handler(request, context) {
+        const a = context.randomBytes(32);
+        const b = context.randomBytes(32);
+        const s = context.randomBase64Url(32);
+        return context.json({
+            len: a.length,
+            typed: a instanceof Uint8Array,
+            distinct: a.join(",") !== b.join(","),
+            b64len: s.length,
+            urlSafe: /^[A-Za-z0-9_-]+$/.test(s),
+        });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(
+        success(&r.outcome),
+        r#"{"len":32,"typed":true,"distinct":true,"b64len":43,"urlSafe":true}"#
+    );
+}
+
+#[test]
+fn random_length_is_bounded_and_integral() {
+    let src = r#"export default async function handler(request, context) {
+        const refused = [];
+        for (const n of [0, -1, 1025, 3.5]) {
+            try { context.randomBytes(n); refused.push("accepted " + n); }
+            catch (e) { refused.push("refused"); }
+        }
+        return refused.join(",");
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(success(&r.outcome), "refused,refused,refused,refused");
+}

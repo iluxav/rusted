@@ -730,9 +730,12 @@ async fn call_run(
     }
 }
 
-/// With `--require-auth`, every data-plane call needs a valid API key. The
-/// verdict comes from the in-memory cache (see [`crate::auth`]) — steady-state
-/// traffic never touches Postgres.
+/// With `--require-auth`, every data-plane call needs a valid API key — except
+/// calls to a function that declared itself public, which is how an OAuth
+/// callback or webhook target works: the third party calling it cannot present
+/// the owner's key. The verdict comes from the in-memory caches (see
+/// [`crate::auth`] and the store's read cache) — steady-state traffic never
+/// touches Postgres.
 async fn bearer_gate(
     State(state): Shared,
     request: axum::extract::Request,
@@ -751,6 +754,17 @@ async fn bearer_gate(
         None => false,
     };
     if !ok {
+        // Publicness comes from the stored record, never the request; only
+        // /f/<name> routes can carry it, so temp runs stay gated. A missing
+        // function answers 401 like everything else — an unauthenticated
+        // probe learns nothing about what exists.
+        if let Some(name) = public_function_candidate(request.uri().path()) {
+            if let Ok(Some(hit)) = state.store.fetch(name).await {
+                if hit.public {
+                    return next.run(request).await;
+                }
+            }
+        }
         return (
             StatusCode::UNAUTHORIZED,
             [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
@@ -762,6 +776,15 @@ async fn bearer_gate(
             .into_response();
     }
     next.run(request).await
+}
+
+/// The function name a data-plane path targets, when it's a path publicness
+/// can apply to.
+fn public_function_candidate(path: &str) -> Option<&str> {
+    path.strip_prefix("/f/")?
+        .split('/')
+        .next()
+        .filter(|name| !name.is_empty())
 }
 
 pub fn data_router(state: Arc<AppState>) -> Router {
@@ -934,6 +957,7 @@ pub async fn deploy_function(
                     Some(&meta),
                     Some(user_id),
                     &secrets,
+                    mcp_config.public,
                 )
                 .await
                 .map_err(|e| {
@@ -986,13 +1010,20 @@ pub async fn deploy_function(
         Some(trigger) => {
             state
                 .store
-                .push_with_trigger(&name, &source, trigger, Some(user_id), &secrets)
+                .push_with_trigger(
+                    &name,
+                    &source,
+                    trigger,
+                    Some(user_id),
+                    &secrets,
+                    http_config.public,
+                )
                 .await
         }
         None => {
             state
                 .store
-                .push(&name, &source, Some(user_id), &secrets)
+                .push(&name, &source, Some(user_id), &secrets, http_config.public)
                 .await
         }
     };
@@ -1033,6 +1064,7 @@ pub async fn deploy_function(
         "methods": trigger.methods,
         "path": trigger.path,
         "secrets": secrets,
+        "public": http_config.public,
         "limits": limits_json(state, &plan),
         "url": state.data_url(&route),
     }))
@@ -1159,6 +1191,7 @@ async fn function_detail(
         "revisions": record.revisions,
         "kind": record.kind,
         "secrets": record.secrets,
+        "public": record.public,
         "url": state.data_url(&format!("/f/{name}")),
         "recent": recent,
     });

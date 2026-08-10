@@ -66,6 +66,8 @@ export default async function handler(request, context) { ... }
 
 Explicit flags override the file's `http` export. Unknown keys fail verify — typos can't deploy silently. Being real code (not comments), the declaration survives bundling.
 
+One more key that export takes: `public: true` exempts the function from `--require-auth`. An OAuth callback or a webhook target is called by a third party that cannot present your API key, so the function itself declares that keyless callers are expected — the auth gate consults the stored record, never anything the caller sent. On a server that doesn't require auth, every function is reachable anyway and the flag changes nothing. (`export const mcp` has taken `public` since MCP functions landed; it now passes the same gate.)
+
 ### MCP functions
 
 The other surface a file can export: tools instead of a request handler. The same push makes it a live MCP server at the same `/f/<name>` URL:
@@ -313,6 +315,19 @@ Set the values in the console under **Secrets**. Names are env-style — `A-Z`, 
 Values are sealed with AES-256-GCM before they reach Postgres, under a key from the server's environment (`RUSTED_SECRETS_KEY`, 64 hex chars — `openssl rand -hex 32`). The database never holds a plaintext credential and the key never lives in the database, so neither alone reveals anything. A server without the key refuses to store secrets and says what to configure.
 
 > Like `context.inbox`, `context.env` is absent under `rusted run` — local mode has no store to decrypt from, and says so at startup if the module requests secrets.
+
+## Randomness
+
+`Math.random()` is fine for jitter and dice; it is not fine for anything an attacker gains by predicting — and OAuth state, PKCE verifiers, session tokens, and encryption nonces are exactly that. The host lends the real thing instead:
+
+```js
+const bytes = context.randomBytes(32);       // Uint8Array, straight from the OS CSPRNG
+const state = context.randomBase64Url(32);   // the same 256 bits as 43 URL- and cookie-safe chars
+```
+
+These draw from the operating system's cryptographic random source (`getrandom` on the host — the same pool `openssl rand` reads), not from the JavaScript engine. Lengths are 1 to 1024 bytes; anything else throws. Unlike `context.inbox` and `context.env`, randomness needs no owner to scope to, so it is present everywhere — `rusted run` included — and the same calls work in mcp tool handlers.
+
+The independence matters as much as the unpredictability: mint a fresh value per purpose — one for the OAuth `state`, another for the PKCE verifier, another per encryption nonce — rather than deriving one from another.
 
 ## Using npm packages
 
