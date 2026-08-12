@@ -214,12 +214,12 @@ declare namespace Rusted {
 		 * (local seals use a per-process key, so they expire with the dev
 		 * server); absent in ad-hoc runs.
 		 */
-		seal?(payload: unknown, options: { keySecret: string; context?: string }): Promise<string>;
+		seal?: (payload: unknown, options: { keySecret: string; context?: string }) => Promise<string>;
 		/**
 		 * Opens a sealed value: the payload, or null if the seal is invalid,
 		 * tampered with, or keyed differently. Pass the same `context`.
 		 */
-		open?<T = unknown>(sealed: string, options: { keySecret: string; context?: string }): Promise<T | null>;
+		open?: <T = unknown>(sealed: string, options: { keySecret: string; context?: string }) => Promise<T | null>;
 		/** `application/x-www-form-urlencoded` — query strings and form bodies. */
 		formEncode(values: Record<string, string>): string;
 		/** A redirect response. Status defaults to 302. */
@@ -357,12 +357,12 @@ declare namespace Rusted {
 		 * (local seals use a per-process key, so they expire with the dev
 		 * server); absent in ad-hoc runs.
 		 */
-		seal?(payload: unknown, options: { keySecret: string; context?: string }): Promise<string>;
+		seal?: (payload: unknown, options: { keySecret: string; context?: string }) => Promise<string>;
 		/**
 		 * Opens a sealed value: the payload, or null if the seal is invalid,
 		 * tampered with, or keyed differently. Pass the same `context`.
 		 */
-		open?<T = unknown>(sealed: string, options: { keySecret: string; context?: string }): Promise<T | null>;
+		open?: <T = unknown>(sealed: string, options: { keySecret: string; context?: string }) => Promise<T | null>;
 		/** `application/x-www-form-urlencoded` — query strings and form bodies. */
 		formEncode(values: Record<string, string>): string;
 		/**

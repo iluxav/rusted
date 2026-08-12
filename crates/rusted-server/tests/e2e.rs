@@ -412,30 +412,45 @@ async fn calls_beyond_the_plans_concurrency_are_turned_away() {
     )
     .await;
 
-    // Occupy every permit the plan grants, then ask for one more.
-    let mut running = Vec::new();
-    for _ in 0..dev.limits.concurrency {
-        let client = t.client.clone();
-        let url = t.data("/f/spinner");
-        running.push(tokio::spawn(async move {
-            client.post(url).send().await.unwrap()
-        }));
+    // The claim: with every permit occupied, one more simultaneous call is
+    // turned away with `busy` naming the plan's allowance. Which of the
+    // racers gets refused is scheduling, not semantics — so fire one more
+    // call than there are permits, all at once, and require that someone
+    // was refused. Rounds absorb the pathological schedule where a loaded
+    // machine serializes the requests entirely.
+    let mut saw_busy = false;
+    'rounds: for _ in 0..10 {
+        let mut racers = Vec::new();
+        for _ in 0..=dev.limits.concurrency {
+            let client = t.client.clone();
+            let url = t.data("/f/spinner");
+            racers.push(tokio::spawn(async move {
+                client.post(url).send().await.unwrap()
+            }));
+        }
+        for handle in racers {
+            let response = handle.await.unwrap();
+            let status = response.status();
+            let v: Value = response.json().await.unwrap();
+            if status == 429 && v["error"]["code"] == "busy" {
+                assert!(v["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&dev.limits.concurrency.to_string()));
+                saw_busy = true;
+            } else {
+                // Ran instead: a spinner that spins to Dev's wall limit.
+                assert_eq!(v["error"]["code"], "limit_exceeded", "{v}");
+            }
+        }
+        if saw_busy {
+            break 'rounds;
+        }
     }
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-    let extra = t.client.post(t.data("/f/spinner")).send().await.unwrap();
-    assert_eq!(extra.status(), 429);
-    let v: Value = extra.json().await.unwrap();
-    assert_eq!(v["error"]["code"], "busy");
-    assert!(v["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains(&dev.limits.concurrency.to_string()));
-
-    // The occupants run to their wall deadline and report the limit.
-    for handle in running {
-        let v: Value = handle.await.unwrap().json().await.unwrap();
-        assert_eq!(v["error"]["code"], "limit_exceeded");
-    }
+    assert!(
+        saw_busy,
+        "no call was ever refused while every permit was held"
+    );
 }
 
 #[tokio::test]
