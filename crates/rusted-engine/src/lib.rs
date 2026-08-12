@@ -439,6 +439,22 @@ const INBOX_PRELUDE: &str = r#"(() => {
 /// shared by [`GLUE`] and [`TOOL_GLUE`] so the two cannot drift. An empty caps
 /// string — undeclared capabilities, ad-hoc runs — yields undefined for both.
 const CAPS_PRELUDE: &str = r#"(() => {
+  globalThis.__rustedSealApi = () => {
+    if (!globalThis.__rustedSealOp) return { seal: undefined, open: undefined };
+    const call = async (op) => {
+      const r = JSON.parse(await globalThis.__rustedSealOp(JSON.stringify(op)));
+      if (r && r.error) throw new Error(r.error);
+      return r;
+    };
+    return {
+      seal: async (payload, options) =>
+        (await call({ op: "seal", payload, ...(options || {}) })).sealed,
+      open: async (sealed, options) => {
+        const r = await call({ op: "open", sealed: String(sealed), ...(options || {}) });
+        return r.valid ? r.payload : null;
+      },
+    };
+  };
   globalThis.__rustedCaps = (capsJson) => {
     if (!capsJson) return { state: undefined, objects: undefined };
     const caps = JSON.parse(capsJson);
@@ -503,6 +519,17 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
     params: req.params || {},
     body: req.body,
     json: async () => JSON.parse(req.body),
+    cookies: (() => {
+      const jar = {};
+      for (const part of String(req.headers.cookie || "").split(";")) {
+        const eq = part.indexOf("=");
+        if (eq < 0) continue;
+        const name = part.slice(0, eq).trim();
+        // First occurrence wins, matching how servers conventionally read.
+        if (name && !(name in jar)) jar[name] = part.slice(eq + 1).trim();
+      }
+      return jar;
+    })(),
   };
   const respond = (body, contentType, init) => ({
     __rustedResponse: true,
@@ -512,6 +539,7 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
     headers: (init && init.headers) || {},
   });
   const caps = globalThis.__rustedCaps(capsJson);
+  const sealApi = globalThis.__rustedSealApi();
   const context = {
     json: (o, init) => respond(JSON.stringify(o), "application/json", init),
     text: (s, init) => respond(String(s), "text/plain; charset=utf-8", init),
@@ -523,6 +551,37 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
     // OS-backed CSPRNG — Math.random() must never mint credentials.
     randomBytes: (n) => new Uint8Array(globalThis.__rustedRandomBytes(n)),
     randomBase64Url: (n) => globalThis.__rustedRandomBase64Url(n),
+    // Native digest/codec primitives, so credential handling needs neither an
+    // npm crypto package nor interpreter-speed loops.
+    sha256: (data) => new Uint8Array(globalThis.__rustedSha256(data)),
+    toBase64Url: (bytes) => globalThis.__rustedToBase64Url(bytes),
+    fromBase64Url: (raw) => new Uint8Array(globalThis.__rustedFromBase64Url(raw)),
+    toHex: (bytes) => globalThis.__rustedToHex(bytes),
+    fromHex: (raw) => new Uint8Array(globalThis.__rustedFromHex(raw)),
+    timingSafeEqual: (a, b) => globalThis.__rustedTimingSafeEqual(a, b),
+    // Host-side authenticated encryption keyed by a vault secret; absent
+    // where there is no vault to key it from.
+    seal: sealApi.seal,
+    open: sealApi.open,
+    // HTTP ergonomics: the patterns every browser-facing handler repeats.
+    redirect: (url, init) => respond("", null, {
+      status: (init && init.status) || 302,
+      headers: { ...((init && init.headers) || {}), location: String(url) },
+    }),
+    setCookie: (name, value, options) => {
+      const o = options || {};
+      const parts = [String(name) + "=" + String(value ?? "")];
+      parts.push("Path=" + (o.path || "/"));
+      if (o.maxAge !== undefined) parts.push("Max-Age=" + Math.max(0, Math.floor(o.maxAge)));
+      if (o.httpOnly !== false) parts.push("HttpOnly");
+      parts.push("SameSite=" + (o.sameSite || "Lax"));
+      if (o.secure !== false) parts.push("Secure");
+      if (o.domain) parts.push("Domain=" + o.domain);
+      return parts.join("; ");
+    },
+    formEncode: (values) => Object.entries(values || {})
+      .map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(String(v)))
+      .join("&"),
     // Present only when declared via `export const config` and supplied by
     // the host — an undeclared capability is absent, not broken.
     state: caps.state,
@@ -563,6 +622,7 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
   const logs = globalThis.__rustedLogs || [];
   const tool = ns.mcp && ns.mcp.tools ? ns.mcp.tools[toolName] : undefined;
   const caps = globalThis.__rustedCaps(capsJson);
+  const sealApi = globalThis.__rustedSealApi();
   const context = {
     // Absent when the host lends no services — reading it then is a clearer
     // failure than a function that silently finds nothing.
@@ -572,6 +632,21 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
     // OS-backed CSPRNG — Math.random() must never mint credentials.
     randomBytes: (n) => new Uint8Array(globalThis.__rustedRandomBytes(n)),
     randomBase64Url: (n) => globalThis.__rustedRandomBase64Url(n),
+    // Native digest/codec primitives, so credential handling needs neither an
+    // npm crypto package nor interpreter-speed loops.
+    sha256: (data) => new Uint8Array(globalThis.__rustedSha256(data)),
+    toBase64Url: (bytes) => globalThis.__rustedToBase64Url(bytes),
+    fromBase64Url: (raw) => new Uint8Array(globalThis.__rustedFromBase64Url(raw)),
+    toHex: (bytes) => globalThis.__rustedToHex(bytes),
+    fromHex: (raw) => new Uint8Array(globalThis.__rustedFromHex(raw)),
+    timingSafeEqual: (a, b) => globalThis.__rustedTimingSafeEqual(a, b),
+    // Host-side authenticated encryption keyed by a vault secret; absent
+    // where there is no vault to key it from.
+    seal: sealApi.seal,
+    open: sealApi.open,
+    formEncode: (values) => Object.entries(values || {})
+      .map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(String(v)))
+      .join("&"),
     // Present only when declared via `export const config` and supplied by
     // the host — an undeclared capability is absent, not broken.
     state: caps.state,
@@ -947,6 +1022,17 @@ pub trait HostServices: Send + Sync {
         let _ = (binding, op_json);
         Box::pin(async { Err("object storage is not available on this host".to_string()) })
     }
+
+    /// One `context.seal`/`context.open` operation: authenticated encryption
+    /// performed host-side, keyed by one of the owner's vault secrets — the
+    /// key material never enters JavaScript.
+    fn seal_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        let _ = op_json;
+        Box::pin(async { Err("sealing is not available on this host".to_string()) })
+    }
 }
 
 /// Sums the CPU actually burned by a future.
@@ -1029,10 +1115,11 @@ fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Res
         .set("__rustedStateOp", state_native)
         .map_err(|e| exception_message(ctx, e))?;
 
+    let object_services = services.clone();
     let object_native = Function::new(
         ctx.clone(),
         rquickjs::function::Async(move |binding: String, op_json: String| {
-            let services = services.clone();
+            let services = object_services.clone();
             async move {
                 match services.object_op(binding, op_json).await {
                     Ok(result) => result,
@@ -1044,6 +1131,23 @@ fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Res
     .map_err(|e| exception_message(ctx, e))?;
     ctx.globals()
         .set("__rustedObjectOp", object_native)
+        .map_err(|e| exception_message(ctx, e))?;
+
+    let seal_native = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |op_json: String| {
+            let services = services.clone();
+            async move {
+                match services.seal_op(op_json).await {
+                    Ok(result) => result,
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                }
+            }
+        }),
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedSealOp", seal_native)
         .map_err(|e| exception_message(ctx, e))
 }
 
@@ -1141,6 +1245,102 @@ fn install_random(ctx: &Ctx<'_>) -> Result<(), String> {
         .map_err(|e| exception_message(ctx, e))
 }
 
+/// The bytes a codec native was handed: a UTF-8 string or a Uint8Array.
+/// Anything else is the caller's bug, named rather than coerced.
+fn value_bytes(ctx: &Ctx<'_>, value: &Value<'_>) -> rquickjs::Result<Vec<u8>> {
+    if let Some(s) = value.as_string() {
+        return Ok(s.to_string()?.into_bytes());
+    }
+    if let Some(object) = value.as_object() {
+        if let Ok(array) = rquickjs::TypedArray::<u8>::from_object(object.clone()) {
+            if let Some(bytes) = array.as_bytes() {
+                return Ok(bytes.to_vec());
+            }
+        }
+    }
+    Err(Exception::throw_message(
+        ctx,
+        "expected a string or Uint8Array",
+    ))
+}
+
+/// Backs `context.sha256`, the base64url/hex codecs, and `timingSafeEqual` —
+/// the primitives every credential-handling function otherwise imports an npm
+/// package (and pays interpreter time) for. Engine-provided, like randomness:
+/// present everywhere, local runs included.
+fn install_codec<'js>(ctx: &Ctx<'js>) -> Result<(), String> {
+    use base64::Engine as _;
+    let set = |name: &str, f: Function<'js>| -> Result<(), String> {
+        ctx.globals()
+            .set(name, f)
+            .map_err(|e| exception_message(ctx, e))
+    };
+    let sha256 = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, value: Value<'_>| -> rquickjs::Result<Vec<u8>> {
+            Ok(sha2::Sha256::digest(value_bytes(&ctx, &value)?).to_vec())
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedSha256", sha256)?;
+
+    let to_b64u = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, value: Value<'_>| -> rquickjs::Result<String> {
+            Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value_bytes(&ctx, &value)?))
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedToBase64Url", to_b64u)?;
+
+    let from_b64u = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, raw: String| -> rquickjs::Result<Vec<u8>> {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(raw.as_bytes())
+                .map_err(|_| Exception::throw_message(&ctx, "invalid base64url"))
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedFromBase64Url", from_b64u)?;
+
+    let to_hex = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, value: Value<'_>| -> rquickjs::Result<String> {
+            Ok(hex::encode(value_bytes(&ctx, &value)?))
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedToHex", to_hex)?;
+
+    let from_hex = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, raw: String| -> rquickjs::Result<Vec<u8>> {
+            hex::decode(raw.as_bytes()).map_err(|_| Exception::throw_message(&ctx, "invalid hex"))
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedFromHex", from_hex)?;
+
+    // Length-independent by construction: the digests are compared, not the
+    // inputs, so neither content nor length leaks through timing — which an
+    // interpreted-JS "constant time" loop cannot actually promise.
+    let timing_safe = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, a: Value<'_>, b: Value<'_>| -> rquickjs::Result<bool> {
+            let (a, b) = (value_bytes(&ctx, &a)?, value_bytes(&ctx, &b)?);
+            let (da, db) = (sha2::Sha256::digest(&a), sha2::Sha256::digest(&b));
+            let mut diff = (a.len() ^ b.len()) as u8;
+            for (x, y) in da.iter().zip(db.iter()) {
+                diff |= x ^ y;
+            }
+            Ok(diff == 0)
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedTimingSafeEqual", timing_safe)
+}
+
 fn restricted_runtime(limits: &Limits) -> (Runtime, Arc<AtomicBool>) {
     let rt = Runtime::new().expect("quickjs runtime");
     rt.set_memory_limit(limits.memory_bytes);
@@ -1196,6 +1396,7 @@ fn load_module_raw<'js>(
     // is the choke point every path — execute, tools, verify, inspect — goes
     // through, which is what keeps the capability universally present.
     install_random(ctx)?;
+    install_codec(ctx)?;
     let declared = match bytecode {
         // SAFETY: the bytes came from `compile` in this same process, so the
         // QuickJS build that reads them is the one that wrote them.

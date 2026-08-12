@@ -384,6 +384,31 @@ These draw from the operating system's cryptographic random source (`getrandom` 
 
 The independence matters as much as the unpredictability: mint a fresh value per purpose — one for the OAuth `state`, another for the PKCE verifier, another per encryption nonce — rather than deriving one from another.
 
+Alongside it, the primitives credential handling always ends up needing, native rather than npm-imported: `context.sha256(data)` (string or bytes → `Uint8Array`), `context.toBase64Url` / `fromBase64Url` and `toHex` / `fromHex`, and `context.timingSafeEqual(a, b)` — compare tokens and signatures with that, never `===`; an interpreted "constant-time" loop isn't one. A PKCE challenge is now one line: `context.toBase64Url(context.sha256(verifier))`.
+
+## Sealed values
+
+Sessions, OAuth state, and anything else a function hands to a browser and must trust when it comes back wants authenticated encryption. `context.seal` does it host-side, keyed by one of your vault secrets:
+
+```js
+const cookie = await context.seal(
+  { userId, expiresAt },
+  { keySecret: "AUTH_COOKIE_KEY", context: "myapp:session:v1" },
+);
+// later, on any request:
+const session = await context.open(request.cookies[NAME], {
+  keySecret: "AUTH_COOKIE_KEY",
+  context: "myapp:session:v1",
+});
+if (!session) return context.json({ error: "not_authenticated" }, { status: 401 });
+```
+
+The payload is any JSON value up to 16 KiB; the result is compact base64url, fit for a cookie. `open` answers the payload or `null` — tampering, a different key, and a different `context` string are all the same silent null, so a forger learns nothing about which check refused them. The `context` option is authenticated data: a value sealed for one purpose cannot be replayed into another.
+
+Two properties worth noticing: the key secret does **not** need to appear in `config.secrets` — the module can seal with a key it can never read, which is strictly better than decrypting cookies with a key sitting in `context.env` — and the cipher is native AES-256-GCM instead of an interpreted JavaScript implementation burning your execution budget on every request. Under `rusted run`, sealing works against a per-process key: seals survive hot reloads and expire with the dev server.
+
+For the HTTP chores around all this, the glue carries `request.cookies` (parsed), `context.redirect(url)`, `context.setCookie(name, value, options)` (secure, HttpOnly, SameSite=Lax by default), and `context.formEncode(values)` for query strings and form bodies.
+
 ## Using npm packages
 
 The runtime executes exactly one file — `import` is rejected at push time. `rusted run` and `rusted build` bundle for you, so npm packages just work:
@@ -398,7 +423,7 @@ rusted push index.js      # deploy it — bundled on the way
 
 Bundling targets a neutral platform, so a dependency reaching for a Node builtin (`fs`, `http`, …) fails at build time rather than at runtime — those don't exist here. Pure-JS libraries work; keep an eye on bundle size, since source-size limits are part of the platform's design.
 
-That includes crypto. There is no `node:crypto`, no `Buffer`, and no WebCrypto either — `crypto.subtle` is a browser/Node API this runtime doesn't have. For hashing, HMAC, or signing (cookie signatures, webhook verification), pick a pure-JS implementation such as [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) rather than anything wrapping a platform API; it bundles in a few KB. An OAuth token exchange needs none of this — that's plain `fetch` with a form body, plus [secrets](#secrets) for the client secret.
+That includes crypto. There is no `node:crypto`, no `Buffer`, and no WebCrypto either — `crypto.subtle` is a browser/Node API this runtime doesn't have. Before reaching for a package, check what the host already lends: [`context.sha256`, base64url/hex codecs, `timingSafeEqual`](#randomness), [`context.seal`/`open`](#sealed-values) for authenticated encryption, and [`context.randomBytes`](#randomness) — together they cover cookies, PKCE, checksums, and token comparison with zero dependencies. For anything beyond that (HMAC variants, other curves), pick a pure-JS implementation such as [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) rather than anything wrapping a platform API; it bundles in a few KB.
 
 ## License
 

@@ -62,6 +62,9 @@ pub struct LocalServices {
     transfers: Mutex<HashMap<String, Transfer>>,
     /// `http://127.0.0.1:<port>`, known only after the listener binds.
     base_url: OnceLock<String>,
+    /// Per-process salt for `context.seal`: local seals work across hot
+    /// reloads and expire with the dev server, like local state.
+    seal_salt: String,
 }
 
 impl LocalServices {
@@ -78,6 +81,7 @@ impl LocalServices {
             objects_root,
             transfers: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
+            seal_salt: crate::auth::random_token(32),
         }
     }
 
@@ -489,6 +493,19 @@ impl rusted_engine::HostServices for LocalServices {
         Box::pin(self.state_op(op_json))
     }
 
+    fn seal_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async move {
+            let op = crate::secrets::SealOp::parse(&op_json)?;
+            // No vault locally: the key derives from a per-process salt plus
+            // the requested name, so different keySecrets still seal
+            // differently and nothing survives a dev-server restart.
+            op.perform(&format!("{}:{}", self.seal_salt, op.key_secret()))
+        })
+    }
+
     fn object_op(
         &self,
         binding: String,
@@ -627,6 +644,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted["deleted"], true);
+    }
+
+    /// Local seals round-trip within the process and differ per keySecret,
+    /// with no vault involved.
+    #[tokio::test]
+    async fn local_seal_round_trips_per_process() {
+        use rusted_engine::HostServices as _;
+        let s = services();
+        let sealed_raw = s
+            .seal_op(json!({"op":"seal","payload":{"n":1},"keySecret":"COOKIE_KEY"}).to_string())
+            .await
+            .unwrap();
+        let sealed: Value = serde_json::from_str(&sealed_raw).unwrap();
+        let opened_raw = s
+            .seal_op(
+                json!({"op":"open","sealed":sealed["sealed"],"keySecret":"COOKIE_KEY"}).to_string(),
+            )
+            .await
+            .unwrap();
+        let opened: Value = serde_json::from_str(&opened_raw).unwrap();
+        assert_eq!(opened["valid"], true);
+        assert_eq!(opened["payload"]["n"], 1);
+        // A different keySecret is a different key.
+        let other_raw = s
+            .seal_op(
+                json!({"op":"open","sealed":sealed["sealed"],"keySecret":"OTHER_KEY"}).to_string(),
+            )
+            .await
+            .unwrap();
+        let other: Value = serde_json::from_str(&other_raw).unwrap();
+        assert_eq!(other["valid"], false);
     }
 
     #[tokio::test]

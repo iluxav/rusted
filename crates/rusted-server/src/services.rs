@@ -210,6 +210,21 @@ impl rusted_engine::HostServices for OwnerScopedServices {
         Box::pin(run_state_op(self, op_json))
     }
 
+    fn seal_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async move {
+            let op = crate::secrets::SealOp::parse(&op_json)?;
+            // The key secret is resolved from the vault and used here — it
+            // never has to be declared in config.secrets, so the key material
+            // can stay entirely outside JavaScript.
+            let names = [op.key_secret().to_string()];
+            let material = self.state.secrets.env_for(self.user_id, &names).await?;
+            op.perform(&material[&names[0]])
+        })
+    }
+
     fn object_op(
         &self,
         binding: String,

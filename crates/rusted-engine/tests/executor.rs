@@ -893,3 +893,110 @@ fn undeclared_capabilities_are_absent_from_context() {
         r#"{"state":"undefined","objects":"undefined"}"#
     );
 }
+
+#[test]
+fn digest_and_codec_primitives_are_native_and_correct() {
+    let src = r#"export default async function handler(request, context) {
+        const abc = context.sha256("abc");
+        const roundTrip = context.fromBase64Url(context.toBase64Url(new Uint8Array([0, 251, 255])));
+        // PKCE challenge in one line — the reason these exist.
+        const challenge = context.toBase64Url(context.sha256("some-verifier"));
+        let bad = "no";
+        try { context.fromHex("zz"); } catch (e) { bad = e.message; }
+        return context.json({
+            abcHex: context.toHex(abc),
+            typed: abc instanceof Uint8Array,
+            roundTrip: Array.from(roundTrip),
+            challengeLen: challenge.length,
+            urlSafe: /^[A-Za-z0-9_-]+$/.test(challenge),
+            bad,
+        });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    let v: serde_json::Value = serde_json::from_str(success(&r.outcome)).unwrap();
+    // The NIST test vector for SHA-256("abc").
+    assert_eq!(
+        v["abcHex"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(v["typed"], true);
+    assert_eq!(v["roundTrip"], serde_json::json!([0, 251, 255]));
+    assert_eq!(v["challengeLen"], 43);
+    assert_eq!(v["urlSafe"], true);
+    assert_eq!(v["bad"], "invalid hex");
+}
+
+#[test]
+fn timing_safe_equal_compares_without_caring_how() {
+    let src = r#"export default async function handler(request, context) {
+        return context.json({
+            same: context.timingSafeEqual("state-token", "state-token"),
+            different: context.timingSafeEqual("state-token", "state-tokeN"),
+            lengths: context.timingSafeEqual("short", "longer-value"),
+            bytes: context.timingSafeEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2])),
+        });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(
+        success(&r.outcome),
+        r#"{"same":true,"different":false,"lengths":false,"bytes":true}"#
+    );
+}
+
+#[test]
+fn http_sugar_builds_cookies_redirects_and_forms() {
+    let src = r#"export default async function handler(request, context) {
+        if (request.query.mode === "redirect") {
+            return context.redirect("https://example.com/done?a=1", {
+                headers: { "set-cookie": context.setCookie("session", "v", { maxAge: 60 }) },
+            });
+        }
+        return context.json({
+            cookies: request.cookies,
+            plain: context.setCookie("s", "v", { maxAge: 90.9, secure: false, sameSite: "Strict", path: "/x" }),
+            form: context.formEncode({ "a b": "c&d", plain: "1" }),
+        });
+    }"#;
+    let mut req = HttpRequest::post_json("{}");
+    req.headers.insert(
+        "cookie".into(),
+        "first=1; second=two ; malformed; first=shadowed".into(),
+    );
+    let r = exec().execute(src, &req, &Limits::default());
+    let v: serde_json::Value = serde_json::from_str(success(&r.outcome)).unwrap();
+    assert_eq!(
+        v["cookies"],
+        serde_json::json!({"first": "1", "second": "two"})
+    );
+    assert_eq!(
+        v["plain"],
+        "s=v; Path=/x; Max-Age=90; HttpOnly; SameSite=Strict"
+    );
+    assert_eq!(v["form"], "a%20b=c%26d&plain=1");
+
+    let mut req = HttpRequest::post_json("{}");
+    req.query.insert("mode".into(), "redirect".into());
+    let r = exec().execute(src, &req, &Limits::default());
+    assert_eq!(r.status, Some(302));
+    assert_eq!(
+        r.headers.get("location").map(String::as_str),
+        Some("https://example.com/done?a=1")
+    );
+    let cookie = r.headers.get("set-cookie").unwrap();
+    assert_eq!(
+        cookie,
+        "session=v; Path=/; Max-Age=60; HttpOnly; SameSite=Lax; Secure"
+    );
+}
+
+#[test]
+fn seal_is_absent_without_a_host_vault() {
+    let src = r#"export default async function handler(request, context) {
+        return context.json({ seal: typeof context.seal, open: typeof context.open });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(
+        success(&r.outcome),
+        r#"{"seal":"undefined","open":"undefined"}"#
+    );
+}

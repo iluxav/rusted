@@ -26,6 +26,11 @@ declare namespace Rusted {
 		body: string;
 		/** `JSON.parse(body)`. Rejects on invalid JSON. */
 		json<T = unknown>(): Promise<T>;
+		/**
+		 * Parsed from the `cookie` header: name → raw value. The first
+		 * occurrence of a name wins; values are not decoded.
+		 */
+		cookies: Record<string, string>;
 	}
 
 	/** Status and headers for a response. */
@@ -187,6 +192,50 @@ declare namespace Rusted {
 		 * 32 bytes (256 bits) encodes to 43 characters.
 		 */
 		randomBase64Url(length: number): string;
+		/** SHA-256 of a string (UTF-8) or bytes. Native, not interpreted. */
+		sha256(data: string | Uint8Array): Uint8Array;
+		/** Unpadded, URL- and cookie-safe base64. */
+		toBase64Url(bytes: string | Uint8Array): string;
+		fromBase64Url(encoded: string): Uint8Array;
+		toHex(bytes: string | Uint8Array): string;
+		fromHex(encoded: string): Uint8Array;
+		/**
+		 * Whether two strings/byte arrays are equal, without leaking where
+		 * they differ through timing — compare tokens and signatures with
+		 * this, never `===`.
+		 */
+		timingSafeEqual(a: string | Uint8Array, b: string | Uint8Array): boolean;
+		/**
+		 * Seals a JSON-compatible payload with authenticated encryption
+		 * (AES-256-GCM), keyed by one of your vault secrets — the key never
+		 * enters JavaScript, and `keySecret` need not appear in
+		 * `config.secrets`. The result is compact base64url, fit for a
+		 * cookie. Present on deployed functions and under `rusted run`
+		 * (local seals use a per-process key, so they expire with the dev
+		 * server); absent in ad-hoc runs.
+		 */
+		seal?(payload: unknown, options: { keySecret: string; context?: string }): Promise<string>;
+		/**
+		 * Opens a sealed value: the payload, or null if the seal is invalid,
+		 * tampered with, or keyed differently. Pass the same `context`.
+		 */
+		open?<T = unknown>(sealed: string, options: { keySecret: string; context?: string }): Promise<T | null>;
+		/** `application/x-www-form-urlencoded` — query strings and form bodies. */
+		formEncode(values: Record<string, string>): string;
+		/** A redirect response. Status defaults to 302. */
+		redirect(url: string, init?: ResponseInit): Response;
+		/**
+		 * A `set-cookie` header value. Defaults: Path=/, HttpOnly,
+		 * SameSite=Lax, Secure — pass `secure: false` for local http.
+		 */
+		setCookie(name: string, value: string, options?: {
+			maxAge?: number;
+			path?: string;
+			httpOnly?: boolean;
+			secure?: boolean;
+			sameSite?: "Strict" | "Lax" | "None";
+			domain?: string;
+		}): string;
 		/**
 		 * Durable state, present only when the module declares
 		 * `config.state = true` and the host supplies it.
@@ -286,6 +335,36 @@ declare namespace Rusted {
 		 * 32 bytes (256 bits) encodes to 43 characters.
 		 */
 		randomBase64Url(length: number): string;
+		/** SHA-256 of a string (UTF-8) or bytes. Native, not interpreted. */
+		sha256(data: string | Uint8Array): Uint8Array;
+		/** Unpadded, URL- and cookie-safe base64. */
+		toBase64Url(bytes: string | Uint8Array): string;
+		fromBase64Url(encoded: string): Uint8Array;
+		toHex(bytes: string | Uint8Array): string;
+		fromHex(encoded: string): Uint8Array;
+		/**
+		 * Whether two strings/byte arrays are equal, without leaking where
+		 * they differ through timing — compare tokens and signatures with
+		 * this, never `===`.
+		 */
+		timingSafeEqual(a: string | Uint8Array, b: string | Uint8Array): boolean;
+		/**
+		 * Seals a JSON-compatible payload with authenticated encryption
+		 * (AES-256-GCM), keyed by one of your vault secrets — the key never
+		 * enters JavaScript, and `keySecret` need not appear in
+		 * `config.secrets`. The result is compact base64url, fit for a
+		 * cookie. Present on deployed functions and under `rusted run`
+		 * (local seals use a per-process key, so they expire with the dev
+		 * server); absent in ad-hoc runs.
+		 */
+		seal?(payload: unknown, options: { keySecret: string; context?: string }): Promise<string>;
+		/**
+		 * Opens a sealed value: the payload, or null if the seal is invalid,
+		 * tampered with, or keyed differently. Pass the same `context`.
+		 */
+		open?<T = unknown>(sealed: string, options: { keySecret: string; context?: string }): Promise<T | null>;
+		/** `application/x-www-form-urlencoded` — query strings and form bodies. */
+		formEncode(values: Record<string, string>): string;
 		/**
 		 * Durable state, present only when the module declares
 		 * `config.state = true` and the host supplies it.

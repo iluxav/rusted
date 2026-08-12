@@ -308,3 +308,192 @@ mod cipher_tests {
         assert!(cipher().open(&tampered).is_err(), "tampered blob");
     }
 }
+
+// ------------------------------------------------------------ seal / open
+//
+// `context.seal` / `context.open`: authenticated encryption performed host-
+// side, keyed by one of the owner's vault secrets. The key material never
+// enters JavaScript — a strict improvement over handlers decrypting cookies
+// with a key read from `context.env`, and native speed instead of an
+// interpreted cipher on every request.
+
+/// Serialized payloads above this are refused — a sealed value is a cookie or
+/// token, not a document.
+pub const MAX_SEAL_BYTES: usize = 16 * 1024;
+
+/// Envelope version, first byte of every sealed blob. Bump on any format
+/// change so old seals fail closed instead of decrypting wrongly.
+const SEAL_VERSION: u8 = 1;
+
+/// One `context.seal`/`context.open` request off the wire. `context` is the
+/// associated-data string: a seal opens only under the same one, so a value
+/// sealed for one purpose cannot be replayed into another.
+#[derive(serde::Deserialize)]
+#[serde(tag = "op")]
+pub enum SealOp {
+    #[serde(rename = "seal", rename_all = "camelCase")]
+    Seal {
+        payload: serde_json::Value,
+        key_secret: String,
+        #[serde(default)]
+        context: String,
+    },
+    #[serde(rename = "open", rename_all = "camelCase")]
+    Open {
+        sealed: String,
+        key_secret: String,
+        #[serde(default)]
+        context: String,
+    },
+}
+
+impl SealOp {
+    pub fn parse(op_json: &str) -> Result<SealOp, String> {
+        let op: SealOp = serde_json::from_str(op_json).map_err(|e| format!("malformed op: {e}"))?;
+        let key = match &op {
+            SealOp::Seal { key_secret, .. } | SealOp::Open { key_secret, .. } => key_secret,
+        };
+        if !rusted_engine::valid_secret_name(key) {
+            return Err("keySecret must name a vault secret".to_string());
+        }
+        Ok(op)
+    }
+
+    pub fn key_secret(&self) -> &str {
+        match self {
+            SealOp::Seal { key_secret, .. } | SealOp::Open { key_secret, .. } => key_secret,
+        }
+    }
+
+    /// Runs the op with the resolved key material. Deriving the AES key as
+    /// SHA-256 of the material means any strong vault secret works — no
+    /// format requirement on the stored value.
+    pub fn perform(&self, key_material: &str) -> Result<String, String> {
+        use aes_gcm::aead::Payload;
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let key = sha2::Sha256::digest(key_material.as_bytes());
+        let cipher = Aes256Gcm::new_from_slice(&key).expect("32 bytes is a valid AES-256 key");
+        match self {
+            SealOp::Seal {
+                payload, context, ..
+            } => {
+                let plaintext = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+                if plaintext.len() > MAX_SEAL_BYTES {
+                    return Err(format!(
+                        "payload is {} bytes serialized; seal caps at {MAX_SEAL_BYTES}",
+                        plaintext.len()
+                    ));
+                }
+                let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+                let sealed = cipher
+                    .encrypt(
+                        &nonce,
+                        Payload {
+                            msg: plaintext.as_bytes(),
+                            aad: context.as_bytes(),
+                        },
+                    )
+                    .expect("aes-gcm encryption is infallible for in-memory data");
+                let mut blob = vec![SEAL_VERSION];
+                blob.extend(nonce);
+                blob.extend(sealed);
+                Ok(serde_json::json!({ "sealed": b64.encode(blob) }).to_string())
+            }
+            SealOp::Open {
+                sealed, context, ..
+            } => {
+                // Every failure mode — bad encoding, wrong version, wrong key,
+                // wrong context, tampering — is the same null answer: a forger
+                // learns nothing about which check refused them.
+                let invalid = serde_json::json!({ "valid": false, "payload": null }).to_string();
+                let Ok(blob) = b64.decode(sealed.as_bytes()) else {
+                    return Ok(invalid);
+                };
+                if blob.len() <= 1 + 12 || blob[0] != SEAL_VERSION {
+                    return Ok(invalid);
+                }
+                let (nonce, ciphertext) = blob[1..].split_at(12);
+                let Ok(plaintext) = cipher.decrypt(
+                    Nonce::from_slice(nonce),
+                    Payload {
+                        msg: ciphertext,
+                        aad: context.as_bytes(),
+                    },
+                ) else {
+                    return Ok(invalid);
+                };
+                let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&plaintext) else {
+                    return Ok(invalid);
+                };
+                Ok(serde_json::json!({ "valid": true, "payload": payload }).to_string())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(op: serde_json::Value, material: &str) -> serde_json::Value {
+        let parsed = SealOp::parse(&op.to_string()).unwrap();
+        serde_json::from_str(&parsed.perform(material).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn seal_round_trips_and_fails_closed() {
+        let sealed = run(
+            json!({"op":"seal","payload":{"userId":7},"keySecret":"COOKIE_KEY","context":"auth:v1"}),
+            "material",
+        )["sealed"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // URL/cookie-safe, and never the plaintext.
+        assert!(sealed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(!sealed.contains("userId"));
+
+        let opened = run(
+            json!({"op":"open","sealed":sealed,"keySecret":"COOKIE_KEY","context":"auth:v1"}),
+            "material",
+        );
+        assert_eq!(opened["valid"], true);
+        assert_eq!(opened["payload"]["userId"], 7);
+
+        // Wrong key, wrong context, tampering: all the same null, no detail.
+        for (material, context, tamper) in [
+            ("other-material", "auth:v1", false),
+            ("material", "other-context", false),
+            ("material", "auth:v1", true),
+        ] {
+            let mut value = sealed.clone();
+            if tamper {
+                let flipped = if value.ends_with('A') { 'B' } else { 'A' };
+                value.pop();
+                value.push(flipped);
+            }
+            let refused = run(
+                json!({"op":"open","sealed":value,"keySecret":"COOKIE_KEY","context":context}),
+                material,
+            );
+            assert_eq!(refused["valid"], false, "{material} {context} {tamper}");
+        }
+    }
+
+    #[test]
+    fn seal_refuses_oversize_and_bad_key_names() {
+        let big = "x".repeat(MAX_SEAL_BYTES + 1);
+        let parsed =
+            SealOp::parse(&json!({"op":"seal","payload":big,"keySecret":"K"}).to_string()).unwrap();
+        assert!(parsed.perform("m").unwrap_err().contains("caps"));
+        assert!(
+            SealOp::parse(&json!({"op":"seal","payload":1,"keySecret":"lower"}).to_string())
+                .is_err()
+        );
+    }
+}

@@ -3506,3 +3506,84 @@ async fn object_bindings_need_credentials_and_then_presign() {
     // The credential id appears only as SigV4 requires; the secret never.
     assert!(!url.contains("test-secret-key"), "{url}");
 }
+
+#[tokio::test]
+async fn seal_round_trips_through_a_vault_keyed_cookie() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    // The key secret is NOT in config.secrets: the module seals with it
+    // without ever being able to read it.
+    vault
+        .set(t.user_id, "COOKIE_KEY", "k".repeat(64).as_str())
+        .await
+        .unwrap();
+    let src = r#"export default async function handler(request, context) {
+        const input = await request.json();
+        if (input.sealed) {
+            const opened = await context.open(input.sealed, { keySecret: "COOKIE_KEY", context: "test:v1" });
+            const tampered = await context.open(input.sealed.slice(0, -2) + "AA", { keySecret: "COOKIE_KEY", context: "test:v1" });
+            const wrongContext = await context.open(input.sealed, { keySecret: "COOKIE_KEY", context: "other" });
+            return context.json({ opened, tampered, wrongContext, keyVisible: typeof context.env });
+        }
+        const sealed = await context.seal({ userId: 42 }, { keySecret: "COOKIE_KEY", context: "test:v1" });
+        return context.json({ sealed });
+    }"#;
+    assert_eq!(push(&t, "sealer", src).await.status(), 200);
+
+    let r = t
+        .client
+        .post(t.data("/f/sealer"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let sealed = r.json::<Value>().await.unwrap()["sealed"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !sealed.contains("42"),
+        "sealed value must not leak the payload"
+    );
+
+    let r = t
+        .client
+        .post(t.data("/f/sealer"))
+        .json(&json!({ "sealed": sealed }))
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["opened"]["userId"], 42, "{v}");
+    assert_eq!(v["tampered"], Value::Null, "{v}");
+    assert_eq!(v["wrongContext"], Value::Null, "{v}");
+    // No config.secrets declared, so the key never appeared in context.env.
+    assert_eq!(v["keyVisible"], "undefined", "{v}");
+}
+
+#[tokio::test]
+async fn seal_with_a_missing_key_secret_names_the_fix() {
+    enable_secret_store();
+    let t = boot().await;
+    let src = r#"export default async function handler(request, context) {
+        try {
+            await context.seal({ x: 1 }, { keySecret: "NOT_SET_ANYWHERE" });
+            return context.json({ sealed: true });
+        } catch (e) {
+            return context.json({ failed: e.message });
+        }
+    }"#;
+    assert_eq!(push(&t, "keyless-sealer", src).await.status(), 200);
+    let r = t
+        .client
+        .post(t.data("/f/keyless-sealer"))
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert!(
+        v["failed"].as_str().unwrap().contains("NOT_SET_ANYWHERE"),
+        "{v}"
+    );
+}
