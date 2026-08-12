@@ -18,7 +18,7 @@
       <td class="px-6 py-3.5 text-cream"><span class="mr-2 text-copper">ƒ</span>{{ row.function }}</td>
       <td class="px-3 py-3">
         <span class="inline-flex items-center gap-1.5 {% if row.ok %}text-sage{% else %}text-blood{% endif %}">
-          <span class="h-1.5 w-1.5 rounded-full {% if row.ok %}bg-sage{% else %}bg-blood{% endif %}"></span>{{ row.outcome }}
+          <span class="h-1.5 w-1.5 rounded-full {% if row.ok %}bg-sage{% else %}bg-blood{% endif %}"></span>{{ row.outcome }}{% if !row.status.is_empty() %} <span class="text-clay/70">{{ row.status }}</span>{% endif %}
           {% if row.detail.is_some() %}
           <button type="button" title="Show what went wrong"
                   onclick="this.closest('tr').nextElementSibling.hidden = !this.closest('tr').nextElementSibling.hidden"

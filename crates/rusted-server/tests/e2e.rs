@@ -3602,3 +3602,72 @@ async fn seal_with_a_missing_key_secret_names_the_fix() {
         "{v}"
     );
 }
+
+#[tokio::test]
+async fn logs_tell_the_truth_about_refusals_and_statuses() {
+    let database_url = rusted_server::testsupport::create_test_database().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = boot_full(dir, 1500, database_url.clone(), false).await;
+    let src = r#"export const http = { methods: ["POST"] };
+export default async function handler(request, context) {
+    return context.json({ error: { code: "nope" } }, { status: 403 });
+}"#;
+    assert_eq!(push(&t, "truthful", src).await.status(), 200);
+
+    // A handler-chosen 403 completes fine but is not a caller-facing success.
+    let r = t.client.post(t.data("/f/truthful")).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    // A refused method never reaches the handler — previously invisible.
+    let r = t.client.delete(t.data("/f/truthful")).send().await.unwrap();
+    assert_eq!(r.status(), 405);
+
+    let v: Value = t
+        .admin_get("/api/functions/truthful")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let recent = v["recent"].as_array().unwrap();
+    assert_eq!(recent[0]["outcome"], "refused", "{v}");
+    assert_eq!(recent[0]["status"], 405, "{v}");
+    assert!(
+        recent[0]["detail"].as_str().unwrap().contains("DELETE"),
+        "{v}"
+    );
+    assert_eq!(recent[1]["outcome"], "success", "{v}");
+    assert_eq!(recent[1]["status"], 403, "{v}");
+
+    // A fresh process has an empty ring; its detail endpoint must fall back
+    // to analytics rather than claiming there were no invocations. The
+    // batcher flushes every 500ms, so poll briefly.
+    let dir2 = tempfile::tempdir().unwrap();
+    let t2 = boot_full(dir2, 1500, database_url, false).await;
+    let mut fallback = Vec::new();
+    for _ in 0..30 {
+        let r = t2
+            .client
+            .get(format!(
+                "http://{}/api/functions/truthful",
+                t2.handle.admin_addr
+            ))
+            .bearer_auth(&t.key)
+            .send()
+            .await
+            .unwrap();
+        let v: Value = r.json().await.unwrap();
+        fallback = v["recent"].as_array().cloned().unwrap_or_default();
+        if fallback.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(fallback.len() >= 2, "analytics fallback never surfaced");
+    let statuses: Vec<i64> = fallback
+        .iter()
+        .filter_map(|inv| inv["status"].as_i64())
+        .collect();
+    assert!(
+        statuses.contains(&405) && statuses.contains(&403),
+        "{statuses:?}"
+    );
+}

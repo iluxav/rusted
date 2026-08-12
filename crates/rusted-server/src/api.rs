@@ -297,6 +297,7 @@ pub(crate) async fn execute_serialized(
     })?
     .expect("semaphore never closed");
     let tool = job.tool().map(|t| t.to_string());
+    let is_http = matches!(job, Job::Http(_));
     let result = execute_raw(state, source, job, limits, owner, grant).await?;
     debug_print(state, key, &result);
 
@@ -305,6 +306,14 @@ pub(crate) async fn execute_serialized(
         Outcome::Terminated(reason) => Some(reason.clone()),
         Outcome::Error(message) => Some(message.clone()),
     };
+    // The status the caller saw — mirrors outcome_to_http, recorded so a
+    // handler answering error envelopes with 4xx statuses reads as what it
+    // was, not as an unblemished success. Tool calls have no HTTP status.
+    let status = is_http.then(|| match &result.outcome {
+        Outcome::Success(_) => result.status.unwrap_or(200),
+        Outcome::Terminated(_) => 429,
+        Outcome::Error(_) => 500,
+    });
     let record = InvocationRecord {
         at: now_epoch(),
         outcome: match &result.outcome {
@@ -319,6 +328,7 @@ pub(crate) async fn execute_serialized(
         },
         wall_ms: result.wall.as_secs_f64() * 1000.0,
         cpu_ms: result.cpu.as_secs_f64() * 1000.0,
+        status,
         logs: result.logs.clone(),
     };
     // Queued, never awaited: analytics can shed load but never delay a call.
@@ -330,6 +340,7 @@ pub(crate) async fn execute_serialized(
         wall_ms: record.wall_ms,
         cpu_ms: record.cpu_ms,
         exec_ms: result.exec_wall.as_secs_f64() * 1000.0,
+        status: status.map(|s| s as i16),
     });
 
     let mut records = state.records.lock().unwrap();
@@ -426,25 +437,29 @@ pub(crate) fn record_refusal(
     state: &Arc<AppState>,
     key: &str,
     owner: Option<uuid::Uuid>,
+    outcome: &str,
+    status: u16,
     detail: String,
 ) {
     state.analytics.record(crate::analytics::Invocation {
         function_name: key.to_string(),
         user_id: owner,
-        outcome: "error".into(),
+        outcome: outcome.to_string(),
         detail: Some(detail.clone()),
         wall_ms: 0.0,
         cpu_ms: 0.0,
         exec_ms: 0.0,
+        status: Some(status as i16),
     });
     let mut records = state.records.lock().unwrap();
     let ring = records.entry(key.to_string()).or_default();
     ring.push_front(InvocationRecord {
         at: now_epoch(),
-        outcome: "error".into(),
+        outcome: outcome.to_string(),
         detail: Some(detail),
         wall_ms: 0.0,
         cpu_ms: 0.0,
+        status: Some(status),
         logs: Vec::new(),
     });
     ring.truncate(RECORD_CAP);
@@ -694,7 +709,22 @@ async fn serve_function(
         fetched.trigger.clone(),
         fetched.owner,
     );
+    // From here down the function exists, so what happens to the request is
+    // the owner's business: gate refusals are recorded like invocations,
+    // because "my logs show nothing" and "callers are being turned away" were
+    // previously indistinguishable.
     if !trigger.methods.iter().any(|m| m == method.as_str()) {
+        record_refusal(
+            &state,
+            &name,
+            owner,
+            "refused",
+            405,
+            format!(
+                "refused: method {method} (this function allows {})",
+                trigger.methods.join(", ")
+            ),
+        );
         return err(
             StatusCode::METHOD_NOT_ALLOWED,
             "method_not_allowed",
@@ -703,26 +733,56 @@ async fn serve_function(
     }
     let params = match (&trigger.path, rest.as_deref()) {
         (None, None) => BTreeMap::new(),
-        (None, Some(_)) => {
+        (None, Some(rest)) => {
+            record_refusal(
+                &state,
+                &name,
+                owner,
+                "refused",
+                404,
+                format!("refused: /{rest} — this function has no sub-path"),
+            );
             return err(
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "function has no sub-path",
-            )
+            );
         }
         (Some(pattern), rest) => match match_path(pattern, rest.unwrap_or("")) {
             Some(params) => params,
             None => {
+                record_refusal(
+                    &state,
+                    &name,
+                    owner,
+                    "refused",
+                    404,
+                    format!(
+                        "refused: /{} does not match the declared route {pattern}",
+                        rest.unwrap_or("")
+                    ),
+                );
                 return err(
                     StatusCode::NOT_FOUND,
                     "not_found",
                     format!("this function serves /f/{name}{pattern}"),
-                )
+                );
             }
         },
     };
     let (plan, limits) = plan_for_owner(&state, owner).await;
     if let Err(retry_after) = state.rate_limiter.check(&name, plan.limits.rate_per_min) {
+        record_refusal(
+            &state,
+            &name,
+            owner,
+            "refused",
+            429,
+            format!(
+                "refused: rate limit ({} allows {} requests per minute)",
+                plan.name, plan.limits.rate_per_min
+            ),
+        );
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
@@ -735,7 +795,17 @@ async fn serve_function(
     }
     let request = match to_engine_request(method.as_str(), &headers, query, params, body) {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(response) => {
+            record_refusal(
+                &state,
+                &name,
+                owner,
+                "refused",
+                400,
+                "refused: request body is not valid UTF-8".to_string(),
+            );
+            return *response;
+        }
     };
     // Resolved before spending an execution slot: a function whose secrets or
     // capabilities cannot be supplied would only fail inside the handler,
@@ -743,7 +813,7 @@ async fn serve_function(
     let grant = match grant_for_function(&state, &name, &fetched, &plan).await {
         Ok(grant) => grant,
         Err((code, detail)) => {
-            record_refusal(&state, &name, owner, detail);
+            record_refusal(&state, &name, owner, "error", 500, detail);
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 code,
@@ -765,7 +835,28 @@ async fn serve_function(
     .await
     {
         Ok(result) => outcome_to_http(result),
-        Err(response) => response,
+        Err(response) => {
+            // Admission refusals: queue-wait busy (429) or memory pressure
+            // (503). Owner-visible for the same reason the gates above are.
+            let status = response.status().as_u16();
+            if matches!(status, 429 | 503) {
+                record_refusal(
+                    &state,
+                    &name,
+                    owner,
+                    "refused",
+                    status,
+                    match status {
+                        503 => "refused: the server was under memory pressure".to_string(),
+                        _ => format!(
+                            "refused: busy ({} concurrent allowed on {})",
+                            plan.limits.concurrency, plan.name
+                        ),
+                    },
+                );
+            }
+            response
+        }
     }
 }
 
@@ -1277,13 +1368,39 @@ async fn function_detail(
     } else {
         None
     };
-    let recent: Vec<InvocationRecord> = state
+    let mut recent: Vec<InvocationRecord> = state
         .records
         .lock()
         .unwrap()
         .get(&name)
         .map(|ring| ring.iter().cloned().collect())
         .unwrap_or_default();
+    // The ring is per-process and dies with every restart; right after a
+    // deploy `rusted logs` would show nothing while Postgres holds the
+    // history. Fall back to analytics — same shape, minus console output,
+    // which only the ring keeps.
+    if recent.is_empty() {
+        recent = crate::analytics::recent(
+            &state.pool,
+            user_id,
+            RECORD_CAP as i64,
+            0,
+            Some(&name),
+            false,
+        )
+        .await
+        .into_iter()
+        .map(|row| InvocationRecord {
+            at: row.at.max(0) as u64,
+            outcome: row.outcome,
+            detail: row.detail,
+            wall_ms: row.wall_ms,
+            cpu_ms: row.cpu_ms,
+            status: row.status.map(|s| s as u16),
+            logs: Vec::new(),
+        })
+        .collect();
+    }
     let mut body = json!({
         "name": name,
         "revision": record.current().rev,
@@ -1452,7 +1569,7 @@ async fn invoke(
             let grant = match grant_for_function(&state, &key, &hit, &plan).await {
                 Ok(grant) => grant,
                 Err((code, detail)) => {
-                    record_refusal(&state, &key, hit.owner, detail.clone());
+                    record_refusal(&state, &key, hit.owner, "error", 500, detail.clone());
                     return err(StatusCode::INTERNAL_SERVER_ERROR, code, detail);
                 }
             };

@@ -28,6 +28,8 @@ pub struct Invocation {
     pub wall_ms: f64,
     pub cpu_ms: f64,
     pub exec_ms: f64,
+    /// HTTP status answered, when the invocation had one.
+    pub status: Option<i16>,
 }
 
 #[derive(Clone)]
@@ -91,7 +93,8 @@ async fn flush(pool: &PgPool, batch: &mut Vec<Invocation>) {
         return;
     }
     let mut query = sqlx::QueryBuilder::new(
-        "INSERT INTO invocations (function_name, user_id, outcome, detail, wall_ms, cpu_ms, exec_ms) ",
+        "INSERT INTO invocations \
+         (function_name, user_id, outcome, detail, wall_ms, cpu_ms, exec_ms, status) ",
     );
     query.push_values(batch.iter(), |mut row, invocation| {
         row.push_bind(invocation.function_name.clone())
@@ -100,7 +103,8 @@ async fn flush(pool: &PgPool, batch: &mut Vec<Invocation>) {
             .push_bind(invocation.detail.clone())
             .push_bind(invocation.wall_ms)
             .push_bind(invocation.cpu_ms)
-            .push_bind(invocation.exec_ms);
+            .push_bind(invocation.exec_ms)
+            .push_bind(invocation.status);
     });
     if let Err(e) = query.build().execute(pool).await {
         DROPPED.fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -164,6 +168,7 @@ pub struct RecentRow {
     pub cpu_ms: f64,
     pub exec_ms: f64,
     pub at: i64,
+    pub status: Option<i16>,
 }
 
 /// Function names this user has invocations for — the filter's options.
@@ -248,12 +253,12 @@ pub async fn recent(
     errors_only: bool,
 ) -> Vec<RecentRow> {
     sqlx::query(
-        "SELECT function_name, outcome, detail, wall_ms, cpu_ms, exec_ms,
+        "SELECT function_name, outcome, detail, wall_ms, cpu_ms, exec_ms, status,
                 extract(epoch FROM at)::bigint AS at
          FROM invocations
          WHERE user_id = $1
            AND ($3::text IS NULL OR function_name = $3)
-           AND (NOT $4 OR outcome <> 'success')
+           AND (NOT $4 OR outcome <> 'success' OR status >= 400)
          ORDER BY at DESC LIMIT $2 OFFSET $5",
     )
     .bind(user_id)
@@ -273,6 +278,7 @@ pub async fn recent(
                 cpu_ms: row.get("cpu_ms"),
                 exec_ms: row.get("exec_ms"),
                 at: row.get("at"),
+                status: row.get("status"),
             })
             .collect()
     })

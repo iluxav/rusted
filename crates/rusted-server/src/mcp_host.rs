@@ -198,7 +198,7 @@ async fn call_tool(
     let grant = match grant_for_function(state, name, fetched, &plan).await {
         Ok(grant) => grant,
         Err((_code, detail)) => {
-            record_refusal(state, name, fetched.owner, detail.clone());
+            record_refusal(state, name, fetched.owner, "error", 500, detail.clone());
             return mcp_wire::tool_result(detail, true);
         }
     };

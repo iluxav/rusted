@@ -393,6 +393,8 @@ pub struct Bar {
 pub struct Recent {
     function: String,
     outcome: String,
+    /// "200", "403", or empty for tool calls and pre-status rows.
+    status: String,
     ok: bool,
     /// The failure message, revealed by the row's indicator.
     detail: Option<String>,
@@ -822,7 +824,9 @@ async fn invocations_inner(
         .map(|row| Recent {
             function: row.function.clone(),
             outcome: row.outcome.clone(),
-            ok: row.outcome == "success",
+            status: row.status.map(|s| s.to_string()).unwrap_or_default(),
+            // Success means what the caller saw: a 4xx/5xx answer is not ok.
+            ok: row.outcome == "success" && row.status.unwrap_or(200) < 400,
             detail: row.detail.clone(),
             wall: format!("{:.2} ms", row.wall_ms),
             cpu: format!("{:.2} ms", row.cpu_ms),

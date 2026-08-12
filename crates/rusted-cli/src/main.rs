@@ -159,7 +159,12 @@ enum Cmd {
     /// Delete a function
     Delete { name: String },
     /// Show recent invocations of a function with their console output
-    Logs { name: String },
+    Logs {
+        name: String,
+        /// Only failures: errors, terminations, refusals, and 4xx/5xx answers
+        #[arg(long)]
+        errors: bool,
+    },
     /// Throwaway URLs that anyone can POST to, for receiving callbacks
     #[command(subcommand)]
     Inbox(InboxCmd),
@@ -802,21 +807,35 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 emit(&cli, &v, |_| format!("removed {name}"))
             }
         },
-        Cmd::Logs { ref name } => {
+        Cmd::Logs { ref name, errors } => {
             let v = api(&cli, Method::GET, &format!("/api/functions/{name}"), None)?;
             if cli.json {
                 println!("{}", v["recent"]);
                 return Ok(());
             }
-            let recent = v["recent"].as_array().cloned().unwrap_or_default();
+            let mut recent = v["recent"].as_array().cloned().unwrap_or_default();
+            if errors {
+                // A "success" that answered 4xx/5xx is a failure to the caller.
+                recent.retain(|inv| {
+                    inv["outcome"].as_str() != Some("success")
+                        || inv["status"].as_u64().unwrap_or(200) >= 400
+                });
+            }
             if recent.is_empty() {
-                println!("no invocations recorded for {name}");
+                println!(
+                    "no {}invocations recorded for {name}",
+                    if errors { "failing " } else { "" }
+                );
                 return Ok(());
             }
             // Newest-first from the server; print oldest-first so it reads like a log.
             for inv in recent.iter().rev() {
+                let status = inv["status"]
+                    .as_u64()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default();
                 println!(
-                    "at {}  {}  wall {:.2}ms  cpu {:.2}ms",
+                    "at {}  {}{status}  wall {:.2}ms  cpu {:.2}ms",
                     inv["at"],
                     inv["outcome"].as_str().unwrap_or("?"),
                     inv["wall_ms"].as_f64().unwrap_or(0.0),

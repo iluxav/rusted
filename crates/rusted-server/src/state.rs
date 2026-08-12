@@ -42,6 +42,9 @@ pub struct InvocationRecord {
     pub detail: Option<String>,
     pub wall_ms: f64,
     pub cpu_ms: f64,
+    /// HTTP status answered — what "success" actually meant to the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
     pub logs: Vec<LogEntry>,
 }
 
