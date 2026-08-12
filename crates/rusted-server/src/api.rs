@@ -8,7 +8,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::Router;
 use rusted_engine::{Executor, HttpRequest, InvocationResult, Outcome};
 use serde::Deserialize;
@@ -168,13 +168,28 @@ impl Job {
 /// Runs `source` on a worker thread with no per-key state — used for ad-hoc
 /// invocations so they can't leak locks or records. The wait for a worker slot
 /// is bounded by the same queue-wait budget as the per-function lock.
+/// Everything the host grants one invocation beyond the request itself:
+/// decrypted secrets, the declared capabilities being supplied, and the scope
+/// the services need to enforce them. Built from the stored record and the
+/// owner's plan — never from anything the caller sent. The default grants
+/// nothing, which is what ad-hoc and temp-run invocations get.
+#[derive(Default)]
+pub(crate) struct HostGrant {
+    pub env: Option<BTreeMap<String, String>>,
+    pub caps: rusted_engine::Capabilities,
+    /// The stable function name state and objects are scoped by.
+    pub function_name: Option<String>,
+    pub objects: BTreeMap<String, rusted_engine::ObjectBinding>,
+    pub allowance: crate::fnstate::StateAllowance,
+}
+
 async fn execute_raw(
     state: &Arc<AppState>,
     source: String,
     job: Job,
     limits: rusted_engine::Limits,
     owner: Option<Uuid>,
-    env: Option<BTreeMap<String, String>>,
+    grant: HostGrant,
 ) -> Result<InvocationResult, Response> {
     // Before queueing for a slot: if the process is already using more memory
     // than it should, another invocation makes that worse rather than better.
@@ -203,10 +218,15 @@ async fn execute_raw(
     let executor = state.executor.clone();
     // Scoped to the function's owner, taken from the stored record rather than
     // anything the caller sent, so a handler cannot reach another account's
-    // inboxes. Anonymous functions get no services at all.
+    // inboxes, state, or objects. Anonymous functions get no services at all.
     let services: Option<Arc<dyn rusted_engine::HostServices>> = owner.map(|user_id| {
-        Arc::new(crate::inbox::OwnerScopedInbox::new(state.clone(), user_id))
-            as Arc<dyn rusted_engine::HostServices>
+        Arc::new(crate::services::OwnerScopedServices::new(
+            state.clone(),
+            user_id,
+            grant.function_name.clone().unwrap_or_default(),
+            grant.objects.clone(),
+            grant.allowance,
+        )) as Arc<dyn rusted_engine::HostServices>
     });
     // Handed to the execution runtime rather than run here: JavaScript between
     // await points blocks whichever thread drives it, and that must not be a
@@ -214,16 +234,19 @@ async fn execute_raw(
     Ok(state
         .exec_runtime
         .spawn(async move {
-            let env = env.as_ref();
+            let env = grant.env.as_ref();
+            let caps = &grant.caps;
             match job {
                 Job::Http(request) => {
                     executor
-                        .execute_with_services(&source, &request, &limits, services, env)
+                        .execute_with_services(&source, &request, &limits, services, env, caps)
                         .await
                 }
                 Job::Tool { name, args } => {
                     executor
-                        .execute_tool_with_services(&source, &name, &args, &limits, services, env)
+                        .execute_tool_with_services(
+                            &source, &name, &args, &limits, services, env, caps,
+                        )
                         .await
                 }
             }
@@ -233,8 +256,9 @@ async fn execute_raw(
 }
 
 /// Runs `source` with concurrency 1 per `key` and records the invocation.
-/// `env` is the function's decrypted secrets, resolved by the caller from the
-/// stored record — never from anything the request sent.
+/// The grant carries the function's decrypted secrets and supplied
+/// capabilities, resolved by the caller from the stored record — never from
+/// anything the request sent.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_serialized(
     state: &Arc<AppState>,
@@ -244,7 +268,7 @@ pub(crate) async fn execute_serialized(
     limits: rusted_engine::Limits,
     owner: Option<uuid::Uuid>,
     concurrency: usize,
-    env: Option<BTreeMap<String, String>>,
+    grant: HostGrant,
 ) -> Result<InvocationResult, Response> {
     let allowed = concurrency.max(1);
     let gate = {
@@ -273,7 +297,7 @@ pub(crate) async fn execute_serialized(
     })?
     .expect("semaphore never closed");
     let tool = job.tool().map(|t| t.to_string());
-    let result = execute_raw(state, source, job, limits, owner, env).await?;
+    let result = execute_raw(state, source, job, limits, owner, grant).await?;
     debug_print(state, key, &result);
 
     let base_detail = match &result.outcome {
@@ -335,6 +359,64 @@ pub(crate) async fn env_for_function(
         .env_for(owner, &fetched.secrets)
         .await
         .map(Some)
+}
+
+/// The full grant for a deployed function, or the refusal `(code, detail)`.
+///
+/// This is the "refuse before JavaScript runs" gate: declared secrets must
+/// decrypt, declared object bindings must point at allowlisted endpoints with
+/// resolvable credentials. The detail names what is wrong for the owner's
+/// logs; the code picks the caller-facing error.
+pub(crate) async fn grant_for_function(
+    state: &Arc<AppState>,
+    name: &str,
+    fetched: &crate::store::Fetched,
+    plan: &crate::plans::Plan,
+) -> Result<HostGrant, (&'static str, String)> {
+    let env = env_for_function(state, fetched)
+        .await
+        .map_err(|detail| ("missing_secrets", detail))?;
+    if !fetched.objects.is_empty() {
+        let Some(owner) = fetched.owner else {
+            return Err((
+                "capability_unavailable",
+                "this function has no owner, so its object bindings cannot be resolved".to_string(),
+            ));
+        };
+        for (binding_name, binding) in &fetched.objects {
+            // Re-checked per invocation: an endpoint struck off the allowlist
+            // stops working without waiting for a redeploy.
+            state.objects.allows(&binding.endpoint).map_err(|e| {
+                (
+                    "capability_unavailable",
+                    format!("binding {binding_name}: {e}"),
+                )
+            })?;
+            let names = [
+                binding.access_key_id_secret.clone(),
+                binding.secret_access_key_secret.clone(),
+            ];
+            state.secrets.env_for(owner, &names).await.map_err(|e| {
+                (
+                    "capability_unavailable",
+                    format!("binding {binding_name}: {e}"),
+                )
+            })?;
+        }
+    }
+    Ok(HostGrant {
+        env,
+        caps: rusted_engine::Capabilities {
+            state: fetched.state,
+            objects: fetched.objects.keys().cloned().collect(),
+        },
+        function_name: Some(name.to_string()),
+        objects: fetched.objects.clone(),
+        allowance: crate::fnstate::StateAllowance {
+            max_keys: plan.limits.max_state_keys,
+            max_bytes: plan.limits.max_state_bytes,
+        },
+    })
 }
 
 /// A refusal before execution — missing secrets — still needs to reach the
@@ -655,17 +737,18 @@ async fn serve_function(
         Ok(request) => request,
         Err(response) => return *response,
     };
-    // Resolved before spending an execution slot: a function whose secrets
-    // cannot be produced would only fail inside the handler, less clearly.
-    let env = match env_for_function(&state, &fetched).await {
-        Ok(env) => env,
-        Err(detail) => {
+    // Resolved before spending an execution slot: a function whose secrets or
+    // capabilities cannot be supplied would only fail inside the handler,
+    // less clearly.
+    let grant = match grant_for_function(&state, &name, &fetched, &plan).await {
+        Ok(grant) => grant,
+        Err((code, detail)) => {
             record_refusal(&state, &name, owner, detail);
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "missing_secrets",
-                "this function requests secrets that are not configured; \
-                 its owner must add them in the console",
+                code,
+                "this function declares configuration its owner has not supplied; \
+                 the details are in the owner's logs",
             );
         }
     };
@@ -677,7 +760,7 @@ async fn serve_function(
         limits,
         owner,
         plan.limits.concurrency,
-        env,
+        grant,
     )
     .await
     {
@@ -721,7 +804,7 @@ async fn call_run(
         limits,
         None,
         plan.limits.concurrency,
-        None,
+        HostGrant::default(),
     )
     .await
     {
@@ -889,8 +972,21 @@ pub async fn deploy_function(
     let inspection = inspect_source(state, source.clone())
         .await
         .map_err(|e| DeployRefused::new(StatusCode::UNPROCESSABLE_ENTITY, "compile_error", e))?;
-    let secrets = inspection.config.secrets;
+    let config = inspection.config;
     let surface = inspection.surface;
+
+    // Object bindings are refused at deploy unless every endpoint is on this
+    // server's allowlist — a binding is a credentialed HTTP client, and where
+    // it may point is the server admin's decision, not the module's.
+    for (binding_name, binding) in &config.objects {
+        state.objects.allows(&binding.endpoint).map_err(|e| {
+            DeployRefused::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "endpoint_not_allowed",
+                format!("object binding {binding_name}: {e}"),
+            )
+        })?;
+    }
 
     // Everything up to the surface split is shared: the file's declared name
     // stands in for a missing request name, and the same plan/ownership rules
@@ -947,6 +1043,7 @@ pub async fn deploy_function(
                 ));
             }
             let meta = json!({ "public": mcp_config.public, "tools": mcp_config.tools });
+            let declared = crate::store::Declared::from_config(&config, mcp_config.public);
             let revision = state
                 .store
                 .push_full(
@@ -956,8 +1053,7 @@ pub async fn deploy_function(
                     "mcp",
                     Some(&meta),
                     Some(user_id),
-                    &secrets,
-                    mcp_config.public,
+                    &declared,
                 )
                 .await
                 .map_err(|e| {
@@ -975,7 +1071,9 @@ pub async fn deploy_function(
                 "kind": "mcp",
                 "tools": mcp_config.tools.keys().collect::<Vec<_>>(),
                 "public": mcp_config.public,
-                "secrets": secrets,
+                "secrets": declared.secrets,
+                "state": declared.state,
+                "objects": declared.objects.keys().collect::<Vec<_>>(),
                 "url": state.data_url(&format!("/f/{name}")),
             });
             if !mcp_config.public {
@@ -1006,24 +1104,18 @@ pub async fn deploy_function(
         None
     };
 
+    let declared = crate::store::Declared::from_config(&config, http_config.public);
     let pushed = match new_trigger {
         Some(trigger) => {
             state
                 .store
-                .push_with_trigger(
-                    &name,
-                    &source,
-                    trigger,
-                    Some(user_id),
-                    &secrets,
-                    http_config.public,
-                )
+                .push_with_trigger(&name, &source, trigger, Some(user_id), &declared)
                 .await
         }
         None => {
             state
                 .store
-                .push(&name, &source, Some(user_id), &secrets, http_config.public)
+                .push(&name, &source, Some(user_id), &declared)
                 .await
         }
     };
@@ -1063,8 +1155,10 @@ pub async fn deploy_function(
         "kind": "http",
         "methods": trigger.methods,
         "path": trigger.path,
-        "secrets": secrets,
+        "secrets": declared.secrets,
         "public": http_config.public,
+        "state": declared.state,
+        "objects": declared.objects.keys().collect::<Vec<_>>(),
         "limits": limits_json(state, &plan),
         "url": state.data_url(&route),
     }))
@@ -1111,8 +1205,14 @@ async fn list_functions(State(state): Shared, headers: HeaderMap) -> Response {
                 "hash": current.hash,
                 "updated_at": current.created_at,
                 "kind": record.kind,
+                "state": record.state,
                 "url": state.data_url(&format!("/f/{name}")),
             });
+            if let Some(objects) = &record.objects {
+                if let Some(bindings) = objects.as_object() {
+                    entry["objects"] = json!(bindings.keys().collect::<Vec<_>>());
+                }
+            }
             if record.kind == "mcp" {
                 if let Some(meta) = &record.mcp {
                     entry["tools"] = json!(mcp_tool_names(meta));
@@ -1192,6 +1292,8 @@ async fn function_detail(
         "kind": record.kind,
         "secrets": record.secrets,
         "public": record.public,
+        "state": record.state,
+        "objects": record.objects,
         "url": state.data_url(&format!("/f/{name}")),
         "recent": recent,
     });
@@ -1301,7 +1403,7 @@ async fn invoke(
             return err(StatusCode::NOT_FOUND, "not_found", "no such function");
         }
     }
-    let (key, source, env) = match (&body.name, body.source) {
+    let (key, source, fetched) = match (&body.name, body.source) {
         (Some(name), _) => {
             match state.store.fetch(name).await {
                 // Invoke runs a module as http. An mcp module has no request
@@ -1319,22 +1421,7 @@ async fn invoke(
                     )
                         .into_response()
                 }
-                Ok(Some(hit)) => {
-                    // The caller here is the owner, so the refusal can say
-                    // exactly which secrets are missing.
-                    let env = match env_for_function(&state, &hit).await {
-                        Ok(env) => env,
-                        Err(detail) => {
-                            record_refusal(&state, name, hit.owner, detail.clone());
-                            return err(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "missing_secrets",
-                                detail,
-                            );
-                        }
-                    };
-                    (Some(name.clone()), hit.source.clone(), env)
-                }
+                Ok(Some(hit)) => (Some(name.clone()), hit.source.clone(), Some(hit)),
                 Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
                 Err(e) => {
                     return err(
@@ -1359,8 +1446,16 @@ async fn invoke(
     let request = HttpRequest::post_json(body.body);
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     let limits = limits_for_plan(&state, &plan.limits);
-    let executed = match key {
-        Some(key) => {
+    let executed = match (key, fetched) {
+        (Some(key), Some(hit)) => {
+            // The caller here is the owner, so the refusal carries the detail.
+            let grant = match grant_for_function(&state, &key, &hit, &plan).await {
+                Ok(grant) => grant,
+                Err((code, detail)) => {
+                    record_refusal(&state, &key, hit.owner, detail.clone());
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, code, detail);
+                }
+            };
             execute_serialized(
                 &state,
                 &key,
@@ -1369,18 +1464,18 @@ async fn invoke(
                 limits,
                 Some(user_id),
                 plan.limits.concurrency,
-                env,
+                grant,
             )
             .await
         }
-        None => {
+        _ => {
             match execute_raw(
                 &state,
                 source,
                 Job::Http(request),
                 limits,
                 Some(user_id),
-                None,
+                HostGrant::default(),
             )
             .await
             {
@@ -1527,6 +1622,8 @@ async fn verify(
                 "kind": kind,
                 "config": config,
                 "secrets": inspection.config.secrets,
+                "state": inspection.config.wants_state(),
+                "objects": inspection.config.objects.keys().collect::<Vec<_>>(),
             }))
             .into_response()
         }
@@ -1738,7 +1835,7 @@ async fn mcp_execute(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Valu
         Job::Http(HttpRequest::post_json(input)),
         limits,
         Some(user_id),
-        None,
+        HostGrant::default(),
     )
     .await
     {
@@ -2056,6 +2153,25 @@ async fn inbox_delete(
     }
 }
 
+/// The explicit, separate deletion path for durable state. Scoped to the
+/// caller's own account by construction, and deliberately independent of
+/// whether the function still exists — state outlives delete/redeploy, so its
+/// removal cannot depend on the function record being there.
+async fn purge_function_state(
+    State(state): Shared,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    match state.fnstate.purge(user_id, &name).await {
+        Ok(removed) => Json(json!({ "purged_keys": removed })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "state_error", e),
+    }
+}
+
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/functions", post(push_function).get(list_functions))
@@ -2063,6 +2179,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
             "/api/functions/{name}",
             get(function_detail).delete(delete_function),
         )
+        .route("/api/functions/{name}/state", delete(purge_function_state))
         .route("/api/runs", post(create_run))
         .route("/api/invoke", post(invoke))
         .route("/api/verify", post(verify))

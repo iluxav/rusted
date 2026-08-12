@@ -163,6 +163,9 @@ enum Cmd {
     /// Throwaway URLs that anyone can POST to, for receiving callbacks
     #[command(subcommand)]
     Inbox(InboxCmd),
+    /// Durable per-function state (`context.state`)
+    #[command(subcommand)]
+    State(StateCmd),
     /// Write TypeScript declarations for `request`, `context`, and the globals
     Types {
         /// Where to write them (default: rusted.d.ts)
@@ -180,6 +183,15 @@ enum Cmd {
         #[arg(long)]
         mcp: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum StateCmd {
+    /// Permanently delete EVERY state key a function holds.
+    ///
+    /// State survives redeploys and even deleting the function — this is the
+    /// one explicit way it goes away.
+    Purge { name: String },
 }
 
 #[derive(Subcommand)]
@@ -685,6 +697,20 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 None,
             )?;
             emit(&cli, &v, |_| format!("deleted {name}"))
+        }
+        Cmd::State(StateCmd::Purge { ref name }) => {
+            let v = api(
+                &cli,
+                Method::DELETE,
+                &format!("/api/functions/{name}/state"),
+                None,
+            )?;
+            emit(&cli, &v, |v| {
+                format!(
+                    "purged {} state key(s) of {name}",
+                    v["purged_keys"].as_u64().unwrap_or(0)
+                )
+            })
         }
         Cmd::New { ref name, js, mcp } => scaffold(name, js, mcp),
         Cmd::Types { ref out } => {

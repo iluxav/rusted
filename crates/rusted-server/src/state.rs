@@ -51,6 +51,11 @@ pub struct AppState {
     /// Encrypted per-account secrets, decrypted into `context.env` for
     /// functions that request them.
     pub secrets: crate::secrets::SecretStore,
+    /// Durable per-function JSON state (`context.state`).
+    pub fnstate: crate::fnstate::StateStore,
+    /// Object-storage bindings (`context.objects`): endpoint allowlist and
+    /// the signing/HTTP machinery.
+    pub objects: crate::objects::ObjectHost,
     pub auth: AuthCaches,
     pub analytics: Recorder,
     pub plan_cache: PlanCache,
@@ -197,6 +202,8 @@ impl AppState {
         Self {
             store,
             secrets: crate::secrets::SecretStore::new(pool.clone()),
+            fnstate: crate::fnstate::StateStore::new(pool.clone()),
+            objects: crate::objects::ObjectHost::from_env(),
             pool,
             auth: AuthCaches::default(),
             analytics,

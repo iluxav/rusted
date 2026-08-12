@@ -793,10 +793,9 @@ async fn redeploying_an_mcp_function_as_http_switches_back() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["kind"], "http");
     assert!(v.get("tools").is_none(), "http detail must not carry tools");
-    assert!(
-        v.get("public").is_none(),
-        "http detail must not carry public"
-    );
+    // Since `public: true` became an http declaration too, the detail names
+    // the flag for every kind — a plain handler is simply not public.
+    assert_eq!(v["public"], json!(false));
 }
 
 #[tokio::test]
@@ -3366,4 +3365,144 @@ async fn a_public_mcp_function_passes_the_gate_too() {
     assert_eq!(r.status(), 200);
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["result"]["tools"][0]["name"], "ping", "{v}");
+}
+
+// ------------------------------------------------------------ capabilities
+
+const COUNTER: &str = r#"export const config = { state: true };
+export default async function handler(request, context) {
+    const entry = await context.state.get("hits");
+    const wrote = await context.state.compareAndSet(
+        "hits",
+        entry?.version ?? null,
+        (entry?.value ?? 0) + 1,
+    );
+    if (!wrote.ok) return context.json({ retry: true }, { status: 409 });
+    return context.json({ hits: wrote.version });
+}"#;
+
+#[tokio::test]
+async fn durable_state_counts_across_invocations_and_revisions() {
+    let t = boot().await;
+    assert_eq!(push(&t, "counter", COUNTER).await.status(), 200);
+
+    for expected in 1..=2 {
+        let r = t.client.post(t.data("/f/counter")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.json::<Value>().await.unwrap()["hits"], expected);
+    }
+
+    // A new revision keeps counting where the old one left off.
+    assert_eq!(
+        push(&t, "counter", &format!("{COUNTER}\n// rev2"))
+            .await
+            .status(),
+        200
+    );
+    let r = t.client.post(t.data("/f/counter")).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["hits"], 3);
+
+    // The explicit purge via the admin API resets it.
+    let r = t
+        .client
+        .delete(t.admin("/api/functions/counter/state"))
+        .bearer_auth(&t.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["purged_keys"], 1);
+    let r = t.client.post(t.data("/f/counter")).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["hits"], 1);
+}
+
+/// The one endpoint the object e2e tests allowlist. Set identically by every
+/// test that needs it, since the environment is process-global.
+fn enable_object_endpoint() {
+    std::env::set_var(
+        rusted_server::objects::KEY_ENV,
+        "https://objects-test.example.com",
+    );
+}
+
+fn binding_module(endpoint: &str) -> String {
+    format!(
+        r#"export const config = {{ objects: {{ BLOBS: {{
+            endpoint: "{endpoint}", bucket: "test-bucket", maxObjectBytes: 1024,
+            accessKeyIdSecret: "OBJ_AK", secretAccessKeySecret: "OBJ_SK",
+        }} }} }};
+export default async function handler(request, context) {{
+    const put = await context.objects.BLOBS.presignPut("docs/one.bin", {{
+        contentLength: 5,
+        sha256: "a".repeat(64),
+    }});
+    return context.json({{ url: put.url, headers: put.headers }});
+}}"#
+    )
+}
+
+#[tokio::test]
+async fn object_bindings_deploy_only_onto_the_allowlist() {
+    let t = boot().await;
+    // This endpoint is on nobody's allowlist, whatever other tests enabled.
+    let r = push(
+        &t,
+        "sneaky",
+        &binding_module("https://not-allowed.example.net"),
+    )
+    .await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "endpoint_not_allowed", "{v}");
+}
+
+#[tokio::test]
+async fn object_bindings_need_credentials_and_then_presign() {
+    enable_object_endpoint();
+    enable_secret_store();
+    let t = boot().await;
+    let module = binding_module("https://objects-test.example.com");
+    assert_eq!(push(&t, "blobby", &module).await.status(), 200);
+
+    // Credentials not in the vault yet: refused before the handler runs.
+    let r = t.client.post(t.data("/f/blobby")).send().await.unwrap();
+    assert_eq!(r.status(), 500);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "capability_unavailable", "{v}");
+    // The generic message leaks neither secret names nor endpoints.
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        !message.contains("OBJ_AK") && !message.contains("objects-test"),
+        "{message}"
+    );
+
+    // With credentials set, the handler gets a signed URL for the exact
+    // bytes — string checks only, nothing leaves the process.
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault
+        .set(t.user_id, "OBJ_AK", "test-access-key")
+        .await
+        .unwrap();
+    vault
+        .set(t.user_id, "OBJ_SK", "test-secret-key")
+        .await
+        .unwrap();
+    let r = t.client.post(t.data("/f/blobby")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let url = v["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("https://objects-test.example.com/test-bucket/"),
+        "{url}"
+    );
+    // Namespaced: the caller's key sits under an opaque 32-hex prefix.
+    assert!(url.contains("/docs/one.bin?"), "{url}");
+    assert!(
+        !url.contains("/test-bucket/docs/"),
+        "namespace missing: {url}"
+    );
+    assert_eq!(v["headers"]["content-length"], "5", "{v}");
+    assert_eq!(v["headers"]["if-none-match"], "*", "{v}");
+    // The credential id appears only as SigV4 requires; the secret never.
+    assert!(!url.contains("test-secret-key"), "{url}");
 }

@@ -9,6 +9,8 @@ repository = "https://github.com/iluxav/rusted"
 [dependencies]
 rusted-engine = { workspace = true }
 aes-gcm = { workspace = true }
+rusty-s3 = { workspace = true }
+httpdate = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

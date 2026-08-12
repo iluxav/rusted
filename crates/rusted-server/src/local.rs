@@ -121,6 +121,8 @@ struct Loaded {
     sourcemap: Option<Arc<sourcemap::SourceMap>>,
     /// Where the map's relative sources resolve from (the bundle's directory).
     sourcemap_base: PathBuf,
+    /// The module's `export const config` — capability declarations.
+    config: rusted_engine::RuntimeConfig,
 }
 
 struct LocalState {
@@ -135,6 +137,9 @@ struct LocalState {
     /// available. None until (or unless) that lands — warnings fall back to
     /// naming the cheapest tier that would work.
     plan: RwLock<Option<String>>,
+    /// Local capability adapters: in-memory state, temp-dir objects. Created
+    /// once, so state survives every hot reload and dies with the process.
+    services: Arc<crate::localcaps::LocalServices>,
 }
 
 /// Reads the entry file and its `export const http`, falling back to the
@@ -205,6 +210,25 @@ fn load(
             Served::Mcp(json!({ "public": config.public, "tools": config.tools })),
         ),
     };
+    if inspection.config.wants_state() {
+        println!(
+            "\x1b[38;5;180m▸ this module declares state; local state is in-memory — it survives \
+             reloads and resets when this process exits\x1b[0m"
+        );
+    }
+    if !inspection.config.objects.is_empty() {
+        println!(
+            "\x1b[38;5;180m▸ this module declares object bindings ({}); local objects live in a \
+             temp directory with dev-server transfer URLs\x1b[0m",
+            inspection
+                .config
+                .objects
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let sourcemap = sourcemap_json
         .and_then(|json| sourcemap::SourceMap::from_reader(json.as_bytes()).ok())
         .map(Arc::new);
@@ -214,6 +238,7 @@ fn load(
         surface,
         sourcemap,
         // The map's sources are relative to the entry's own directory.
+        config: inspection.config,
         sourcemap_base: match entry.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
@@ -278,23 +303,37 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
     let loaded = load(&config.entry, source, sourcemap, &executor)?;
     let name = loaded.name.clone();
     let surface = loaded.surface.clone();
+    let services = Arc::new(crate::localcaps::LocalServices::new(loaded.name.clone()));
+    services.reload(&loaded.name, &loaded.config);
     let state = Arc::new(LocalState {
         loaded: RwLock::new(loaded),
         rev: std::sync::atomic::AtomicU64::new(1),
         executor: executor.clone(),
         limits: config.limits.clone(),
         plan: RwLock::new(None),
+        services,
     });
 
     let app = Router::new()
         .route("/f/{name}", any(handle_root))
         .route("/f/{name}/{*rest}", any(handle_sub))
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
+        // Local object transfers ride the dev server itself; their own body
+        // limit, since an object is not a request payload.
+        .route(
+            "/_objects/{token}",
+            axum::routing::put(object_put)
+                .get(object_get)
+                .layer(DefaultBodyLimit::max(
+                    crate::localcaps::LOCAL_MAX_TRANSFER_BYTES as usize,
+                )),
+        )
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port))
         .await
         .map_err(|e| format!("cannot bind port {}: {e}", config.port))?;
     let addr: SocketAddr = listener.local_addr().map_err(|e| e.to_string())?;
+    state.services.set_base_url(format!("http://{addr}"));
 
     println!("\x1b[1;38;5;209mrusted\x1b[0m dev server");
     match &surface {
@@ -422,6 +461,7 @@ async fn watch_loop(state: Arc<LocalState>, entry: PathBuf, pipeline: Pipeline) 
                     "\x1b[38;5;150m✓ reloaded {} ({bytes} bytes, {surface})\x1b[0m\n",
                     next.name
                 );
+                state.services.reload(&next.name, &next.config);
                 *state.loaded.write().unwrap() = next;
                 state.rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -463,7 +503,7 @@ async fn dispatch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (source, expected_name, surface, sourcemap, sourcemap_base) = {
+    let (source, expected_name, surface, sourcemap, sourcemap_base, caps) = {
         let loaded = state.loaded.read().unwrap();
         (
             loaded.source.clone(),
@@ -471,6 +511,7 @@ async fn dispatch(
             loaded.surface.clone(),
             loaded.sourcemap.clone(),
             loaded.sourcemap_base.clone(),
+            rusted_engine::Capabilities::from_config(&loaded.config),
         )
     };
     if name != expected_name {
@@ -578,8 +619,11 @@ async fn dispatch(
     let script_bytes = source.len();
     // The same async path the deployed server uses, so what you see locally is
     // what happens in production — including fetches overlapping rather than
-    // holding the thread.
-    let result = executor.execute_async(&source, &request, &limits).await;
+    // holding the thread. Declared capabilities ride on the local adapters.
+    let services: Arc<dyn rusted_engine::HostServices> = state.services.clone();
+    let result = executor
+        .execute_with_services(&source, &request, &limits, Some(services), None, &caps)
+        .await;
 
     let stack = result
         .stack
@@ -662,9 +706,20 @@ async fn dispatch_mcp(
     let rev = state.rev.load(std::sync::atomic::Ordering::Relaxed);
     crate::mcp_wire::respond(body, headers, move |msg| async move {
         crate::mcp_host::handle_message(meta, name, rev, msg, move |tool, args| async move {
+            let caps =
+                rusted_engine::Capabilities::from_config(&state.loaded.read().unwrap().config);
+            let services: Arc<dyn rusted_engine::HostServices> = state.services.clone();
             let result = state
                 .executor
-                .execute_tool_with_services(source, &tool, &args, &state.limits, None, None)
+                .execute_tool_with_services(
+                    source,
+                    &tool,
+                    &args,
+                    &state.limits,
+                    Some(services),
+                    None,
+                    &caps,
+                )
                 .await;
             let stack = result
                 .stack
@@ -818,4 +873,38 @@ fn report(
         println!("  \x1b[38;5;214m⚠ {advisory}\x1b[0m");
     }
     println!();
+}
+
+// ---------------------------------------------------------- local transfers
+
+/// One upload against a URL `presignPut` handed out. The checks mirror what
+/// the real provider enforces: expiry, exact length, exact checksum,
+/// create-only.
+async fn object_put(
+    State(state): State<Arc<LocalState>>,
+    AxumPath(token): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    let (status, message) = state.services.accept_put(&token, &body);
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (code, message).into_response()
+}
+
+async fn object_get(
+    State(state): State<Arc<LocalState>>,
+    AxumPath(token): AxumPath<String>,
+) -> Response {
+    match state.services.accept_get(&token) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err((status, message)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            message,
+        )
+            .into_response(),
+    }
 }

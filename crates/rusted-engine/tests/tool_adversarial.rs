@@ -2,7 +2,7 @@
 // clean Outcome (Error or Terminated), never a panic or a hang.
 use std::time::Duration;
 
-use rusted_engine::{Limits, OutboundPolicy, Outcome, QuickJsExecutor};
+use rusted_engine::{Capabilities, Limits, OutboundPolicy, Outcome, QuickJsExecutor};
 
 fn limits(wall_ms: u64) -> Limits {
     Limits {
@@ -26,6 +26,7 @@ async fn run(source: &str, tool: &str) -> rusted_engine::InvocationResult {
             &limits(1000),
             None,
             None,
+            &Capabilities::none(),
         )
         .await
 }
@@ -150,7 +151,15 @@ async fn a_handler_returning_a_never_settling_promise_is_terminated() {
         description: "d", inputSchema: { type: "object" },
         handler() { return new Promise(() => {}); } } } };"#;
     let r = QuickJsExecutor::new()
-        .execute_tool_with_services(src, "t", &serde_json::json!({}), &limits(300), None, None)
+        .execute_tool_with_services(
+            src,
+            "t",
+            &serde_json::json!({}),
+            &limits(300),
+            None,
+            None,
+            &Capabilities::none(),
+        )
         .await;
     assert!(
         matches!(&r.outcome, Outcome::Terminated(m) if m.contains("never")),

@@ -800,3 +800,96 @@ fn random_length_is_bounded_and_integral() {
     let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
     assert_eq!(success(&r.outcome), "refused,refused,refused,refused");
 }
+
+const CAP_HANDLER: &str = r#"export default async function handler(request, context) {
+    return context.json({ state: typeof context.state, objects: typeof context.objects });
+}"#;
+
+#[test]
+fn inspect_reads_state_and_object_declarations() {
+    let src = format!(
+        r#"export const config = {{
+            state: true,
+            objects: {{ SHARES: {{
+                endpoint: "https://acct.r2.cloudflarestorage.com",
+                region: "auto",
+                bucket: "renote-shares",
+                maxObjectBytes: 67108864,
+                accessKeyIdSecret: "R2_ACCESS_KEY_ID",
+                secretAccessKeySecret: "R2_SECRET_ACCESS_KEY",
+            }} }},
+        }};
+        {CAP_HANDLER}"#
+    );
+    let inspection = exec().inspect(&src).expect("valid source inspects");
+    assert!(inspection.config.wants_state());
+    let binding = &inspection.config.objects["SHARES"];
+    assert_eq!(binding.endpoint, "https://acct.r2.cloudflarestorage.com");
+    assert_eq!(binding.bucket, "renote-shares");
+    assert_eq!(binding.max_object_bytes, 67108864);
+    assert_eq!(binding.access_key_id_secret, "R2_ACCESS_KEY_ID");
+}
+
+#[test]
+fn inspect_rejects_bad_capability_declarations() {
+    let binding = |patch: &str| {
+        format!(
+            r#"export const config = {{ objects: {{ {patch} }} }};
+            {CAP_HANDLER}"#
+        )
+    };
+    let full = |endpoint: &str, max: &str, extra: &str| {
+        binding(&format!(
+            r#"SHARES: {{
+                endpoint: "{endpoint}", bucket: "bkt-ok", maxObjectBytes: {max},
+                accessKeyIdSecret: "AK", secretAccessKeySecret: "SK"{extra}
+            }}"#
+        ))
+    };
+    for (src, expected) in [
+        (
+            format!("export const config = {{ state: false }};\n{CAP_HANDLER}"),
+            "exactly true",
+        ),
+        // Env-style binding names, so `context.objects.<NAME>` always parses.
+        (
+            binding(
+                r#"lower: { endpoint: "https://h", bucket: "bkt-ok", maxObjectBytes: 1, accessKeyIdSecret: "AK", secretAccessKeySecret: "SK" }"#,
+            ),
+            "binding name",
+        ),
+        (full("https://h/path", "1", ""), "exact origin"),
+        (full("ftp://h", "1", ""), "exact origin"),
+        (full("https://h", "0", ""), "maxObjectBytes"),
+        (full("https://h", "5368709121", ""), "maxObjectBytes"),
+        (full("https://h", "1", r#", extraKey: 1"#), "extraKey"),
+    ] {
+        let err = exec().inspect(&src).expect_err("must be refused");
+        assert!(err.contains(expected), "wanted {expected:?} in: {err}");
+    }
+
+    // Storage credentials are host-only: also listing one in config.secrets
+    // would hand it to JavaScript via context.env.
+    let conflicted = format!(
+        r#"export const config = {{
+            secrets: ["AK"],
+            objects: {{ S: {{ endpoint: "https://h", bucket: "bkt-ok",
+                maxObjectBytes: 1, accessKeyIdSecret: "AK", secretAccessKeySecret: "SK" }} }},
+        }};
+        {CAP_HANDLER}"#
+    );
+    let err = exec().inspect(&conflicted).expect_err("must be refused");
+    assert!(err.contains("cannot also be listed"), "{err}");
+}
+
+#[test]
+fn undeclared_capabilities_are_absent_from_context() {
+    // Even a module that DECLARES them sees nothing unless the host supplies
+    // them — and the blocking executor never does.
+    let src = format!("export const config = {{ state: true }};\n{CAP_HANDLER}");
+    let r = exec().execute(&src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(
+        success(&r.outcome),
+        r#"{"state":"undefined","objects":"undefined"}"#
+    );
+}

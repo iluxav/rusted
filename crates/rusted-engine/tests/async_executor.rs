@@ -3,7 +3,8 @@
 use std::time::{Duration, Instant};
 
 use rusted_engine::{
-    Executor, HttpRequest, InvocationResult, Limits, OutboundPolicy, Outcome, QuickJsExecutor,
+    Capabilities, Executor, HttpRequest, InvocationResult, Limits, OutboundPolicy, Outcome,
+    QuickJsExecutor,
 };
 
 fn limits(wall_ms: u64, outbound: u32) -> Limits {
@@ -249,7 +250,15 @@ export const mcp = {
 
 async fn run_tool(source: &str, tool: &str, args: serde_json::Value) -> InvocationResult {
     QuickJsExecutor::new()
-        .execute_tool_with_services(source, tool, &args, &Limits::default(), None, None)
+        .execute_tool_with_services(
+            source,
+            tool,
+            &args,
+            &Limits::default(),
+            None,
+            None,
+            &Capabilities::none(),
+        )
         .await
 }
 
@@ -339,7 +348,15 @@ async fn an_async_tool_can_fetch() {
         } } } };"#;
     let l = limits(2000, 2);
     let r = QuickJsExecutor::new()
-        .execute_tool_with_services(src, "leak", &serde_json::json!({}), &l, None, None)
+        .execute_tool_with_services(
+            src,
+            "leak",
+            &serde_json::json!({}),
+            &l,
+            None,
+            None,
+            &Capabilities::none(),
+        )
         .await;
     match &r.outcome {
         Outcome::Error(m) => assert!(m.contains("private address"), "{m}"),
@@ -363,7 +380,7 @@ export default async function handler(request, context) {
     let mut env = std::collections::BTreeMap::new();
     env.insert("API_TOKEN".to_string(), "s3cr3t".to_string());
     let with = ex
-        .execute_with_services(src, &req, &l, None, Some(&env))
+        .execute_with_services(src, &req, &l, None, Some(&env), &Capabilities::none())
         .await;
     assert_eq!(
         shape(&with.outcome),
@@ -372,7 +389,9 @@ export default async function handler(request, context) {
 
     // Nothing handed in: context.env must be undefined, not an empty object —
     // absence is how a handler learns this host injects nothing.
-    let without = ex.execute_with_services(src, &req, &l, None, None).await;
+    let without = ex
+        .execute_with_services(src, &req, &l, None, None, &Capabilities::none())
+        .await;
     assert_eq!(
         shape(&without.outcome),
         r#"success:{"present":false,"token":null}"#
@@ -395,6 +414,7 @@ async fn env_reaches_tool_handlers_the_same_way() {
             &limits(1000, 0),
             None,
             Some(&env),
+            &Capabilities::none(),
         )
         .await;
     assert!(
@@ -410,6 +430,7 @@ async fn env_reaches_tool_handlers_the_same_way() {
             &limits(1000, 0),
             None,
             None,
+            &Capabilities::none(),
         )
         .await;
     assert!(
@@ -417,4 +438,114 @@ async fn env_reaches_tool_handlers_the_same_way() {
         "{:?}",
         without.outcome
     );
+}
+
+/// A canned host: state ops echo a fixed entry, object ops echo the binding
+/// and op back. What this pins is the GLUE — that declared capabilities
+/// surface as working context members wired to the host natives, and that
+/// host errors become thrown JS errors.
+struct CannedHost;
+
+impl rusted_engine::HostServices for CannedHost {
+    fn inbox_get(
+        &self,
+        _name: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        Box::pin(async { Err("no inboxes here".to_string()) })
+    }
+
+    fn state_op(
+        &self,
+        op_json: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let op: serde_json::Value = serde_json::from_str(&op_json).unwrap();
+            match op["op"].as_str() {
+                Some("get") => Ok(format!(
+                    r#"{{"entry":{{"key":{},"value":7,"version":3}}}}"#,
+                    op["key"]
+                )),
+                Some("cas") => Ok(r#"{"ok":true,"version":4}"#.to_string()),
+                _ => Err("boom-state".to_string()),
+            }
+        })
+    }
+
+    fn object_op(
+        &self,
+        binding: String,
+        op_json: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let op: serde_json::Value = serde_json::from_str(&op_json).unwrap();
+            Ok(serde_json::json!({ "head": { "binding": binding, "op": op["op"] } }).to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn declared_capabilities_reach_the_handler_through_the_glue() {
+    let src = r#"export const config = { state: true, objects: { SHARES: {
+        endpoint: "https://h", bucket: "bkt-ok", maxObjectBytes: 1,
+        accessKeyIdSecret: "AK", secretAccessKeySecret: "SK" } } };
+export default async function handler(request, context) {
+    const entry = await context.state.get("k");
+    const cas = await context.state.compareAndSet("k", 3, 8);
+    const head = await context.objects.SHARES.head("some/key");
+    let failed = "no";
+    try { await context.state.list(); } catch (e) { failed = e.message; }
+    return context.json({ entry, cas, head, failed });
+}"#;
+    let caps = Capabilities {
+        state: true,
+        objects: vec!["SHARES".to_string()],
+    };
+    let r = QuickJsExecutor::new()
+        .execute_with_services(
+            src,
+            &HttpRequest::post_json("{}"),
+            &limits(2000, 0),
+            Some(std::sync::Arc::new(CannedHost)),
+            None,
+            &caps,
+        )
+        .await;
+    let body = match &r.outcome {
+        Outcome::Success(s) => s.clone(),
+        o => panic!("expected success, got {o:?}"),
+    };
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["entry"]["version"], 3, "{v}");
+    assert_eq!(v["cas"]["version"], 4, "{v}");
+    assert_eq!(v["head"]["binding"], "SHARES", "{v}");
+    // A host error surfaces as a thrown Error with the host's message.
+    assert_eq!(v["failed"], "boom-state", "{v}");
+}
+
+#[tokio::test]
+async fn capabilities_the_host_withholds_stay_absent_despite_declaration() {
+    // Declared in the module, but the host supplies none (caps empty): both
+    // must be undefined, not broken stubs.
+    let src = r#"export const config = { state: true };
+export default async function handler(request, context) {
+    return context.json({ state: typeof context.state, objects: typeof context.objects });
+}"#;
+    let r = QuickJsExecutor::new()
+        .execute_with_services(
+            src,
+            &HttpRequest::post_json("{}"),
+            &limits(2000, 0),
+            Some(std::sync::Arc::new(CannedHost)),
+            None,
+            &Capabilities::none(),
+        )
+        .await;
+    let body = match &r.outcome {
+        Outcome::Success(s) => s.clone(),
+        o => panic!("expected success, got {o:?}"),
+    };
+    assert_eq!(body, r#"{"state":"undefined","objects":"undefined"}"#);
 }

@@ -1,4 +1,4 @@
-use rusted_server::store::{HttpTrigger, Store};
+use rusted_server::store::{Declared, HttpTrigger, Store};
 use rusted_server::testsupport;
 use sqlx::Row;
 
@@ -21,7 +21,7 @@ async fn store() -> (Store, sqlx::PgPool, uuid::Uuid) {
 async fn push_creates_revision_and_artifact() {
     let (store, pool, owner) = store().await;
     let rev = store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     assert_eq!(rev.rev, 1);
@@ -39,11 +39,11 @@ async fn push_creates_revision_and_artifact() {
 async fn identical_source_dedupes_artifact_but_adds_revision() {
     let (store, pool, owner) = store().await;
     let r1 = store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     let r2 = store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     assert_eq!((r1.rev, r2.rev), (1, 2));
@@ -60,11 +60,11 @@ async fn identical_source_dedupes_artifact_but_adds_revision() {
 async fn new_source_moves_current_revision() {
     let (store, _pool, owner) = store().await;
     store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     store
-        .push("greet", SRC_B, Some(owner), &[], false)
+        .push("greet", SRC_B, Some(owner), &Declared::default())
         .await
         .unwrap();
     let record = store.get("greet").await.unwrap().unwrap();
@@ -77,7 +77,7 @@ async fn new_source_moves_current_revision() {
 async fn functions_visible_from_a_second_store_instance() {
     let (store, pool, owner) = store().await;
     store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     let other = Store::new(pool);
@@ -89,7 +89,7 @@ async fn functions_visible_from_a_second_store_instance() {
 async fn delete_removes_function_but_keeps_artifacts() {
     let (store, pool, owner) = store().await;
     let rev = store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     assert!(store.delete("greet").await.unwrap());
@@ -122,8 +122,7 @@ async fn trigger_config_persists() {
                 path: Some("/users/{id}".into()),
             },
             Some(owner),
-            &[],
-            false,
+            &Declared::default(),
         )
         .await
         .unwrap();
@@ -145,13 +144,12 @@ async fn plain_push_preserves_existing_trigger() {
                 path: Some("/ping".into()),
             },
             Some(owner),
-            &[],
-            false,
+            &Declared::default(),
         )
         .await
         .unwrap();
     store
-        .push("api", SRC_B, Some(owner), &[], false)
+        .push("api", SRC_B, Some(owner), &Declared::default())
         .await
         .unwrap();
     let trigger = store.get("api").await.unwrap().unwrap().trigger;
@@ -171,8 +169,7 @@ async fn mcp_metadata_round_trips() {
             "mcp",
             Some(&meta),
             Some(owner),
-            &[],
-            false,
+            &Declared::default(),
         )
         .await
         .unwrap();
@@ -197,15 +194,14 @@ async fn redeploying_as_http_clears_mcp_metadata() {
             "mcp",
             Some(&meta),
             Some(owner),
-            &[],
-            false,
+            &Declared::default(),
         )
         .await
         .unwrap();
     // A plain push always derives kind from the source being deployed, so the
     // mcp metadata must not survive the function's return to http.
     store
-        .push("flip", SRC_A, Some(owner), &[], false)
+        .push("flip", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     let f = store.fetch("flip").await.unwrap().unwrap();
@@ -218,7 +214,7 @@ async fn redeploying_as_http_clears_mcp_metadata() {
 async fn fetch_caches_and_own_pushes_invalidate() {
     let (store, _pool, owner) = store().await;
     store
-        .push("greet", SRC_A, Some(owner), &[], false)
+        .push("greet", SRC_A, Some(owner), &Declared::default())
         .await
         .unwrap();
     let first = store.fetch("greet").await.unwrap().unwrap();
@@ -226,7 +222,7 @@ async fn fetch_caches_and_own_pushes_invalidate() {
     assert_eq!(first.kind, "http");
     assert!(first.mcp.is_none());
     store
-        .push("greet", SRC_B, Some(owner), &[], false)
+        .push("greet", SRC_B, Some(owner), &Declared::default())
         .await
         .unwrap();
     let second = store.fetch("greet").await.unwrap().unwrap();

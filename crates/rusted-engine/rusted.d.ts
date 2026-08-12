@@ -60,6 +60,101 @@ declare namespace Rusted {
 		get<T = unknown>(name: string): Promise<T[]>;
 	}
 
+	/** One durable state entry. */
+	interface StateEntry<T = unknown> {
+		key: string;
+		value: T;
+		/** Increments on every successful write; the CAS token. */
+		version: number;
+	}
+
+	/**
+	 * Durable JSON state scoped to (owner, function name) — it survives
+	 * revisions and even delete/redeploy. Single-key compare-and-set is the
+	 * transaction boundary; there are no multi-key transactions.
+	 */
+	interface State {
+		get<T = unknown>(key: string): Promise<StateEntry<T> | null>;
+		/**
+		 * Writes `value` only if the entry's version is exactly
+		 * `expectedVersion` (`null` means "create; fail if it exists").
+		 * Keys are 1–512 UTF-8 bytes; values serialize to at most 64 KiB.
+		 */
+		compareAndSet<T>(
+			key: string,
+			expectedVersion: number | null,
+			value: T,
+		): Promise<
+			| { ok: true; version: number }
+			| { ok: false; currentVersion: number | null }
+		>;
+		delete(
+			key: string,
+			expectedVersion: number,
+		): Promise<{ ok: true } | { ok: false; currentVersion: number | null }>;
+		/** Lexicographic by key, at most 100 entries per call. */
+		list<T = unknown>(options?: {
+			prefix?: string;
+			cursor?: string;
+			limit?: number;
+		}): Promise<{ items: StateEntry<T>[]; cursor?: string }>;
+	}
+
+	/**
+	 * One declared object-storage binding, exposed at
+	 * `context.objects.<NAME>`. Keys live inside a namespace private to this
+	 * owner and function — other functions' objects are unreachable by
+	 * construction. S3 traffic here is a host capability: it does not spend
+	 * the invocation's outbound-fetch allowance.
+	 */
+	interface ObjectStore {
+		/**
+		 * A presigned upload URL for exactly `contentLength` bytes with
+		 * exactly this SHA-256 (64 lowercase hex chars). Create-only: PUT to
+		 * an existing key fails. Send every header in `headers` verbatim.
+		 * Expires in `expiresInSeconds` (15–300, default 120).
+		 */
+		presignPut(key: string, options: {
+			contentLength: number;
+			sha256: string;
+			expiresInSeconds?: number;
+		}): Promise<{ url: string; headers: Record<string, string>; expiresAt: number }>;
+		presignGet(key: string, options?: {
+			expiresInSeconds?: number;
+		}): Promise<{ url: string; headers: Record<string, string>; expiresAt: number }>;
+		head(key: string): Promise<{
+			contentLength: number;
+			sha256?: string;
+			etag?: string;
+			lastModified?: number;
+		} | null>;
+		delete(key: string): Promise<boolean>;
+		/** At most 1,000 keys per call, namespace already stripped. */
+		list(options?: {
+			prefix?: string;
+			cursor?: string;
+			limit?: number;
+		}): Promise<{ keys: string[]; cursor?: string }>;
+	}
+
+	/** One binding under `config.objects` — read at deploy time. */
+	interface ObjectBindingConfig {
+		/** Exact origin, e.g. "https://<account>.r2.cloudflarestorage.com". */
+		endpoint: string;
+		/** SigV4 region. Defaults to "auto" (what R2 expects). */
+		region?: string;
+		bucket: string;
+		/** Hard per-object ceiling, enforced before a PUT is signed. */
+		maxObjectBytes: number;
+		/**
+		 * Secret-vault entries holding the credentials. Resolved by the host;
+		 * never readable from JavaScript, and refused if also listed in
+		 * `config.secrets`.
+		 */
+		accessKeyIdSecret: string;
+		secretAccessKeySecret: string;
+	}
+
 	/** Helpers for building a response. */
 	interface Context {
 		/** `application/json`. */
@@ -92,6 +187,16 @@ declare namespace Rusted {
 		 * 32 bytes (256 bits) encodes to 43 characters.
 		 */
 		randomBase64Url(length: number): string;
+		/**
+		 * Durable state, present only when the module declares
+		 * `config.state = true` and the host supplies it.
+		 */
+		state?: State;
+		/**
+		 * Object-storage bindings declared in `config.objects`, by name.
+		 * Present only for declared bindings the host supplies.
+		 */
+		objects?: Record<string, ObjectStore>;
 	}
 
 	/**
@@ -106,6 +211,10 @@ declare namespace Rusted {
 		 * at most 32 names.
 		 */
 		secrets?: string[];
+		/** Durable state. Must be exactly `true` when present. */
+		state?: true;
+		/** Object-storage bindings by name (`[A-Z][A-Z0-9_]{0,63}`). */
+		objects?: Record<string, ObjectBindingConfig>;
 	}
 
 	/** `export const http = { … }` — read at deploy time. */
@@ -177,6 +286,16 @@ declare namespace Rusted {
 		 * 32 bytes (256 bits) encodes to 43 characters.
 		 */
 		randomBase64Url(length: number): string;
+		/**
+		 * Durable state, present only when the module declares
+		 * `config.state = true` and the host supplies it.
+		 */
+		state?: State;
+		/**
+		 * Object-storage bindings declared in `config.objects`, by name.
+		 * Present only for declared bindings the host supplies.
+		 */
+		objects?: Record<string, ObjectStore>;
 	}
 
 	/**

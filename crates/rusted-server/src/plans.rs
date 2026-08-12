@@ -26,11 +26,26 @@ pub struct PlanLimits {
     #[serde(default = "one")]
     pub concurrency: usize,
     pub analytics_days: i64,
+    /// Durable-state keys one function may hold.
+    #[serde(default = "default_state_keys")]
+    pub max_state_keys: i64,
+    /// Total serialized bytes of one function's durable state.
+    #[serde(default = "default_state_bytes")]
+    pub max_state_bytes: i64,
 }
 
 /// Plan rows written before concurrency was a dimension.
 fn one() -> usize {
     1
+}
+
+/// Plan rows written before durable state was a dimension.
+fn default_state_keys() -> i64 {
+    256
+}
+
+fn default_state_bytes() -> i64 {
+    1024 * 1024
 }
 
 impl Default for PlanLimits {
@@ -44,6 +59,8 @@ impl Default for PlanLimits {
             outbound_reqs: 2,
             concurrency: 2,
             analytics_days: 2,
+            max_state_keys: default_state_keys(),
+            max_state_bytes: default_state_bytes(),
         }
     }
 }

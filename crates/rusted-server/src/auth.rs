@@ -308,6 +308,7 @@ pub async fn invalidation_listener(database_url: String, state: Arc<AppState>) {
                 state.plan_cache.clear();
                 state.inboxes.clear();
                 state.secrets.invalidate_all();
+                state.fnstate.invalidate_all();
                 while let Ok(event) = listener.recv().await {
                     dispatch(&state, event.payload());
                 }
@@ -331,6 +332,13 @@ fn dispatch(state: &AppState, payload: &str) {
         Some(("secret", user_id)) => {
             if let Ok(user_id) = user_id.parse() {
                 state.secrets.invalidate(user_id);
+            }
+        }
+        Some(("fnstate", rest)) => {
+            if let Some((user_id, function_name)) = rest.split_once(':') {
+                if let Ok(user_id) = user_id.parse() {
+                    state.fnstate.invalidate(user_id, function_name);
+                }
             }
         }
         _ => {}

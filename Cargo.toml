@@ -21,6 +21,10 @@ rolldown = "=1.2.1"
 rolldown_common = "=1.2.1"
 aes-gcm = "0.10"
 getrandom = "0.3"
+# SigV4 presigning without an HTTP client of its own — the host performs
+# head/delete/list itself and hands the signed PUT/GET URLs to callers.
+rusty-s3 = "0.8"
+httpdate = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jsonschema = { version = "0.26", default-features = false }

@@ -316,6 +316,61 @@ Values are sealed with AES-256-GCM before they reach Postgres, under a key from 
 
 > Like `context.inbox`, `context.env` is absent under `rusted run` — local mode has no store to decrypt from, and says so at startup if the module requests secrets.
 
+## Durable state
+
+Functions are stateless between invocations — unless they ask:
+
+```js
+export const config = { state: true };
+
+export default async function handler(request, context) {
+  const counter = await context.state.get("hits");
+  const wrote = await context.state.compareAndSet(
+    "hits",
+    counter?.version ?? null,          // null = create; a version = replace exactly that
+    (counter?.value ?? 0) + 1,
+  );
+  if (!wrote.ok) return context.json({ retry: true }, { status: 409 });
+  return context.json({ hits: wrote.version });
+}
+```
+
+`context.state` is durable JSON scoped to *(you, the function's name)*. It survives new revisions and even delete/redeploy — only the explicit purge (`rusted state purge <name>`, or the console's admin API) removes it, because a redeploy silently losing coordination state is a worse surprise than a few stale kilobytes.
+
+Single-key compare-and-set is the whole transaction model: every entry carries a `version`, writes name the version they expect (`null` to create), and the check happens atomically in the database — two racers get exactly one winner and a `currentVersion` to retry from. Keys are 1–512 bytes, values up to 64 KiB serialized, `list` pages lexicographically 100 at a time, and your plan bounds total keys and bytes per function. There are no multi-key transactions; design state so one key is the unit of consistency.
+
+Under `rusted run`, state is in-memory with identical semantics: it survives hot reloads and resets when the process exits.
+
+## Object storage
+
+For bytes too big for state — file contents, media, encrypted blobs — a function can declare a binding to an S3-compatible bucket (R2, S3, MinIO):
+
+```js
+export const config = {
+  objects: {
+    SHARES: {
+      endpoint: "https://<account>.r2.cloudflarestorage.com",
+      region: "auto",
+      bucket: "renote-shares",
+      maxObjectBytes: 67108864,                    // 64 MiB, enforced before signing
+      accessKeyIdSecret: "R2_ACCESS_KEY_ID",       // names in your secret vault —
+      secretAccessKeySecret: "R2_SECRET_ACCESS_KEY", // the values never reach JS
+    },
+  },
+};
+```
+
+`context.objects.SHARES` then hands out **presigned URLs** instead of moving bytes through the function: `presignPut(key, { contentLength, sha256 })` signs an upload for exactly those bytes — the provider itself rejects a different size, a different checksum, or an existing key (uploads are create-only) — and `presignGet` signs a short-lived download. `head`, `delete`, and `list` run host-side. URLs live 15–300 seconds.
+
+The safety shape, since a binding is a credentialed HTTP client:
+
+- Every key is silently prefixed with a namespace derived from you and the function — another function's objects are unreachable by construction, and `..`, control characters, and leading `/` are refused.
+- Endpoints must be exact origins on the **server admin's allowlist** (`RUSTED_OBJECT_ENDPOINTS`, comma-separated); with no allowlist the capability is off. This is what keeps bindings from being an SSRF primitive.
+- The credential secrets are resolved host-side per invocation. They are refused in `config.secrets`, so a module can use them for storage and never read them.
+- Binding traffic is a host capability — it does not spend the invocation's outbound `fetch` allowance, though it stays inside the execution deadline.
+
+Under `rusted run`, objects live in an isolated temp directory and the presigned URLs point at the dev server itself, with the same create-only/length/checksum enforcement — the flow you test locally is the flow that ships. [examples/state-and-objects](examples/state-and-objects) is a complete file using both.
+
 ## Randomness
 
 `Math.random()` is fine for jitter and dice; it is not fine for anything an attacker gains by predicting — and OAuth state, PKCE verifiers, session tokens, and encryption nonces are exactly that. The host lends the real thing instead:

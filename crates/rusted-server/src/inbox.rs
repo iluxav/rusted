@@ -573,39 +573,6 @@ pub fn public_router(state: Arc<AppState>) -> axum::Router {
 /// The user id is captured when this is built, from the function's stored
 /// owner — never from anything the handler says. So a handler can ask for a
 /// name, and only ever gets an inbox belonging to whoever deployed it.
-pub struct OwnerScopedInbox {
-    state: Arc<AppState>,
-    user_id: Uuid,
-}
-
-impl OwnerScopedInbox {
-    pub fn new(state: Arc<AppState>, user_id: Uuid) -> Self {
-        Self { state, user_id }
-    }
-}
-
-impl rusted_engine::HostServices for OwnerScopedInbox {
-    fn inbox_get(
-        &self,
-        name: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
-    {
-        Box::pin(async move {
-            match read(&self.state, self.user_id, &name).await {
-                Ok(Reading::Alive { messages, .. }) => {
-                    Ok(serde_json::to_string(&messages).unwrap_or_else(|_| "[]".into()))
-                }
-                // A handler gets the same answer a person does: gone is gone,
-                // and it cannot tell that apart from never having existed.
-                Ok(Reading::Gone) => Err(format!(
-                    "inbox '{name}' has expired, been drained, or never existed"
-                )),
-                Err(e) => Err(e),
-            }
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

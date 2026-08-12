@@ -157,14 +157,187 @@ pub enum Surface {
 }
 
 /// Runtime needs a module declares via `export const config`, independent of
-/// which surface it serves. Today that is only `secrets`: the names the host
-/// must decrypt and hand in as `context.env`. Unknown keys are rejected so
-/// typos fail at verify time instead of silently deploying without.
+/// which surface it serves: secret names the host must decrypt into
+/// `context.env`, durable state, and object-storage bindings. Unknown keys are
+/// rejected so typos fail at verify time instead of silently deploying without.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Durable JSON state (`context.state`). Optional, and must be exactly
+    /// `true` when present — `state: false` is a contradiction worth refusing.
+    #[serde(default)]
+    pub state: Option<bool>,
+    /// Object-storage bindings (`context.objects.<NAME>`), keyed by binding
+    /// name.
+    #[serde(default)]
+    pub objects: std::collections::BTreeMap<String, ObjectBinding>,
+}
+
+impl RuntimeConfig {
+    pub fn wants_state(&self) -> bool {
+        self.state == Some(true)
+    }
+}
+
+/// One declared object-storage binding: where it points and which of the
+/// owner's secrets hold the credentials. The credentials themselves are
+/// resolved host-side per invocation and never reach JavaScript, stored
+/// metadata, or `context.env`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ObjectBinding {
+    /// Exact origin of the S3-compatible endpoint, e.g.
+    /// `https://<account>.r2.cloudflarestorage.com`. No path, query or
+    /// fragment — anything more specific belongs to the bucket and keys.
+    pub endpoint: String,
+    #[serde(default = "default_region")]
+    pub region: String,
+    pub bucket: String,
+    /// Upper bound on a single object, enforced before a PUT is signed.
+    pub max_object_bytes: u64,
+    /// Secret-vault entry holding the access key id.
+    pub access_key_id_secret: String,
+    /// Secret-vault entry holding the secret access key.
+    pub secret_access_key_secret: String,
+}
+
+fn default_region() -> String {
+    "auto".to_string()
+}
+
+/// S3's own ceiling for a single non-multipart PUT.
+pub const MAX_OBJECT_BYTES_CEILING: u64 = 5 * 1024 * 1024 * 1024;
+/// Bindings per module — a bound, like tools and secrets.
+pub const MAX_OBJECT_BINDINGS: usize = 8;
+
+/// Binding names look like environment variables: `[A-Z][A-Z0-9_]{0,63}`.
+pub fn valid_binding_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// An exact origin: scheme://host[:port], nothing after. The deploy-time
+/// allowlist compares against exactly this shape, so anything looser is
+/// refused before it can be compared wrongly.
+pub fn valid_endpoint_origin(endpoint: &str) -> bool {
+    let rest = match endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+    {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let (host, port) = match rest.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (rest, None),
+    };
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return false;
+    }
+    match port {
+        None => true,
+        Some(port) => {
+            !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())
+        }
+    }
+}
+
+fn vet_runtime_config(config: &RuntimeConfig) -> Result<(), String> {
+    vet_secrets(&config.secrets)?;
+    if config.state == Some(false) {
+        return Err("config.state must be exactly true when present — omit it instead".to_string());
+    }
+    if config.objects.len() > MAX_OBJECT_BINDINGS {
+        return Err(format!(
+            "too many object bindings: {} (max {MAX_OBJECT_BINDINGS})",
+            config.objects.len()
+        ));
+    }
+    for (name, binding) in &config.objects {
+        if !valid_binding_name(name) {
+            return Err(format!(
+                "invalid object binding name {name:?}: 1-64 chars of A-Z, 0-9, '_', starting with a letter"
+            ));
+        }
+        if !valid_endpoint_origin(&binding.endpoint) {
+            return Err(format!(
+                "binding {name}: endpoint must be an exact origin like https://host or https://host:port"
+            ));
+        }
+        if !(3..=63).contains(&binding.bucket.len())
+            || !binding
+                .bucket
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        {
+            return Err(format!(
+                "binding {name}: bucket names are 3-63 chars of a-z, 0-9, '.', '-'"
+            ));
+        }
+        if binding.max_object_bytes == 0 || binding.max_object_bytes > MAX_OBJECT_BYTES_CEILING {
+            return Err(format!(
+                "binding {name}: maxObjectBytes must be between 1 and {MAX_OBJECT_BYTES_CEILING} (5 GiB)"
+            ));
+        }
+        for secret in [
+            &binding.access_key_id_secret,
+            &binding.secret_access_key_secret,
+        ] {
+            if !valid_secret_name(secret) {
+                return Err(format!(
+                    "binding {name}: {secret:?} is not a valid secret name"
+                ));
+            }
+            // Storage credentials are used by the host binding only; letting
+            // the module also read them via context.env would defeat the
+            // point of never placing them in JavaScript.
+            if config.secrets.contains(secret) {
+                return Err(format!(
+                    "binding {name}: {secret} is a storage credential and cannot also be listed in config.secrets"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Which declared capabilities the host is actually supplying for one
+/// invocation. The glue attaches `context.state` / `context.objects.<NAME>`
+/// for exactly these and nothing else, so an undeclared capability is absent
+/// rather than present-but-broken.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Capabilities {
+    pub state: bool,
+    pub objects: Vec<String>,
+}
+
+impl Capabilities {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn from_config(config: &RuntimeConfig) -> Self {
+        Self {
+            state: config.wants_state(),
+            objects: config.objects.keys().cloned().collect(),
+        }
+    }
+
+    fn to_glue_json(&self) -> String {
+        if !self.state && self.objects.is_empty() {
+            return String::new();
+        }
+        serde_json::json!({ "state": self.state, "objects": self.objects }).to_string()
+    }
 }
 
 /// Everything [`Executor::inspect`] learns about a module: the surface it
@@ -262,6 +435,43 @@ const INBOX_PRELUDE: &str = r#"(() => {
   };
 })()"#;
 
+/// Builds the `context.state` / `context.objects` views over the host natives,
+/// shared by [`GLUE`] and [`TOOL_GLUE`] so the two cannot drift. An empty caps
+/// string — undeclared capabilities, ad-hoc runs — yields undefined for both.
+const CAPS_PRELUDE: &str = r#"(() => {
+  globalThis.__rustedCaps = (capsJson) => {
+    if (!capsJson) return { state: undefined, objects: undefined };
+    const caps = JSON.parse(capsJson);
+    const parse = (raw) => {
+      const r = JSON.parse(raw);
+      if (r && r.error) throw new Error(r.error);
+      return r;
+    };
+    const stateOp = async (op) => parse(await globalThis.__rustedStateOp(JSON.stringify(op)));
+    const objectOp = async (b, op) => parse(await globalThis.__rustedObjectOp(b, JSON.stringify(op)));
+    const state = caps.state ? {
+      get: async (key) => (await stateOp({ op: "get", key: String(key) })).entry,
+      compareAndSet: (key, expectedVersion, value) =>
+        stateOp({ op: "cas", key: String(key), expectedVersion, value }),
+      delete: (key, expectedVersion) =>
+        stateOp({ op: "delete", key: String(key), expectedVersion }),
+      list: (options) => stateOp({ op: "list", ...(options || {}) }),
+    } : undefined;
+    const objects = caps.objects && caps.objects.length
+      ? Object.fromEntries(caps.objects.map((b) => [b, {
+          presignPut: (key, options) =>
+            objectOp(b, { op: "presignPut", key: String(key), ...(options || {}) }),
+          presignGet: (key, options) =>
+            objectOp(b, { op: "presignGet", key: String(key), ...(options || {}) }),
+          head: async (key) => (await objectOp(b, { op: "head", key: String(key) })).head,
+          delete: async (key) => (await objectOp(b, { op: "delete", key: String(key) })).deleted,
+          list: (options) => objectOp(b, { op: "list", ...(options || {}) }),
+        }]))
+      : undefined;
+    return { state, objects };
+  };
+})()"#;
+
 const CONSOLE_PRELUDE: &str = r#"(() => {
   const logs = [];
   const fmt = (a) => { try { return typeof a === "string" ? a : JSON.stringify(a); } catch (_) { return String(a); } };
@@ -275,12 +485,15 @@ const CONSOLE_PRELUDE: &str = r#"(() => {
   globalThis.__rustedLogs = logs;
 })()"#;
 
-/// Adapts `handler(request, context)` to `(handler, requestJson, envJson) -> Promise<envelopeJson>`.
+/// Adapts `handler(request, context)` to
+/// `(handler, requestJson, envJson, capsJson) -> Promise<envelopeJson>`.
 /// The envelope carries the response (or error) plus the logs collected by the
 /// console prelude, so the host only ever marshals strings. `envJson` is the
 /// decrypted secrets the host chose to lend; empty means `context.env` stays
 /// undefined, so a handler that was not granted secrets fails saying so.
-const GLUE: &str = r#"(handler, requestJson, envJson) => {
+/// `capsJson` names the declared capabilities the host is supplying —
+/// `context.state` and `context.objects` exist for exactly those.
+const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
   const req = JSON.parse(requestJson);
   const logs = globalThis.__rustedLogs || [];
   const request = {
@@ -298,6 +511,7 @@ const GLUE: &str = r#"(handler, requestJson, envJson) => {
     status: init && init.status,
     headers: (init && init.headers) || {},
   });
+  const caps = globalThis.__rustedCaps(capsJson);
   const context = {
     json: (o, init) => respond(JSON.stringify(o), "application/json", init),
     text: (s, init) => respond(String(s), "text/plain; charset=utf-8", init),
@@ -309,6 +523,10 @@ const GLUE: &str = r#"(handler, requestJson, envJson) => {
     // OS-backed CSPRNG — Math.random() must never mint credentials.
     randomBytes: (n) => new Uint8Array(globalThis.__rustedRandomBytes(n)),
     randomBase64Url: (n) => globalThis.__rustedRandomBase64Url(n),
+    // Present only when declared via `export const config` and supplied by
+    // the host — an undeclared capability is absent, not broken.
+    state: caps.state,
+    objects: caps.objects,
   };
   return Promise.resolve(handler(request, context)).then(
     (r) => {
@@ -341,9 +559,10 @@ const GLUE: &str = r#"(handler, requestJson, envJson) => {
 /// Emits the same envelope shape as [`GLUE`] so `outcome_from_envelope` reads
 /// both. A tool returns a value, not an HTTP response, so the context has no
 /// `json`/`text` helpers and the content type is decided by the value's shape.
-const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson) => {
+const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
   const logs = globalThis.__rustedLogs || [];
   const tool = ns.mcp && ns.mcp.tools ? ns.mcp.tools[toolName] : undefined;
+  const caps = globalThis.__rustedCaps(capsJson);
   const context = {
     // Absent when the host lends no services — reading it then is a clearer
     // failure than a function that silently finds nothing.
@@ -353,6 +572,10 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson) => {
     // OS-backed CSPRNG — Math.random() must never mint credentials.
     randomBytes: (n) => new Uint8Array(globalThis.__rustedRandomBytes(n)),
     randomBase64Url: (n) => globalThis.__rustedRandomBase64Url(n),
+    // Present only when declared via `export const config` and supplied by
+    // the host — an undeclared capability is absent, not broken.
+    state: caps.state,
+    objects: caps.objects,
   };
   return Promise.resolve()
     .then(() => {
@@ -696,6 +919,34 @@ pub trait HostServices: Send + Sync {
         &self,
         name: String,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>>;
+
+    /// Whether this host offers inbox reads at all. When false,
+    /// `context.inbox` stays undefined — the local dev server lends state and
+    /// objects but has no inbox store, and absent beats present-but-broken.
+    fn offers_inbox(&self) -> bool {
+        true
+    }
+
+    /// One durable-state operation, JSON in (`{"op":"get","key":…}` and
+    /// friends), JSON result out. Scoped like the inbox: the implementation
+    /// carries the owner and function name, never the request.
+    fn state_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        let _ = op_json;
+        Box::pin(async { Err("durable state is not available on this host".to_string()) })
+    }
+
+    /// One object-storage operation against a named binding, JSON in and out.
+    fn object_op(
+        &self,
+        binding: String,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        let _ = (binding, op_json);
+        Box::pin(async { Err("object storage is not available on this host".to_string()) })
+    }
 }
 
 /// Sums the CPU actually burned by a future.
@@ -733,16 +984,41 @@ fn cpu_metered<F: Future>(inner: F) -> CpuMetered<F> {
     }
 }
 
-/// Attaches `context.inbox` when the host offers it. Without services the
-/// global is never defined, so a handler that reaches for it fails saying so.
+/// Attaches `context.inbox` when the host offers it — and the state/object
+/// natives the glue exposes only for declared capabilities. Without services
+/// none of the globals are defined, so a handler that reaches for them fails
+/// saying so.
 fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Result<(), String> {
-    let native = Function::new(
+    if services.offers_inbox() {
+        let inbox_services = services.clone();
+        let native = Function::new(
+            ctx.clone(),
+            rquickjs::function::Async(move |name: String| {
+                let services = inbox_services.clone();
+                async move {
+                    match services.inbox_get(name).await {
+                        Ok(messages) => format!("{{\"messages\":{messages}}}"),
+                        Err(e) => serde_json::json!({ "error": e }).to_string(),
+                    }
+                }
+            }),
+        )
+        .map_err(|e| exception_message(ctx, e))?;
+        ctx.globals()
+            .set("__rustedInboxGet", native)
+            .map_err(|e| exception_message(ctx, e))?;
+        ctx.eval::<(), _>(INBOX_PRELUDE)
+            .map_err(|e| exception_message(ctx, e))?;
+    }
+
+    let state_services = services.clone();
+    let state_native = Function::new(
         ctx.clone(),
-        rquickjs::function::Async(move |name: String| {
-            let services = services.clone();
+        rquickjs::function::Async(move |op_json: String| {
+            let services = state_services.clone();
             async move {
-                match services.inbox_get(name).await {
-                    Ok(messages) => format!("{{\"messages\":{messages}}}"),
+                match services.state_op(op_json).await {
+                    Ok(result) => result,
                     Err(e) => serde_json::json!({ "error": e }).to_string(),
                 }
             }
@@ -750,9 +1026,24 @@ fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Res
     )
     .map_err(|e| exception_message(ctx, e))?;
     ctx.globals()
-        .set("__rustedInboxGet", native)
+        .set("__rustedStateOp", state_native)
         .map_err(|e| exception_message(ctx, e))?;
-    ctx.eval::<(), _>(INBOX_PRELUDE)
+
+    let object_native = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |binding: String, op_json: String| {
+            let services = services.clone();
+            async move {
+                match services.object_op(binding, op_json).await {
+                    Ok(result) => result,
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                }
+            }
+        }),
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedObjectOp", object_native)
         .map_err(|e| exception_message(ctx, e))
 }
 
@@ -899,6 +1190,8 @@ fn load_module_raw<'js>(
 ) -> Result<Module<'js, rquickjs::module::Evaluated>, String> {
     ctx.eval::<(), _>(CONSOLE_PRELUDE)
         .map_err(|e| exception_message(ctx, e))?;
+    ctx.eval::<(), _>(CAPS_PRELUDE)
+        .map_err(|e| exception_message(ctx, e))?;
     // Before evaluation, so top-level code can already draw randomness. This
     // is the choke point every path — execute, tools, verify, inspect — goes
     // through, which is what keeps the capability universally present.
@@ -965,14 +1258,16 @@ impl QuickJsExecutor {
         request: &HttpRequest,
         limits: &Limits,
     ) -> InvocationResult {
-        self.execute_with_services(source, request, limits, None, None)
+        self.execute_with_services(source, request, limits, None, None, &Capabilities::none())
             .await
     }
 
     /// As [`Self::execute_async`], with whatever the host chooses to lend the
     /// handler. `None` services means only `fetch`, which is what tests and
     /// local development get. `env` is the decrypted secrets the module asked
-    /// for; `None` leaves `context.env` undefined.
+    /// for; `None` leaves `context.env` undefined. `caps` names the declared
+    /// capabilities being supplied — `context.state` / `context.objects`
+    /// appear for exactly those.
     pub async fn execute_with_services(
         &self,
         source: &str,
@@ -980,10 +1275,12 @@ impl QuickJsExecutor {
         limits: &Limits,
         services: Option<Arc<dyn HostServices>>,
         env: Option<&BTreeMap<String, String>>,
+        caps: &Capabilities,
     ) -> InvocationResult {
         let env_json = env
             .map(|env| serde_json::to_string(env).expect("serialize env"))
             .unwrap_or_default();
+        let caps_json = caps.to_glue_json();
         let wall0 = Instant::now();
         let (rt, expired) = restricted_async_runtime(limits).await;
         let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
@@ -1037,19 +1334,23 @@ impl QuickJsExecutor {
                 }
             };
             let exec0 = Instant::now();
-            let promise: Promise =
-                match glue.call((handler, request_json.as_str(), env_json.as_str())) {
-                    Ok(promise) => promise,
-                    Err(e) => {
-                        return (
-                            classify(exception_message(&c, e)),
-                            Response::default(),
-                            Vec::new(),
-                            None,
-                            exec0.elapsed(),
-                        )
-                    }
-                };
+            let promise: Promise = match glue.call((
+                handler,
+                request_json.as_str(),
+                env_json.as_str(),
+                caps_json.as_str(),
+            )) {
+                Ok(promise) => promise,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        exec0.elapsed(),
+                    )
+                }
+            };
             let (outcome, response, logs, stack) =
                 settle_with_deadline(&c, promise, deadline, &expired, limits).await;
             (outcome, response, logs, stack, exec0.elapsed())
@@ -1063,6 +1364,7 @@ impl QuickJsExecutor {
     /// envelope machinery as [`Self::execute_with_services`], but the module is
     /// loaded without demanding a default export and [`TOOL_GLUE`] resolves the
     /// named tool's handler in the live namespace instead.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_tool_with_services(
         &self,
         source: &str,
@@ -1071,10 +1373,12 @@ impl QuickJsExecutor {
         limits: &Limits,
         services: Option<Arc<dyn HostServices>>,
         env: Option<&BTreeMap<String, String>>,
+        caps: &Capabilities,
     ) -> InvocationResult {
         let env_json = env
             .map(|env| serde_json::to_string(env).expect("serialize env"))
             .unwrap_or_default();
+        let caps_json = caps.to_glue_json();
         let wall0 = Instant::now();
         let (rt, expired) = restricted_async_runtime(limits).await;
         let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
@@ -1142,19 +1446,24 @@ impl QuickJsExecutor {
                 }
             };
             let exec0 = Instant::now();
-            let promise: Promise =
-                match glue.call((ns, tool, args_json.as_str(), env_json.as_str())) {
-                    Ok(promise) => promise,
-                    Err(e) => {
-                        return (
-                            classify(exception_message(&c, e)),
-                            Response::default(),
-                            Vec::new(),
-                            None,
-                            exec0.elapsed(),
-                        )
-                    }
-                };
+            let promise: Promise = match glue.call((
+                ns,
+                tool,
+                args_json.as_str(),
+                env_json.as_str(),
+                caps_json.as_str(),
+            )) {
+                Ok(promise) => promise,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        exec0.elapsed(),
+                    )
+                }
+            };
             let (outcome, response, logs, stack) =
                 settle_with_deadline(&c, promise, deadline, &expired, limits).await;
             (outcome, response, logs, stack, exec0.elapsed())
@@ -1387,7 +1696,7 @@ impl Executor for QuickJsExecutor {
                     let json = stringify(&c, value, "config")?;
                     let parsed = serde_json::from_str::<RuntimeConfig>(&json)
                         .map_err(|e| format!("invalid config export: {e}"))?;
-                    vet_secrets(&parsed.secrets)?;
+                    vet_runtime_config(&parsed)?;
                     parsed
                 }
             };

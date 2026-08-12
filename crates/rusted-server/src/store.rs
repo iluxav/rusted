@@ -62,6 +62,35 @@ pub struct FunctionRecord {
     /// deploy time from the module's own declaration, for either kind.
     #[serde(default)]
     pub public: bool,
+    /// Whether the module declared `config.state = true`.
+    #[serde(default)]
+    pub state: bool,
+    /// Declared object bindings (`config.objects`), as stored JSONB — secret
+    /// NAMES only, never credentials.
+    #[serde(default)]
+    pub objects: Option<serde_json::Value>,
+}
+
+/// Deploy-time facts captured from the module's own declarations — everything
+/// a push writes besides source, trigger, and kind. Always taken from the
+/// freshly inspected source, never preserved from an earlier revision.
+#[derive(Debug, Default, Clone)]
+pub struct Declared {
+    pub secrets: Vec<String>,
+    pub public: bool,
+    pub state: bool,
+    pub objects: std::collections::BTreeMap<String, rusted_engine::ObjectBinding>,
+}
+
+impl Declared {
+    pub fn from_config(config: &rusted_engine::RuntimeConfig, public: bool) -> Declared {
+        Declared {
+            secrets: config.secrets.clone(),
+            public,
+            state: config.wants_state(),
+            objects: config.objects.clone(),
+        }
+    }
 }
 
 fn default_kind() -> String {
@@ -90,6 +119,11 @@ pub struct Fetched {
     pub secrets: Vec<String>,
     /// Whether the auth gate lets keyless callers through to this function.
     pub public: bool,
+    /// Whether `context.state` was declared.
+    pub state: bool,
+    /// Declared object bindings, parsed once here so the invocation path
+    /// never re-reads JSON.
+    pub objects: std::collections::BTreeMap<String, rusted_engine::ObjectBinding>,
     pub rev: u64,
 }
 
@@ -146,16 +180,15 @@ impl Store {
     /// Push keeping the function's existing trigger (default for new functions).
     /// Note the asymmetry: the trigger is preserved, but kind and mcp metadata
     /// are always reset to http/NULL — kind derives from the deployed source,
-    /// so callers deploying an mcp module must use `push_full`. Secrets and
-    /// publicness always come from the deployed source too, so they are never
-    /// preserved.
+    /// so callers deploying an mcp module must use `push_full`. The declared
+    /// facts (secrets, publicness, capabilities) always come from the deployed
+    /// source too, so they are never preserved.
     pub async fn push(
         &self,
         name: &str,
         source: &str,
         user_id: Option<Uuid>,
-        secrets: &[String],
-        public: bool,
+        declared: &Declared,
     ) -> sqlx::Result<Revision> {
         let existing: Option<HttpTrigger> =
             sqlx::query("SELECT methods, path FROM functions WHERE name = $1")
@@ -171,22 +204,19 @@ impl Store {
             source,
             existing.unwrap_or_default(),
             user_id,
-            secrets,
-            public,
+            declared,
         )
         .await
     }
 
     /// Push an http function with an explicit trigger.
-    #[allow(clippy::too_many_arguments)]
     pub async fn push_with_trigger(
         &self,
         name: &str,
         source: &str,
         trigger: HttpTrigger,
         user_id: Option<Uuid>,
-        secrets: &[String],
-        public: bool,
+        declared: &Declared,
     ) -> sqlx::Result<Revision> {
         self.push_full(
             name,
@@ -195,8 +225,7 @@ impl Store {
             "http",
             None,
             user_id,
-            secrets,
-            public,
+            declared,
         )
         .await
     }
@@ -213,8 +242,7 @@ impl Store {
         kind: &str,
         mcp: Option<&serde_json::Value>,
         user_id: Option<Uuid>,
-        secrets: &[String],
-        public: bool,
+        declared: &Declared,
     ) -> sqlx::Result<Revision> {
         let default_trigger = HttpTrigger::default();
         let trigger = trigger.unwrap_or(&default_trigger);
@@ -236,14 +264,20 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?
         .get("next");
+        let objects = if declared.objects.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_value(&declared.objects).expect("bindings serialize"))
+        };
         sqlx::query(
             "INSERT INTO functions
-                 (name, current_rev, methods, path, user_id, kind, mcp, secrets, public)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 (name, current_rev, methods, path, user_id, kind, mcp, secrets, public,
+                  state, objects)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (name) DO UPDATE
                  SET current_rev = $2, methods = $3, path = $4, updated_at = now(),
                      user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7,
-                     secrets = $8, public = $9",
+                     secrets = $8, public = $9, state = $10, objects = $11",
         )
         .bind(name)
         .bind(rev)
@@ -252,8 +286,10 @@ impl Store {
         .bind(user_id)
         .bind(kind)
         .bind(mcp)
-        .bind(secrets.to_vec())
-        .bind(public)
+        .bind(declared.secrets.to_vec())
+        .bind(declared.public)
+        .bind(declared.state)
+        .bind(objects)
         .execute(&mut *tx)
         .await?;
         let created_at: i64 = sqlx::query(
@@ -289,7 +325,8 @@ impl Store {
 
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
-            "SELECT current_rev, methods, path, user_id, kind, mcp, secrets, public
+            "SELECT current_rev, methods, path, user_id, kind, mcp, secrets, public,
+                    state, objects
              FROM functions WHERE name = $1",
         )
         .bind(name)
@@ -324,6 +361,8 @@ impl Store {
             mcp: function.get("mcp"),
             secrets: function.get("secrets"),
             public: function.get("public"),
+            state: function.get("state"),
+            objects: function.get("objects"),
         }))
     }
 
@@ -359,6 +398,12 @@ impl Store {
             mcp: record.mcp,
             secrets: record.secrets,
             public: record.public,
+            state: record.state,
+            objects: record
+                .objects
+                .as_ref()
+                .and_then(|raw| serde_json::from_value(raw.clone()).ok())
+                .unwrap_or_default(),
             rev: record.current_rev,
         });
         self.cache
