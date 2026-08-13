@@ -685,6 +685,19 @@ async fn serve_function(
             )
         }
     };
+    // Unpublished answers exactly like missing — the toggle must reveal
+    // nothing to callers — while the owner's logs say what actually happened.
+    if !fetched.published {
+        record_refusal(
+            &state,
+            &name,
+            fetched.owner,
+            "refused",
+            404,
+            "refused: this function is unpublished".to_string(),
+        );
+        return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+    }
     // An mcp function has no route pattern: every POST to /f/{name} is
     // protocol, and the messages inside decide what happens.
     if fetched.kind == "mcp" {
@@ -1410,6 +1423,7 @@ async fn function_detail(
         "secrets": record.secrets,
         "public": record.public,
         "state": record.state,
+        "published": record.published,
         "objects": record.objects,
         "url": state.data_url(&format!("/f/{name}")),
         "recent": recent,

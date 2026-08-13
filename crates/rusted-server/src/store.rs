@@ -69,6 +69,13 @@ pub struct FunctionRecord {
     /// NAMES only, never credentials.
     #[serde(default)]
     pub objects: Option<serde_json::Value>,
+    /// Operational serving toggle — console-controlled, untouched by pushes.
+    #[serde(default = "default_published")]
+    pub published: bool,
+}
+
+fn default_published() -> bool {
+    true
 }
 
 /// Deploy-time facts captured from the module's own declarations — everything
@@ -121,6 +128,8 @@ pub struct Fetched {
     pub public: bool,
     /// Whether `context.state` was declared.
     pub state: bool,
+    /// Whether the owner has this function on the air.
+    pub published: bool,
     /// Declared object bindings, parsed once here so the invocation path
     /// never re-reads JSON.
     pub objects: std::collections::BTreeMap<String, rusted_engine::ObjectBinding>,
@@ -326,7 +335,7 @@ impl Store {
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
             "SELECT current_rev, methods, path, user_id, kind, mcp, secrets, public,
-                    state, objects
+                    state, objects, published
              FROM functions WHERE name = $1",
         )
         .bind(name)
@@ -363,6 +372,7 @@ impl Store {
             public: function.get("public"),
             state: function.get("state"),
             objects: function.get("objects"),
+            published: function.get("published"),
         }))
     }
 
@@ -399,6 +409,7 @@ impl Store {
             secrets: record.secrets,
             public: record.public,
             state: record.state,
+            published: record.published,
             objects: record
                 .objects
                 .as_ref()
@@ -411,6 +422,35 @@ impl Store {
             .unwrap()
             .insert(name.to_string(), hit.clone());
         Ok(Some(hit))
+    }
+
+    /// Flips the serving toggle. Scoped to the owner in SQL so a console bug
+    /// can never unpublish somebody else's function.
+    pub async fn set_published(
+        &self,
+        name: &str,
+        owner: Uuid,
+        published: bool,
+    ) -> sqlx::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE functions SET published = $3, updated_at = now()
+             WHERE name = $1 AND user_id = $2",
+        )
+        .bind(name)
+        .bind(owner)
+        .bind(published)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(false);
+        }
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(INVALIDATION_CHANNEL)
+            .bind(format!("function:{name}"))
+            .execute(&self.pool)
+            .await?;
+        self.invalidate(name);
+        Ok(true)
     }
 
     /// Removes the function (revisions cascade; artifacts stay, content-addressed).

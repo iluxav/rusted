@@ -82,7 +82,11 @@ pub fn router(state: WebState) -> Router {
             get(page_checkout).post(confirm_checkout),
         )
         .route("/console/keys/{id}", delete(key_revoke))
-        .route("/console/lambda/{name}", get(page_lambda))
+        .route(
+            "/console/lambda/{name}",
+            get(page_lambda).delete(lambda_delete),
+        )
+        .route("/console/lambda/{name}/published", post(lambda_publish))
         .route("/console/test", post(run_test))
         .with_state(state)
 }
@@ -521,6 +525,7 @@ struct ToolRow {
 #[template(path = "lambda.html")]
 struct LambdaT {
     name: String,
+    published: bool,
     methods: Vec<String>,
     url: String,
     url_example: String,
@@ -1375,6 +1380,7 @@ async fn page_lambda(
     };
     let inner = LambdaT {
         name: name.clone(),
+        published: hit.published,
         methods: trigger.methods.clone(),
         url_example: url.clone(),
         url,
@@ -1390,6 +1396,55 @@ async fn page_lambda(
     .render()
     .expect("lambda renders");
     console_page(&state, &headers, &user, &name, inner).await
+}
+
+/// Deletes the function — the same operation as `rusted delete`, gated on the
+/// session owner actually owning it. State survives (purge is separate).
+async fn lambda_delete(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let app = &state.0.app;
+    match app.store.owner(&name).await {
+        Ok(Some(owner)) if owner == user.id => {}
+        _ => return (StatusCode::NOT_FOUND, Html(String::new())).into_response(),
+    }
+    let _ = app.store.delete(&name).await;
+    // htmx follows this to the dashboard; the deleted function's sidebar
+    // entry disappears with the full page render.
+    ([("hx-redirect", "/console")], Html(String::new())).into_response()
+}
+
+#[derive(Deserialize)]
+struct PublishForm {
+    published: String,
+}
+
+/// Flips the serving toggle and re-renders the page, so the banner and button
+/// always reflect what the data plane is now doing.
+async fn lambda_publish(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Form(form): Form<PublishForm>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let publish = form.published == "true";
+    let _ = state
+        .0
+        .app
+        .store
+        .set_published(&name, user.id, publish)
+        .await;
+    page_lambda(State(state), headers, Path(name)).await
 }
 
 fn missing_lambda(name: &str) -> String {

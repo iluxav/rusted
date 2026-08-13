@@ -3671,3 +3671,128 @@ export default async function handler(request, context) {
         "{statuses:?}"
     );
 }
+
+#[tokio::test]
+async fn unpublished_functions_answer_like_missing_until_republished() {
+    let t = boot().await;
+    assert_eq!(push(&t, "toggleable", GREET).await.status(), 200);
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    let admin = |path: &str| format!("http://{}{path}", t.handle.admin_addr);
+
+    // Serving normally.
+    let r = t
+        .client
+        .post(t.data("/f/toggleable"))
+        .body(r#"{"name":"Ada"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // Unpublish from the console: callers now get exactly a missing-function
+    // answer, and the owner's logs record why.
+    let r = t
+        .client
+        .post(admin("/console/lambda/toggleable/published"))
+        .header("cookie", &cookie)
+        .form(&[("published", "false")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.text().await.unwrap().contains("UNPUBLISHED"));
+    let r = t.client.post(t.data("/f/toggleable")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
+    let detail: Value = t
+        .admin_get("/api/functions/toggleable")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["published"], false, "{detail}");
+    assert_eq!(detail["recent"][0]["outcome"], "refused", "{detail}");
+    assert!(detail["recent"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("unpublished"));
+
+    // A redeploy must NOT flip it back on the air.
+    assert_eq!(push(&t, "toggleable", GREET).await.status(), 200);
+    let r = t.client.post(t.data("/f/toggleable")).send().await.unwrap();
+    assert_eq!(r.status(), 404, "push must not republish");
+
+    // Republishing serves again.
+    let r = t
+        .client
+        .post(admin("/console/lambda/toggleable/published"))
+        .header("cookie", &cookie)
+        .form(&[("published", "true")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = t
+        .client
+        .post(t.data("/f/toggleable"))
+        .body(r#"{"name":"Ada"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+#[tokio::test]
+async fn console_delete_removes_the_function_and_only_for_its_owner() {
+    let t = boot().await;
+    assert_eq!(push(&t, "condemned", GREET).await.status(), 200);
+    let admin = |path: &str| format!("http://{}{path}", t.handle.admin_addr);
+
+    // Somebody else's session cannot delete it — same answer as missing.
+    let other = rusted_server::testsupport::seed_user(&t.pool).await;
+    let other_session = rusted_server::auth::create_session(&t.pool, other)
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .delete(admin("/console/lambda/condemned"))
+        .header("cookie", format!("rusted_session={other_session}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        t.client
+            .post(t.data("/f/condemned"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200,
+        "a non-owner delete must change nothing"
+    );
+
+    // The owner's delete works and htmx is pointed home.
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .delete(admin("/console/lambda/condemned"))
+        .header("cookie", format!("rusted_session={session}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers().get("hx-redirect").and_then(|v| v.to_str().ok()),
+        Some("/console")
+    );
+    let r = t.client.post(t.data("/f/condemned")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+}
