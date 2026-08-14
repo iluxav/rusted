@@ -99,6 +99,36 @@
         <p class="font-mono text-[10px] text-clay/70">Run locally. Point at rusted.sh when you are ready.</p>
       </div>
 
+      <section class="pb-16 lg:pb-20">
+        <div class="mb-8 text-center">
+          <p class="eyebrow">connect an agent</p>
+          <h2 class="mt-3 font-display text-2xl font-semibold tracking-[-0.03em] text-cream sm:text-3xl">One endpoint. OAuth or a key.</h2>
+          <p class="mx-auto mt-3 max-w-xl text-sm leading-6 text-clay">
+            Hosted assistants sign in with OAuth in the browser — nothing to paste.
+            CLIs and IDEs can do the same, or send an API key as a header.
+          </p>
+        </div>
+        <div class="grid gap-4 lg:grid-cols-3">
+          <div class="surface rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">Claude Code</p>
+            <pre class="mt-3 overflow-x-auto rounded-md border border-copper/10 bg-rust-950 px-4 py-3 font-mono text-[10.5px] leading-relaxed text-clay"><code><span class="text-ember">$</span> claude mcp add --transport http rusted https://rusted.sh/mcp</code></pre>
+            <p class="mt-3 text-xs leading-5 text-clay/80">The first call opens a browser sign-in — OAuth end to end, no key to manage.</p>
+          </div>
+          <div class="surface rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">Claude.ai · ChatGPT</p>
+            <pre class="mt-3 overflow-x-auto rounded-md border border-copper/10 bg-rust-950 px-4 py-3 font-mono text-[10.5px] leading-relaxed text-clay"><code>https://rusted.sh/mcp</code></pre>
+            <p class="mt-3 text-xs leading-5 text-clay/80">Add as a custom connector and approve the sign-in. Clients register themselves — OAuth 2.1 with PKCE, discovery included.</p>
+          </div>
+          <div class="surface rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">Codex · Cursor · any JSON config</p>
+            <pre class="mt-3 overflow-x-auto rounded-md border border-copper/10 bg-rust-950 px-4 py-3 font-mono text-[10.5px] leading-relaxed text-clay"><code>{ "mcpServers": { "rusted": {
+    "url": "https://rusted.sh/mcp",
+    "headers": { "Authorization": "Bearer &lt;key&gt;" } } } }</code></pre>
+            <p class="mt-3 text-xs leading-5 text-clay/80">Prefer a header? Mint a key in the console — same endpoint, same six tools. An OAuth sign-in issues one of these keys anyway, revocable from the same list.</p>
+          </div>
+        </div>
+      </section>
+
       <div class="grid border-y border-copper/10 font-mono text-[10px] uppercase tracking-[0.13em] text-clay sm:grid-cols-3">
         <div class="py-4 sm:border-r sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">cold start</span> ~1ms, fresh sandbox</div>
         <div class="border-t border-copper/10 py-4 sm:border-r sm:border-t-0 sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">deploy</span> code → URL in &lt; 1s</div>

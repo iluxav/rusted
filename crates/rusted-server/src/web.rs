@@ -501,7 +501,9 @@ fn llms_preamble(state: &WebState) -> String {
          for humans from the CLI, for AI agents over MCP. Every call runs in a fresh QuickJS \
          sandbox that boots in about a millisecond, with hard wall-clock, heap, and output \
          limits, no filesystem, and SSRF-guarded fetch.\n\n\
-         Connect an agent: MCP endpoint {} (POST JSON-RPC, Authorization: Bearer <rusted API key>).\n\
+         Connect an agent: MCP endpoint {} (POST JSON-RPC, Authorization: Bearer <rusted API key>). \
+         Hosted assistants can add the same URL as a connector and sign in with OAuth instead — \
+         discovery, dynamic client registration, and PKCE are supported.\n\
          The whole API is six tools: execute, deploy, list, delete, inbox_create, inbox_read.\n\
          Deployed functions are plain HTTP: POST {} — per environment: {}.\n",
         origin("/mcp"),

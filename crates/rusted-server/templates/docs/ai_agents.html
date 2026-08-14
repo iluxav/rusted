@@ -6,6 +6,7 @@
 <pre><code>{ "mcpServers": { "rusted": {
     "url": "https://rusted.sh/mcp",
     "headers": { "Authorization": "Bearer &lt;your rusted api key&gt;" } } } }</code></pre>
+<p>No key at hand? Hosted assistants (Claude, ChatGPT) and OAuth-capable CLIs can add <code>https://rusted.sh/mcp</code> as a connector and sign in through the browser instead — the server implements the MCP authorization spec end to end: RFC 9728/8414 discovery, dynamic client registration, and PKCE. The token an assistant receives is an ordinary API key, visible and revocable in the console's key list like any other.</p>
 <p>Six tools, deliberately few: <code>execute</code>, <code>deploy</code>, <code>list</code>, <code>delete</code>, <code>inbox_create</code>, <code>inbox_read</code>. The prevailing MCP pattern hands a model dozens of tools whose schemas cost context before the conversation starts — an abstraction from when models couldn't write code. A model that writes code doesn't need a schema per capability; it needs <code>fetch</code> and somewhere safe to run. The sandbox is what makes handing that to a model defensible: hard wall-clock, heap, and output limits, no filesystem, no process, SSRF-guarded networking.</p>
 
 <h2>The loop</h2>
