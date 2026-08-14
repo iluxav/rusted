@@ -2418,6 +2418,15 @@ async fn purge_function_state(
 
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
+        // Also served by the data router. Public OAuth discovery metadata
+        // (RFC 9728) rides both listeners on purpose: which side of a
+        // reverse proxy's path split a /.well-known/ URL lands on is
+        // deployment-specific, and a 404 here cost a production integration
+        // an afternoon.
+        .route(
+            "/.well-known/oauth-protected-resource/f/{name}",
+            get(mcp_protected_resource),
+        )
         .route("/api/functions", post(push_function).get(list_functions))
         .route(
             "/api/functions/{name}",

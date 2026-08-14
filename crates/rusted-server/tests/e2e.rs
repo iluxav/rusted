@@ -4286,3 +4286,30 @@ async fn console_oauth_prefers_the_platform_namespaced_variables() {
     std::env::remove_var("GITHUB_CLIENT_ID");
     std::env::remove_var("GITHUB_CLIENT_SECRET");
 }
+
+#[tokio::test]
+async fn oauth_discovery_metadata_rides_both_listeners() {
+    std::env::set_var("RUSTED_OAUTH_ALLOW_HTTP", "1");
+    let t = boot().await;
+    let src = r#"export const mcp = {
+  name: "discoverable",
+  auth: { type: "oauth", issuer: "http://127.0.0.1:9", audience: "https://api.example/f/discoverable" },
+  tools: { t: { description: "d", inputSchema: { type: "object" }, handler() { return 1; } } },
+};"#;
+    assert_eq!(push(&t, "discoverable", src).await.status(), 200);
+    // Which side of a reverse proxy's path split /.well-known/ lands on is
+    // deployment-specific — so the metadata must answer on both ports.
+    for base in [t.handle.data_addr, t.handle.admin_addr] {
+        let r = t
+            .client
+            .get(format!(
+                "http://{base}/.well-known/oauth-protected-resource/f/discoverable"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{base} must serve discovery metadata");
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["resource"], "https://api.example/f/discoverable", "{v}");
+    }
+}
