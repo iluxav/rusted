@@ -59,6 +59,26 @@ fn negative_cache() -> &'static Mutex<HashMap<[u8; 32], Instant>> {
     CACHE.get_or_init(Default::default)
 }
 
+/// The audience an invocation through `env` must present. Prod is the
+/// declared audience verbatim; other environments insert the env segment
+/// after the first `/f/` path segment, mirroring the routing convention —
+/// `https://host/f/name` becomes `https://host/f/@stage/name`. `None` when
+/// the declared audience has no `/f/` segment to transform, in which case
+/// env URLs stay unsupported for that function.
+pub(crate) fn effective_audience(declared: &str, env: &str) -> Option<String> {
+    if env == crate::secrets::PROD_ENV {
+        return Some(declared.to_string());
+    }
+    let url = reqwest::Url::parse(declared).ok()?;
+    let segments: Vec<String> = url.path_segments()?.map(str::to_string).collect();
+    let position = segments.iter().position(|segment| segment == "f")?;
+    let mut rebuilt = segments;
+    rebuilt.insert(position + 1, format!("@{env}"));
+    let mut derived = url.clone();
+    derived.set_path(&rebuilt.join("/"));
+    Some(derived.to_string())
+}
+
 /// The oauth declaration off the stored metadata, if this function has one.
 struct OauthDecl<'a> {
     issuer: &'a str,
@@ -98,8 +118,13 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn challenge(state: &AppState, name: &str) -> Response {
-    let metadata = state.data_url(&format!("/.well-known/oauth-protected-resource/f/{name}"));
+fn challenge(state: &AppState, name: &str, env: &str) -> Response {
+    let path = if env == crate::secrets::PROD_ENV {
+        format!("/.well-known/oauth-protected-resource/f/{name}")
+    } else {
+        format!("/.well-known/oauth-protected-resource/f/@{env}/{name}")
+    };
+    let metadata = state.data_url(&path);
     let mut response = (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": {
@@ -214,8 +239,18 @@ async fn introspect(
     decl: &OauthDecl<'_>,
     credentials: Option<(&str, &str)>,
     token: &str,
+    audience: &str,
 ) -> Introspection {
-    let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    // Keyed by token AND audience: with per-env audiences, one token can be
+    // invalid for stage yet valid for prod, and a wrong-env attempt must not
+    // lock the right env out for the negative TTL.
+    let token_hash: [u8; 32] = {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(audience.as_bytes());
+        hasher.finalize().into()
+    };
     if let Some(at) = negative_cache().lock().unwrap().get(&token_hash) {
         if at.elapsed() < NEGATIVE_TTL {
             return Introspection::InvalidToken;
@@ -234,7 +269,7 @@ async fn introspect(
     }
     let mut request = client()
         .post(endpoint)
-        .form(&[("token", token), ("resource", decl.audience)]);
+        .form(&[("token", token), ("resource", audience)]);
     if let Some((id, secret)) = credentials {
         // RFC 6749 §2.3.1 client_secret_basic — the interoperable default.
         request = request.basic_auth(id, Some(secret));
@@ -247,7 +282,7 @@ async fn introspect(
     };
 
     // From here the issuer has spoken: every refusal is a token verdict.
-    let verdict = validate_claims(&claims, decl);
+    let verdict = validate_claims(&claims, decl, audience);
     if matches!(verdict, Introspection::InvalidToken) {
         let mut cache = negative_cache().lock().unwrap();
         if cache.len() >= NEGATIVE_CACHE_CAP {
@@ -258,7 +293,7 @@ async fn introspect(
     verdict
 }
 
-fn validate_claims(claims: &Value, decl: &OauthDecl<'_>) -> Introspection {
+fn validate_claims(claims: &Value, decl: &OauthDecl<'_>, audience: &str) -> Introspection {
     let active = claims.get("active").and_then(Value::as_bool);
     if active != Some(true) {
         return Introspection::InvalidToken;
@@ -269,7 +304,7 @@ fn validate_claims(claims: &Value, decl: &OauthDecl<'_>) -> Introspection {
     let Some(aud) = claims.get("aud") else {
         return Introspection::InvalidToken;
     };
-    if !audience_matches(aud, decl.audience) {
+    if !audience_matches(aud, audience) {
         return Introspection::InvalidToken;
     }
     match claims.get("exp").and_then(Value::as_u64) {
@@ -329,11 +364,31 @@ pub async fn authorize(
 ) -> Result<Option<Value>, Response> {
     let meta = fetched.mcp.as_ref().unwrap_or(&Value::Null);
     if let Some(decl) = oauth(meta) {
+        // The env's own resource identity — or, for an audience with no /f/
+        // segment to transform, a clear refusal rather than guaranteed 401s.
+        let Some(audience) = effective_audience(decl.audience, env) else {
+            record_refusal(
+                state,
+                name,
+                fetched.owner,
+                "refused",
+                400,
+                format!("[@{env}] refused: the declared audience has no /f/ segment, so environment URLs cannot derive one"),
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": {
+                    "code": "env_unsupported",
+                    "message": "this function's audience cannot be derived for environment URLs"
+                }})),
+            )
+                .into_response());
+        };
         // The token-less challenge is the protocol's opening move, not a
         // refusal — every legitimate flow starts with one, so it is not
         // recorded against the owner.
         let Some(token) = bearer(headers) else {
-            return Err(challenge(state, name));
+            return Err(challenge(state, name, env));
         };
         // Introspection happens before any sandbox and outside the plan's
         // outbound budget, so it gets its own gate against being used to
@@ -398,20 +453,26 @@ pub async fn authorize(
                 .as_ref()
                 .map(|(id, s)| (id.as_str(), s.as_str())),
             token,
+            &audience,
         )
         .await
         {
             Introspection::Valid(identity) => Ok(Some(identity)),
             Introspection::InvalidToken => {
+                let tag = if env == crate::secrets::PROD_ENV {
+                    String::new()
+                } else {
+                    format!("[@{env}] ")
+                };
                 record_refusal(
                     state,
                     name,
                     fetched.owner,
                     "refused",
                     401,
-                    "refused: oauth token rejected by the authorization server".to_string(),
+                    format!("{tag}refused: oauth token rejected by the authorization server"),
                 );
-                Err(challenge(state, name))
+                Err(challenge(state, name, env))
             }
             Introspection::Unavailable => {
                 record_refusal(
@@ -450,29 +511,40 @@ pub async fn authorize(
     }
 }
 
-pub async fn protected_resource(state: Arc<AppState>, name: String) -> Response {
-    let fetched = match state.store.fetch(&name).await {
-        Ok(Some(fetched)) if fetched.kind == "mcp" && fetched.published => fetched,
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": { "code": "not_found" } })),
-            )
-                .into_response()
-        }
-    };
-    let meta = fetched.mcp.as_ref().unwrap_or(&Value::Null);
-    let Some(decl) = oauth(meta) else {
-        return (
+pub async fn protected_resource(state: Arc<AppState>, env: String, name: String) -> Response {
+    let not_found = || {
+        (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": { "code": "not_found" } })),
         )
-            .into_response();
+            .into_response()
+    };
+    let fetched = match state.store.fetch(&name).await {
+        Ok(Some(fetched)) if fetched.kind == "mcp" && fetched.published => fetched,
+        _ => return not_found(),
+    };
+    // Environment metadata exists exactly where the environment does — an
+    // unknown env's metadata is as absent as an unknown function's.
+    if env != crate::secrets::PROD_ENV {
+        let known = match fetched.owner {
+            Some(owner) => crate::secrets::env_exists(&state.pool, owner, &env).await,
+            None => false,
+        };
+        if !known {
+            return not_found();
+        }
+    }
+    let meta = fetched.mcp.as_ref().unwrap_or(&Value::Null);
+    let Some(decl) = oauth(meta) else {
+        return not_found();
+    };
+    let Some(audience) = effective_audience(decl.audience, &env) else {
+        return not_found();
     };
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(json!({
-            "resource": decl.audience,
+            "resource": audience,
             "authorization_servers": [decl.issuer],
             "bearer_methods_supported": ["header"],
             "scopes_supported": decl.scopes,
@@ -509,6 +581,29 @@ mod tests {
             base[key] = value.clone();
         }
         base
+    }
+
+    #[test]
+    fn effective_audiences_insert_the_env_after_the_f_segment() {
+        assert_eq!(
+            effective_audience("https://rusted.sh/f/renote", "prod").as_deref(),
+            Some("https://rusted.sh/f/renote")
+        );
+        assert_eq!(
+            effective_audience("https://rusted.sh/f/renote", "stage").as_deref(),
+            Some("https://rusted.sh/f/@stage/renote")
+        );
+        assert_eq!(
+            effective_audience("https://host:8443/f/n/deep", "qa").as_deref(),
+            Some("https://host:8443/f/@qa/n/deep")
+        );
+        // No /f/ segment: env URLs stay unsupported for this function.
+        assert_eq!(effective_audience("https://api.example/mcp", "stage"), None);
+        // A path merely containing the letter f is not the segment.
+        assert_eq!(
+            effective_audience("https://api.example/fff/x", "stage"),
+            None
+        );
     }
 
     #[test]
@@ -550,7 +645,7 @@ mod tests {
     #[test]
     fn claim_validation_refuses_each_defect_and_accepts_the_clean_token() {
         assert!(matches!(
-            validate_claims(&claims(json!({})), &decl()),
+            validate_claims(&claims(json!({})), &decl(), "https://api.example/f/notes"),
             Introspection::Valid(_)
         ));
         for defect in [
@@ -564,7 +659,11 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_claims(&claims(defect.clone()), &decl()),
+                    validate_claims(
+                        &claims(defect.clone()),
+                        &decl(),
+                        "https://api.example/f/notes"
+                    ),
                     Introspection::InvalidToken
                 ),
                 "{defect} must refuse"
@@ -577,12 +676,12 @@ mod tests {
         let mut no_scope = claims(json!({}));
         no_scope.as_object_mut().unwrap().remove("scope");
         assert!(matches!(
-            validate_claims(&no_scope, &decl()),
+            validate_claims(&no_scope, &decl(), "https://api.example/f/notes"),
             Introspection::InvalidToken
         ));
         let mut unscoped = decl();
         unscoped.scopes = Vec::new();
-        match validate_claims(&no_scope, &unscoped) {
+        match validate_claims(&no_scope, &unscoped, "https://api.example/f/notes") {
             Introspection::Valid(identity) => {
                 assert_eq!(identity["scopes"], json!([]));
             }

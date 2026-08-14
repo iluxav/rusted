@@ -690,7 +690,19 @@ async fn call_function_sub(
 }
 
 async fn mcp_protected_resource(State(state): Shared, Path(name): Path<String>) -> Response {
-    crate::mcp_auth::protected_resource(state, name).await
+    crate::mcp_auth::protected_resource(state, crate::secrets::PROD_ENV.to_string(), name).await
+}
+
+/// The env variant: `/f/@stage/name`. The marker is required — two bare
+/// segments describe nothing this server serves.
+async fn mcp_protected_resource_env(
+    State(state): Shared,
+    Path((env, name)): Path<(String, String)>,
+) -> Response {
+    let Some(env) = env.strip_prefix('@') else {
+        return err(StatusCode::NOT_FOUND, "not_found", "no such resource");
+    };
+    crate::mcp_auth::protected_resource(state, env.to_string(), name).await
 }
 
 async fn serve_function(
@@ -765,30 +777,6 @@ async fn serve_function(
     // An mcp function has no route pattern: every POST to /f/{name} is
     // protocol, and the messages inside decide what happens.
     if fetched.kind == "mcp" {
-        // An OAuth-protected mcp function's audience is one exact URL; a
-        // token minted for it can never validate against an @env variant, so
-        // serving one would only produce confusing 401s. Refused clearly
-        // until audiences learn environments.
-        if env != crate::secrets::PROD_ENV
-            && fetched
-                .mcp
-                .as_ref()
-                .is_some_and(|meta| meta.get("auth").is_some())
-        {
-            record_refusal(
-                &state,
-                &name,
-                fetched.owner,
-                "refused",
-                400,
-                format!("{tag}refused: OAuth mcp functions serve only their canonical URL"),
-            );
-            return err(
-                StatusCode::BAD_REQUEST,
-                "env_unsupported",
-                "OAuth-protected mcp functions serve only their canonical URL",
-            );
-        }
         if rest.is_some() {
             return err(
                 StatusCode::NOT_FOUND,
@@ -1082,6 +1070,10 @@ pub fn data_router(state: Arc<AppState>) -> Router {
         .route(
             "/.well-known/oauth-protected-resource/f/{name}",
             get(mcp_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/f/{env}/{name}",
+            get(mcp_protected_resource_env),
         )
         .route("/f/{name}", any(call_function_root))
         .route("/f/{name}/{*rest}", any(call_function_sub))
@@ -2426,6 +2418,10 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route(
             "/.well-known/oauth-protected-resource/f/{name}",
             get(mcp_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/f/{env}/{name}",
+            get(mcp_protected_resource_env),
         )
         .route("/api/functions", post(push_function).get(list_functions))
         .route(

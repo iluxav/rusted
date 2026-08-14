@@ -4226,15 +4226,16 @@ export default async function handler(request, context) {
 }
 
 #[tokio::test]
-async fn oauth_mcp_functions_refuse_env_urls() {
+async fn oauth_mcp_env_urls_refuse_only_underivable_audiences() {
     std::env::set_var("RUSTED_OAUTH_ALLOW_HTTP", "1");
     let t = boot().await;
     rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
         .await
         .unwrap();
+    // An audience with no /f/ segment: no env audience can be derived.
     let src = r#"export const mcp = {
   name: "envless",
-  auth: { type: "oauth", issuer: "http://127.0.0.1:9", audience: "https://api.example/f/envless" },
+  auth: { type: "oauth", issuer: "http://127.0.0.1:9", audience: "https://api.example/mcp" },
   tools: { t: { description: "d", inputSchema: { type: "object" }, handler() { return 1; } } },
 };"#;
     assert_eq!(push(&t, "envless", src).await.status(), 200);
@@ -4251,6 +4252,14 @@ async fn oauth_mcp_functions_refuse_env_urls() {
         r.json::<Value>().await.unwrap()["error"]["code"],
         "env_unsupported"
     );
+    // Its env discovery metadata is equally absent.
+    let r = t
+        .client
+        .get(t.data("/.well-known/oauth-protected-resource/f/@stage/envless"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
 }
 
 #[tokio::test]
@@ -4312,4 +4321,172 @@ async fn oauth_discovery_metadata_rides_both_listeners() {
         let v: Value = r.json().await.unwrap();
         assert_eq!(v["resource"], "https://api.example/f/discoverable", "{v}");
     }
+}
+
+/// The cross-env OAuth matrix: per-env audiences, per-env discovery, and a
+/// negative cache that cannot let a wrong-env attempt poison the right env.
+#[tokio::test]
+async fn oauth_mcp_serves_environments_with_derived_audiences() {
+    use axum::routing::{get, post};
+    std::env::set_var("RUSTED_OAUTH_ALLOW_HTTP", "1");
+    enable_secret_store();
+    let t = boot().await;
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+
+    let prod_aud = t.data("/f/multi");
+    let stage_aud = t.data("/f/@stage/multi");
+    // A mock AS minting audience-specific tokens: tok-prod → prod aud,
+    // tok-stage → stage aud. No client auth, keeping the focus on audiences.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let app = {
+        let issuer = issuer.clone();
+        let (prod_aud, stage_aud) = (prod_aud.clone(), stage_aud.clone());
+        axum::Router::new()
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get({
+                    let issuer = issuer.clone();
+                    move || {
+                        let issuer = issuer.clone();
+                        async move {
+                            axum::Json(json!({
+                                "issuer": issuer,
+                                "introspection_endpoint": format!("{issuer}/introspect"),
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/introspect",
+                post(move |body: String| {
+                    let issuer = issuer.clone();
+                    let (prod_aud, stage_aud) = (prod_aud.clone(), stage_aud.clone());
+                    async move {
+                        let token = body
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("token="))
+                            .unwrap_or_default();
+                        let aud = match token {
+                            "tok-prod" => prod_aud,
+                            "tok-stage" => stage_aud,
+                            _ => return axum::Json(json!({ "active": false })),
+                        };
+                        axum::Json(json!({
+                            "active": true,
+                            "iss": issuer,
+                            "aud": aud,
+                            "exp": rusted_server::state::now_epoch() + 600,
+                            "scope": "folders:read",
+                            "sub": "github:42",
+                            "client_id": "renote-web",
+                        }))
+                    }
+                }),
+            )
+    };
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let src = format!(
+        r#"export const mcp = {{
+  name: "multi",
+  auth: {{ type: "oauth", issuer: "{issuer}", audience: "{prod_aud}", scopes: ["folders:read"] }},
+  tools: {{ whoami: {{
+    description: "d", inputSchema: {{ type: "object" }},
+    handler(_args, context) {{ return {{ subject: context.auth.subject, env: context.currentEnv }}; }},
+  }} }},
+}};"#
+    );
+    assert_eq!(push(&t, "multi", &src).await.status(), 200);
+
+    // Discovery: each env advertises its own resource identity.
+    let r = t
+        .client
+        .get(t.data("/.well-known/oauth-protected-resource/f/multi"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["resource"],
+        json!(prod_aud)
+    );
+    let r = t
+        .client
+        .get(t.data("/.well-known/oauth-protected-resource/f/@stage/multi"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["resource"],
+        json!(stage_aud)
+    );
+    // Unknown env: metadata as absent as the function would be.
+    let r = t
+        .client
+        .get(t.data("/.well-known/oauth-protected-resource/f/@ghost/multi"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    // The stage challenge points at the stage metadata.
+    let r = t
+        .client
+        .post(t.data("/f/@stage/multi"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let www = r
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap();
+    assert!(www.contains("/f/@stage/multi"), "{www}");
+
+    let call = |url: String, token: &'static str| {
+        let client = t.client.clone();
+        async move {
+            client
+                .post(url)
+                .bearer_auth(token)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"whoami","arguments":{}}}))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Wrong-env first, on purpose: tok-prod against stage fails (audience
+    // mismatch) — and must NOT poison the cache for the right env.
+    let r = call(t.data("/f/@stage/multi"), "tok-prod").await;
+    assert_eq!(r.status(), 401, "prod token must not open stage");
+    let r = call(t.data("/f/multi"), "tok-prod").await;
+    assert_eq!(r.status(), 200, "the same token must still open prod");
+    let v: Value = r.json().await.unwrap();
+    let out: Value =
+        serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(out["env"], "prod", "{out}");
+
+    // And the stage token opens stage, running with stage context.
+    let r = call(t.data("/f/@stage/multi"), "tok-stage").await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let out: Value =
+        serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(out["subject"], "github:42", "{out}");
+    assert_eq!(out["env"], "stage", "{out}");
+    // …and not prod.
+    let r = call(t.data("/f/multi"), "tok-stage").await;
+    assert_eq!(r.status(), 401, "stage token must not open prod");
 }
