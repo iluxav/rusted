@@ -1,0 +1,31 @@
+<h1>Getting started</h1>
+<p class="lede">From nothing to a live HTTP endpoint in about two minutes. A rusted function is one JavaScript file; the platform gives it a URL, a sandbox, and hard limits.</p>
+
+<h2>1 · Install the CLI</h2>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/iluxav/rusted/main/install.sh | sh</code></pre>
+<p>Prebuilt binaries cover Apple Silicon and Linux (x86_64 and arm64). Anywhere else: <code>cargo install --path crates/rusted-cli</code> from a <a href="https://github.com/iluxav/rusted">source checkout</a>.</p>
+
+<h2>2 · Sign in</h2>
+<pre><code>rusted login</code></pre>
+<p>The CLI prints a short code and a URL. Open it, approve once with GitHub, and the CLI stores the API key it is granted in <code>~/.config/rusted/credentials.json</code> (owner-readable only). Nothing to copy — and the key appears in the console's <a href="/console/keys">API keys</a> page like any other, so you can revoke it if you lose the machine.</p>
+
+<h2>3 · Create a function</h2>
+<pre><code>rusted new hello --js
+cd hello</code></pre>
+<p>That scaffolds a ready-to-run directory. Open <code>index.js</code> and make it public — meaning callable without an API key even on servers that require one, which is what an endpoint you hand to the world (or a webhook sender) wants:</p>
+<pre><code>export const http = { name: "hello", methods: ["POST"], public: true };
+
+export default async function handler(request, context) {
+  const { name } = await request.json();
+  return context.json({ message: `Hello, ${name ?? "world"}` });
+}</code></pre>
+<p>Develop it locally first if you like — <code>rusted run index.js</code> serves it at <code>http://127.0.0.1:7400/f/hello</code> with hot reload, no server or database needed. When it works:</p>
+<pre><code>rusted push index.js
+<span class="out">→ deployed hello (rev 1) at https://rusted.sh/f/hello</span></code></pre>
+
+<h2>4 · Call it</h2>
+<pre><code>curl -X POST https://rusted.sh/f/hello -d '{"name":"Ada"}'
+<span class="out">→ {"message":"Hello, Ada"}</span></code></pre>
+<p>That URL is live for anyone, rate-limited and sandboxed under your plan. Every invocation is recorded — <code>rusted logs hello</code> shows outcomes, timings, and your <code>console.log</code> output; the <a href="/console">console dashboard</a> shows the aggregates.</p>
+
+<div class="callout"><p><strong>Where to next:</strong> the <a href="/docs/cli">CLI reference</a> for the full command set, <a href="/docs/security">security</a> for secrets and environments, <a href="/docs/mcp">MCP</a> to serve tools to AI models, or <a href="/docs/ai-agents">AI agents</a> if a model is the one doing the building.</p></div>

@@ -1,0 +1,37 @@
+<h1>AI agents</h1>
+<p class="lede">Most platforms give an agent a fixed toolbox. Rusted gives it a place to <em>make</em> tools: an agent that can write JavaScript can mint a live endpoint in one call, invoke it in milliseconds, and throw it away when done.</p>
+
+<h2>Connect</h2>
+<p>Point any MCP client at the platform's server with a rusted API key:</p>
+<pre><code>{ "mcpServers": { "rusted": {
+    "url": "https://rusted.sh/mcp",
+    "headers": { "Authorization": "Bearer &lt;your rusted api key&gt;" } } } }</code></pre>
+<p>Six tools, deliberately few: <code>execute</code>, <code>deploy</code>, <code>list</code>, <code>delete</code>, <code>inbox_create</code>, <code>inbox_read</code>. The prevailing MCP pattern hands a model dozens of tools whose schemas cost context before the conversation starts — an abstraction from when models couldn't write code. A model that writes code doesn't need a schema per capability; it needs <code>fetch</code> and somewhere safe to run. The sandbox is what makes handing that to a model defensible: hard wall-clock, heap, and output limits, no filesystem, no process, SSRF-guarded networking.</p>
+
+<h2>The loop</h2>
+<p><strong>Try code without deploying anything</strong> — <code>execute</code> runs a handler ad-hoc and returns the result, logs, and timings:</p>
+<pre><code>execute({ "code": "export default async () =&gt; {
+  const r = await fetch('https://api.github.com/repos/rust-lang/rust');
+  return { stars: (await r.json()).stargazers_count };
+}" })</code></pre>
+<p><strong>Keep what works</strong> — <code>deploy</code> makes it a named, persistent endpoint and returns the URL. Deployment is a database write plus a compile check: the endpoint is live in well under a second. From then on it's plain HTTP — callable by the agent, by other agents, by anything:</p>
+<pre><code>curl -X POST https://rusted.sh/f/repo-stars -d '{}'</code></pre>
+<p><strong>Fast enough to be a subroutine.</strong> Invocations run in a fresh sandbox with pre-compiled bytecode; typical handlers execute in single-digit milliseconds of pure execution time, and a simple function round-trips in well under 50 ms — an agent can treat a deployed function as a fast function call, not a slow external service. The numbers aren't folklore: <code>GET /api/stats</code> serves live per-function p95 execution times from the platform's own telemetry.</p>
+
+<h2>Tools that persist and coordinate</h2>
+<p>Deployed functions aren't limited to stateless glue. Declared capabilities give an agent's tools real machinery — <a href="/docs/security">durable CAS state</a> that survives redeploys, object storage with presigned uploads, encrypted secrets, and per-environment isolation for trying things without touching prod:</p>
+<pre><code>export const config = { state: true, secrets: ["API_TOKEN"] };</code></pre>
+<p>And an agent can deploy <a href="/docs/mcp">MCP functions</a> — serving tools <em>to other models</em>, with schema validation and optional OAuth handled by the platform. An agent building tools for its future selves, or for other agents, is the intended shape.</p>
+
+<h2>Receiving, not just calling</h2>
+<p>Agents can call out but can't be called back — no inbound address rules out OAuth callbacks, webhooks, and "tell me when it's done." <a href="/docs/inbox">Inboxes</a> fix that inside the same six tools: <code>inbox_create</code> returns a throwaway URL anyone can POST to; <code>inbox_read</code> polls it by name. Start a flow, hand out the URL, keep working, collect the result.</p>
+
+<h2>Why this works well for agents, specifically</h2>
+<ul>
+  <li><strong>Errors are model-legible.</strong> A thrown error returns as a readable tool result with the message and console output — the model reads it and fixes its own code. Schema violations are named precisely before any sandbox boots.</li>
+  <li><strong>Limits are honest.</strong> Execution budgets, rate limits, and refusals come back as structured answers an agent can act on (retry, back off, simplify), never as silent failures.</li>
+  <li><strong>Everything is inspectable.</strong> <code>list</code> shows what exists, <code>rusted logs</code> and <code>/api/stats</code> show what happened — an agent can observe and manage its own fleet of functions.</li>
+  <li><strong>TypeScript declarations exist</strong> (<code>rusted types</code>) describing exactly what the runtime has — nothing a model's training data promises from Node or the browser will typecheck if it won't run.</li>
+</ul>
+
+<div class="callout"><p><strong>The pitch in one line:</strong> rusted is the MCP server that lets agents write their own tools — create in seconds, invoke in milliseconds, delete without ceremony.</p></div>

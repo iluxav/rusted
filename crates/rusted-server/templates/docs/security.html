@@ -1,0 +1,36 @@
+<h1>Security</h1>
+<p class="lede">The platform runs other people's code for a living, so every capability is opt-in, scoped, and bounded — and credentials live where JavaScript can't reach them.</p>
+
+<h2>API keys</h2>
+<p>Keys look like <code>rk_live_&lt;lookup&gt;_&lt;secret&gt;</code>. Only a hash of the secret is stored; the lookup is a random handle, so a token exposes no row identity. Create and revoke them in the console — revocation propagates to every server instance in under a second via the same invalidation channel everything else uses. <code>rusted login</code> mints one per machine through device sign-in, so nothing is ever copy-pasted.</p>
+
+<h2>The sandbox</h2>
+<p>Each invocation gets a fresh QuickJS runtime with an uncatchable wall-clock interrupt, a heap cap, a stack cap, and an output cap. There is no filesystem, no process, no Node — the only way out is <code>fetch</code>, which resolves DNS first and refuses loopback, private, and link-local destinations (the SSRF guard), follows no redirects on host-side calls, and is budgeted per invocation by plan. Response headers a handler sets are vetted; framing headers can't be forged.</p>
+
+<h2>Secrets</h2>
+<p>Credentials don't belong in source — deployed code is stored, revisioned, and visible in the console. Declare what a function needs; store values in the console's Secrets page:</p>
+<pre><code>export const config = { secrets: ["GITHUB_CLIENT_SECRET"] };
+
+export default async function handler(request, context) {
+  const secret = context.env.GITHUB_CLIENT_SECRET;
+}</code></pre>
+<ul>
+  <li><strong>Asking is the grant.</strong> No declaration → no <code>context.env</code> at all, so what a function can see is visible in its source.</li>
+  <li><strong>All-or-nothing.</strong> Any declared name unset refuses the invocation <em>before</em> the handler runs — callers get a generic error, your logs name the missing secret. Never an empty string, never a fallback.</li>
+  <li><strong>Encrypted at rest.</strong> AES-256-GCM under a key from the server's environment — the database never holds a plaintext credential, and neither the database nor the key alone reveals anything. Values are write-only: re-enter to rotate.</li>
+</ul>
+<p><strong>Host-only secrets</strong> go further: object-storage credentials, <code>context.seal</code>/<code>open</code> keys, and MCP OAuth introspection credentials name vault entries that are resolved server-side and used <em>for</em> the function without ever being readable <em>by</em> it — they're refused in <code>config.secrets</code> outright.</p>
+
+<h2>Environments</h2>
+<p>One deployed function, different configuration per environment, selected by the URL — never by code:</p>
+<pre><code>https://rusted.sh/f/settle           <span class="cmt">→ prod (every existing URL, unchanged)</span>
+https://rusted.sh/f/@stage/settle    <span class="cmt">→ stage</span></code></pre>
+<p>Each environment is a full overlay: its own secret values for the same declared names, its own durable state, its own object namespace — a stage invocation cannot read prod's counters or address prod's blobs, by construction. Handlers see <code>context.currentEnv</code> (always a string; <code>"local"</code> under <code>rusted run</code>). A secret unset in the resolved environment refuses the invocation; an environment you never created answers 404 exactly like a missing function. Because the environment is part of the address, it survives redirects, cookies, and third-party callbacks — register a dev OAuth app against <code>/f/@stage/…/callback</code> and the whole flow stays out of prod.</p>
+
+<h2>Sealed values &amp; crypto primitives</h2>
+<p>Sessions and anything else a browser hands back want authenticated encryption. <code>context.seal</code>/<code>open</code> do it host-side with AES-256-GCM, keyed by a vault secret the function can never read; tampering, a wrong key, or a wrong context string all answer the same <code>null</code>. Alongside: <code>context.randomBytes</code>/<code>randomBase64Url</code> (OS CSPRNG — <code>Math.random()</code> never mints credentials), <code>context.sha256</code>, base64url/hex codecs, and <code>context.timingSafeEqual</code> for comparing tokens without a timing oracle. All native — no npm crypto, no interpreter-speed loops.</p>
+
+<h2>Public functions and <code>--require-auth</code></h2>
+<p>A server run with <code>--require-auth</code> demands a key on every function endpoint. A function declares itself exempt with <code>public: true</code> — what an OAuth callback or webhook target needs, since the third party calling it cannot present your key. The gate consults the stored record, never anything the caller sent. Unpublished functions answer 404 indistinguishably from missing ones, and probing environment names reveals nothing either.</p>
+
+<div class="callout"><p>Everything above is observable: refused invocations — rate limits, wrong methods, missing secrets, rejected OAuth tokens — are recorded with their HTTP status in <code>rusted logs</code>, so "my logs show nothing" and "callers are being turned away" can never be the same picture.</p></div>

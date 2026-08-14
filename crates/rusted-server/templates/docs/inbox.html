@@ -1,0 +1,37 @@
+<h1>Inboxes</h1>
+<p class="lede">A function can call out; nothing can call <em>in</em> to a browser, a CLI session, or an agent running in someone's cloud. An inbox is a throwaway URL that accepts a POST from anyone and holds it until you read it — an inbound address for things that don't have one.</p>
+
+<h2>The core idea</h2>
+<pre><code>rusted inbox new stripe-data --ttl 2m
+<span class="out">→ https://rusted.sh/inbox/435007f5f71dc851a66e39aedb5b4e43ebdadb5ae12c878a</span>
+<span class="out">  anyone with this URL can POST to it; reading needs your key · expires in 120s</span></code></pre>
+<p><strong>The write address and the read handle are different things on purpose.</strong> The URL is unguessable and grants exactly one capability: writing. Reading is by name and needs your key — so handing the URL to Stripe never hands over what Stripe sent. That separation is what makes it safe to paste a receiving URL into someone else's dashboard.</p>
+
+<h2>Reading, three ways</h2>
+<pre><code>rusted inbox get stripe-data      <span class="cmt"># CLI — also: inbox list, inbox rm</span></code></pre>
+<p>From inside a deployed function, scoped to whoever deployed it — naming another account's inbox finds nothing:</p>
+<pre><code>export default async function handler(request, context) {
+  const messages = await context.inbox.get("stripe-data");
+  return context.json({ received: messages.length });
+}</code></pre>
+<p>Or over MCP as <code>inbox_create</code> and <code>inbox_read</code> — how an <a href="/docs/ai-agents">agent</a> uses it: create, hand out the URL, poll until something lands.</p>
+
+<h2>How arrivals accumulate</h2>
+<table>
+  <tr><th>flag</th><th>behavior</th></tr>
+  <tr><td><code>--store append</code></td><td>Keep every message (default — the mode that can't silently lose one).</td></tr>
+  <tr><td><code>--store upsert</code></td><td>Keep only the most recent — right for a single value like an OAuth code.</td></tr>
+  <tr><td><code>--drain</code></td><td>Delete the inbox on the first read that finds something, like taking a message off a queue. At-most-once: if the read response is lost in flight, the message is gone — fine for a code you can request again, wrong for a payment event.</td></tr>
+</table>
+
+<h2>Lifecycle and bounds</h2>
+<p>The TTL runs from creation and is <strong>never extended by activity</strong> — sliding expiry would let anyone holding the write URL keep the inbox alive forever. Expired, drained, and never-existed all answer the same <code>410 Gone</code>, so probing addresses reveals nothing, and well-behaved webhook senders stop retrying. Alive-but-empty answers <code>200</code> with no messages, so a poller can tell "nothing yet" from "too late."</p>
+<p>A public write endpoint is an unbounded write primitive unless bounded, so: 64 KB per message, 100 messages, 1000 accepted writes over an inbox's life, 24 h maximum TTL, and bodies must be valid UTF-8. Messages are served from memory and written through to Postgres on the same call — a restart loses nothing, and expiry deletes the payload rather than hiding it.</p>
+
+<h2>Use cases</h2>
+<ul>
+  <li><strong>OAuth callbacks for things without an address</strong> — a CLI or agent starts a flow, registers the inbox URL as the redirect target, and polls for the code (<code>--store upsert --drain --ttl 2m</code>).</li>
+  <li><strong>Webhook capture</strong> — point Stripe/GitHub at an inbox and let a function read the backlog on its own schedule, instead of hosting an always-on receiver.</li>
+  <li><strong>"Notify me when it's done"</strong> — hand a long-running job an inbox URL; whoever finishes POSTs the result.</li>
+  <li><strong>Human-in-the-loop</strong> — an agent creates an inbox, sends someone the URL (a form, an approval), and continues when the answer arrives.</li>
+</ul>

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — rusted docs{% endblock %}
+{% block body %}
+<div class="flex min-h-screen flex-col">
+  <header class="sticky top-0 z-20 border-b border-copper/10 bg-rust-950/90 backdrop-blur-xl">
+    <div class="mx-auto flex max-w-6xl items-center justify-between px-5 py-4 sm:px-8">
+      <a href="/" class="group flex items-center gap-2.5 font-display text-lg font-bold tracking-[-0.04em] text-cream">
+        <span class="flex h-7 w-7 items-center justify-center rounded-md border border-ember/30 bg-ember/10 font-mono text-sm text-ember transition-colors group-hover:bg-ember group-hover:text-rust-950">r_</span>
+        rusted <span class="ml-1 font-mono text-[9px] font-medium uppercase tracking-widest text-copper/60">docs</span>
+      </a>
+      <nav class="flex items-center gap-4 font-mono text-[12px]">
+        <a href="https://github.com/iluxav/rusted" class="text-clay transition-colors hover:text-cream">github</a>
+        <a href="/login" class="text-copper transition-colors hover:text-ember">console →</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 px-5 py-8 sm:px-8 lg:flex-row">
+    <aside class="lg:w-52 lg:shrink-0">
+      <nav class="flex flex-row flex-wrap gap-1 lg:sticky lg:top-20 lg:flex-col" aria-label="Documentation">
+        {% for (slug, label) in pages %}
+        <a href="/docs/{{ slug }}"
+           class="rounded-full px-3.5 py-2 font-mono text-[12px] transition-colors {% if *slug == active.as_str() %}bg-ember/10 text-ember{% else %}text-clay hover:bg-rust-900 hover:text-cream{% endif %}">
+          {{ label }}
+        </a>
+        {% endfor %}
+      </nav>
+    </aside>
+
+    <main class="docs-prose min-w-0 max-w-3xl flex-1 pb-24">{{ inner|safe }}</main>
+  </div>
+</div>
+
+<style>
+  .docs-prose h1 { font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 2rem; font-weight: 600; letter-spacing: -0.03em; color: #F2EAE3; margin-bottom: 0.75rem; }
+  .docs-prose .lede { color: #A99282; font-size: 1.05rem; line-height: 1.65; margin-bottom: 2.25rem; }
+  .docs-prose h2 { font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 1.3rem; font-weight: 600; letter-spacing: -0.02em; color: #F2EAE3; margin: 2.5rem 0 0.75rem; padding-top: 1rem; border-top: 1px solid rgba(196,123,69,0.12); }
+  .docs-prose h3 { font-size: 1.02rem; font-weight: 600; color: #F2EAE3; margin: 1.75rem 0 0.5rem; }
+  .docs-prose p, .docs-prose li { color: #C9B8AB; line-height: 1.7; font-size: 0.95rem; }
+  .docs-prose p { margin-bottom: 1rem; }
+  .docs-prose ul, .docs-prose ol { margin: 0 0 1.15rem 1.25rem; }
+  .docs-prose ul { list-style: disc; }
+  .docs-prose ol { list-style: decimal; }
+  .docs-prose li { margin-bottom: 0.4rem; }
+  .docs-prose li::marker { color: #C47B45; }
+  .docs-prose a { color: #FF9A62; text-decoration: none; border-bottom: 1px solid rgba(255,107,36,0.3); }
+  .docs-prose a:hover { color: #FF6B24; border-bottom-color: #FF6B24; }
+  .docs-prose code { font-family: "JetBrains Mono", monospace; font-size: 0.85em; color: #F2EAE3; background: rgba(196,123,69,0.10); border: 1px solid rgba(196,123,69,0.15); border-radius: 4px; padding: 0.1em 0.35em; }
+  .docs-prose pre { position: relative; background: #14100D; border: 1px solid rgba(196,123,69,0.15); border-radius: 10px; padding: 1rem 1.15rem; margin: 0 0 1.25rem; overflow-x: auto; }
+  .docs-prose pre code { background: none; border: none; padding: 0; font-size: 0.82rem; line-height: 1.6; color: #E8DCD2; display: block; }
+  .docs-prose pre .cmt { color: #8A7568; }
+  .docs-prose pre .out { color: #79C69A; }
+  .docs-prose table { width: 100%; border-collapse: collapse; margin: 0 0 1.25rem; font-size: 0.87rem; }
+  .docs-prose th { text-align: left; font-family: "JetBrains Mono", monospace; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: #A99282; border-bottom: 1px solid rgba(196,123,69,0.2); padding: 0.5rem 0.75rem 0.5rem 0; }
+  .docs-prose td { color: #C9B8AB; border-bottom: 1px solid rgba(196,123,69,0.08); padding: 0.55rem 0.75rem 0.55rem 0; vertical-align: top; }
+  .docs-prose td code { white-space: nowrap; }
+  .docs-prose .callout { border: 1px solid rgba(255,107,36,0.25); background: rgba(255,107,36,0.06); border-radius: 10px; padding: 0.9rem 1.1rem; margin: 0 0 1.25rem; }
+  .docs-prose .callout p { margin: 0; color: #E8DCD2; font-size: 0.9rem; }
+  .docs-prose .next { display: inline-block; margin-top: 1.5rem; font-family: "JetBrains Mono", monospace; font-size: 0.85rem; }
+</style>
+<script>
+  // A copy button on every code block.
+  document.querySelectorAll('.docs-prose pre').forEach((pre) => {
+    const btn = document.createElement('button');
+    btn.textContent = 'copy';
+    btn.style.cssText = 'position:absolute;top:8px;right:8px;font:500 10px "JetBrains Mono",monospace;color:#A99282;background:#1E1712;border:1px solid rgba(196,123,69,0.2);border-radius:6px;padding:3px 8px;cursor:pointer';
+    btn.addEventListener('click', () => {
+      const text = [...pre.querySelectorAll('code')].map(c => c.innerText).join('\n')
+        .split('\n').filter(line => !line.startsWith('# →') && !line.startsWith('→')).join('\n');
+      navigator.clipboard.writeText(text);
+      btn.textContent = 'copied!';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+    });
+    pre.appendChild(btn);
+  });
+</script>
+{% endblock %}

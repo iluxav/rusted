@@ -72,6 +72,8 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .merge(crate::assets::router())
         .route("/", get(landing))
+        .route("/docs", get(docs_index))
+        .route("/docs/{page}", get(docs_page))
         .route("/login", get(login))
         .route(
             "/oauth/authorize",
@@ -378,6 +380,85 @@ struct DeviceT {
 #[derive(Template)]
 #[template(path = "landing.html")]
 struct LandingT;
+
+/// The public documentation shell: sidebar plus one pre-authored page.
+/// Content lives in templates/docs/*.html as plain fragments compiled into
+/// the binary — the docs deploy with the code they describe.
+#[derive(Template)]
+#[template(path = "docs.html")]
+struct DocsT {
+    title: &'static str,
+    active: String,
+    pages: Vec<(&'static str, &'static str)>,
+    inner: &'static str,
+}
+
+/// Slug → (nav label, page title, content). Order is the sidebar order.
+const DOCS_PAGES: [(&str, &str, &str, &str); 6] = [
+    (
+        "getting-started",
+        "Getting started",
+        "Getting started",
+        include_str!("../templates/docs/getting_started.html"),
+    ),
+    (
+        "cli",
+        "CLI reference",
+        "CLI reference",
+        include_str!("../templates/docs/cli.html"),
+    ),
+    (
+        "mcp",
+        "MCP",
+        "MCP",
+        include_str!("../templates/docs/mcp.html"),
+    ),
+    (
+        "security",
+        "Security",
+        "Security",
+        include_str!("../templates/docs/security.html"),
+    ),
+    (
+        "inbox",
+        "Inboxes",
+        "Inboxes",
+        include_str!("../templates/docs/inbox.html"),
+    ),
+    (
+        "ai-agents",
+        "AI agents",
+        "AI agents",
+        include_str!("../templates/docs/ai_agents.html"),
+    ),
+];
+
+async fn docs_index() -> Response {
+    Redirect::to("/docs/getting-started").into_response()
+}
+
+async fn docs_page(Path(page): Path<String>) -> Response {
+    let Some((slug, _, title, inner)) = DOCS_PAGES
+        .iter()
+        .find(|(slug, _, _, _)| *slug == page.as_str())
+    else {
+        return Redirect::to("/docs/getting-started").into_response();
+    };
+    Html(
+        DocsT {
+            title,
+            active: slug.to_string(),
+            pages: DOCS_PAGES
+                .iter()
+                .map(|(slug, label, _, _)| (*slug, *label))
+                .collect(),
+            inner,
+        }
+        .render()
+        .expect("docs render"),
+    )
+    .into_response()
+}
 
 #[derive(Template)]
 #[template(path = "login.html")]

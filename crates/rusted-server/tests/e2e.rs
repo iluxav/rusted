@@ -4664,3 +4664,46 @@ async fn telemetry_totals_survive_a_server_restart() {
     assert!(durable["invocations"].as_u64().unwrap() >= 3, "{durable}");
     assert!(durable["p95_exec_ms"].as_f64().unwrap() > 0.0, "{durable}");
 }
+
+#[tokio::test]
+async fn docs_are_public_complete_and_unauthenticated() {
+    let t = boot().await;
+    let admin = |path: &str| format!("http://{}{path}", t.handle.admin_addr);
+
+    // The index redirects to getting-started.
+    let r = t.client.get(admin("/docs")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.url().path().ends_with("/docs/getting-started"));
+
+    // Every page renders without any cookie or key, and carries its content.
+    for (page, marker) in [
+        ("getting-started", "rusted login"),
+        ("cli", "RUSTED_ADMIN"),
+        ("mcp", "tools/call"),
+        ("security", "AES-256-GCM"),
+        ("inbox", "write address and the read handle"),
+        ("ai-agents", "write their own tools"),
+    ] {
+        let r = t
+            .client
+            .get(admin(&format!("/docs/{page}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "/docs/{page}");
+        let body = r.text().await.unwrap();
+        assert!(body.contains(marker), "/docs/{page} missing {marker:?}");
+        // The sidebar links every page from every page.
+        assert!(body.contains("/docs/ai-agents"), "/docs/{page} sidebar");
+    }
+
+    // An unknown page lands on getting-started rather than 404ing a typo.
+    let r = t
+        .client
+        .get(admin("/docs/getting-strated"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.url().path().ends_with("/docs/getting-started"));
+}

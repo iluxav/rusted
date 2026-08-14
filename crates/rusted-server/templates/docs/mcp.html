@@ -1,0 +1,56 @@
+<h1>MCP</h1>
+<p class="lede">A file that exports tools instead of a request handler becomes a live MCP server at the same <code>/f/&lt;name&gt;</code> URL. You write handlers; the platform speaks the protocol.</p>
+
+<h2>An MCP function</h2>
+<pre><code>export const mcp = {
+  name: "slugger",
+  tools: {
+    slugify: {
+      description: "Turn a title into a URL slug",
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      async handler({ text }) { return text.toLowerCase().replace(/[^a-z0-9]+/g, "-"); },
+    },
+  },
+};</code></pre>
+<p><code>rusted push slugger.js</code> and it's serving. <code>initialize</code> and <code>tools/list</code> are answered from deploy-time metadata without booting a sandbox; <code>tools/call</code> validates arguments against the tool's <code>inputSchema</code> first, then runs the handler under your plan's limits like any invocation. A thrown error comes back as an <code>isError</code> tool result the model can read and correct — never a protocol error. Return a string for text content; any other value travels as JSON (objects also mirrored in <code>structuredContent</code>).</p>
+<p>The push prints the block to paste into an MCP client:</p>
+<pre><code>{ "mcpServers": { "slugger": {
+    "url": "https://rusted.sh/f/slugger",
+    "headers": { "Authorization": "Bearer &lt;your rusted api key&gt;" } } } }</code></pre>
+
+<h2>Who may call it</h2>
+<p>Three modes, declared in the file:</p>
+<ul>
+  <li><strong>Owner key</strong> (default) — callers present one of your rusted API keys.</li>
+  <li><strong><code>public: true</code></strong> — no key at all.</li>
+  <li><strong>External OAuth</strong> — delegate caller authentication to your own authorization server:</li>
+</ul>
+<pre><code>export const mcp = {
+  name: "notes",
+  auth: {
+    type: "oauth",
+    issuer: "https://app.example.com",          <span class="cmt">// an https origin — no path, no trailing slash</span>
+    audience: "https://rusted.sh/f/notes",       <span class="cmt">// tokens must carry exactly this aud</span>
+    scopes: ["folders:read"],
+    introspectionClientIdSecret: "AS_CLIENT_ID",       <span class="cmt">// vault names for RFC 7662 client auth;</span>
+    introspectionClientSecretSecret: "AS_CLIENT_SECRET", <span class="cmt">// the function itself can never read them</span>
+  },
+  tools: { whoami: {
+    description: "Show the verified caller",
+    inputSchema: { type: "object" },
+    handler(_args, context) { return context.auth; },  <span class="cmt">// { subject, clientId, scopes, connectionId? }</span>
+  } },
+};</code></pre>
+<p>Rusted publishes RFC 9728 protected-resource metadata at <code>/.well-known/oauth-protected-resource/f/&lt;name&gt;</code>, challenges unauthenticated clients toward it, discovers your server's metadata, and introspects each bearer token — issuer, exact audience, expiry, scopes, and revocation must all hold before a sandbox starts. Tool code sees only the sanitized <code>context.auth</code>; the bearer token never reaches JavaScript. Rejected tokens are negatively cached briefly, an unreachable issuer answers <code>503</code> (distinct from an invalid token's <code>401</code>), and refusals appear in your logs.</p>
+<p><a href="/docs/security">Environments</a> get their own resource identities: <code>/f/@stage/notes</code> derives its audience (<code>…/f/@stage/notes</code>), publishes its own discovery metadata, and validates tokens against exactly that — a stage token never opens prod. Introspection credentials resolve from the stage vault.</p>
+
+<h2>What an MCP function is not</h2>
+<ul>
+  <li><strong>No SSE or streaming</strong> — every request gets one JSON response.</li>
+  <li><strong>No sessions</strong> — <code>Mcp-Session-Id</code> is echoed, not stored.</li>
+  <li><strong>No <code>listChanged</code></strong> — the tool list changes only when you push.</li>
+  <li><strong>No unbounded work</strong> — a tool call runs under your plan's execution budget.</li>
+</ul>
+
+<h2>The platform's own MCP server</h2>
+<p>Distinct from functions you deploy: <code>https://rusted.sh/mcp</code> is the server an AI agent connects to in order to <em>build on</em> rusted — its tools are <code>execute</code>, <code>deploy</code>, <code>list</code>, <code>delete</code>, <code>inbox_create</code>, and <code>inbox_read</code>. See <a href="/docs/ai-agents">AI agents</a>.</p>

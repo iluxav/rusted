@@ -1,0 +1,44 @@
+<h1>CLI reference</h1>
+<p class="lede">One binary, two jobs: every subcommand is a thin client of a rusted server's admin API — and <code>rusted serve</code> <em>is</em> the server, if you'd rather run your own.</p>
+
+<h2>Where commands point</h2>
+<p>The CLI talks to the hosted service at <code>https://rusted.sh</code> unless told otherwise. Resolution order for the server: <code>--admin &lt;url&gt;</code> flag → <code>RUSTED_ADMIN</code> env var → the hosted default. For the key: <code>--api-key</code> → <code>RUSTED_API_KEY</code> → what <code>rusted login</code> stored. Add <code>--json</code> to any command for stable, script-friendly output.</p>
+<pre><code><span class="cmt"># self-hosting? point the CLI at your own server once:</span>
+export RUSTED_ADMIN=http://127.0.0.1:7412</code></pre>
+
+<h2>Developing</h2>
+<table>
+  <tr><th>command</th><th>what it does</th></tr>
+  <tr><td><code>rusted new &lt;name&gt;</code></td><td>Scaffold a function directory: typed <code>index.ts</code>, <code>rusted.d.ts</code>, tsconfig, package.json. <code>--js</code> for plain JavaScript, <code>--mcp</code> for an MCP server scaffold.</td></tr>
+  <tr><td><code>rusted run &lt;file&gt;</code></td><td>Local dev server with hot reload — no server, database, or key. Bundles imports in-process; prints per-request outcomes, logs, and sourcemapped stacks. Flags: <code>--port</code>, <code>--exec-ms</code>, <code>--outbound</code>, <code>--build '&lt;cmd&gt;'</code>.</td></tr>
+  <tr><td><code>rusted build &lt;file&gt;</code></td><td>Bundle to a single deployable file in <code>dist/</code> (<code>--sourcemap</code> for a map). Refuses to write a bundle that wouldn't deploy.</td></tr>
+  <tr><td><code>rusted verify &lt;file&gt;</code></td><td>Compile-check and read the declared surface without deploying.</td></tr>
+  <tr><td><code>rusted types</code></td><td>Write <code>rusted.d.ts</code> — the runtime's exact type surface (no DOM, no Node).</td></tr>
+</table>
+
+<h2>Deploying</h2>
+<table>
+  <tr><th>command</th><th>what it does</th></tr>
+  <tr><td><code>rusted push &lt;file&gt;</code></td><td>Bundle and deploy. The file's own <code>http</code>/<code>mcp</code> export supplies name, methods, and route; <code>--name</code>, <code>--method</code>, <code>--path</code> override it.</td></tr>
+  <tr><td><code>rusted preview &lt;file&gt;</code></td><td>A temporary endpoint that expires on its own (<code>--ttl</code> seconds, default 120).</td></tr>
+  <tr><td><code>rusted list</code></td><td>Your functions and live temporary runs.</td></tr>
+  <tr><td><code>rusted pull &lt;name&gt;</code></td><td>Print (or <code>-o</code> save) the deployed source.</td></tr>
+  <tr><td><code>rusted delete &lt;name&gt;</code></td><td>Remove the function. Durable state survives — see <code>state purge</code>.</td></tr>
+</table>
+
+<h2>Operating</h2>
+<table>
+  <tr><th>command</th><th>what it does</th></tr>
+  <tr><td><code>rusted invoke &lt;name&gt;</code></td><td>Run a deployed function without HTTP (<code>--body</code> for input). Owner-only; returns the real error and logs.</td></tr>
+  <tr><td><code>rusted logs &lt;name&gt;</code></td><td>Recent invocations with outcome, HTTP status, timings, and console output. <code>--errors</code> filters to failures — including 4xx/5xx responses and refusals (rate limits, wrong methods) that never reached the handler.</td></tr>
+  <tr><td><code>rusted state purge &lt;name&gt;</code></td><td>Permanently delete <em>every</em> durable-state key the function holds, across all environments. The one explicit way state goes away.</td></tr>
+  <tr><td><code>rusted inbox new|get|list|rm</code></td><td>Throwaway URLs that accept POSTs from anyone — see <a href="/docs/inbox">inboxes</a>.</td></tr>
+  <tr><td><code>rusted login</code> / <code>logout</code></td><td>Device sign-in (approve once in a browser); forget the stored credential.</td></tr>
+</table>
+
+<h2>Self-hosting</h2>
+<pre><code>make db          <span class="cmt"># postgres via docker compose</span>
+rusted serve     <span class="cmt"># functions on :7411, admin API + console on :7412</span></code></pre>
+<p>Flags worth knowing: <code>--require-auth</code> demands an API key on every function endpoint (functions declaring <code>public: true</code> and OAuth-protected MCP functions are exempt), <code>--debug</code> prints per-invocation detail to stdout, and <code>PUBLIC_URL</code> sets the origin the console advertises. Migrations run at boot.</p>
+
+<div class="callout"><p>Deployed function URLs look like <code>https://rusted.sh/f/&lt;name&gt;</code> — and <code>https://rusted.sh/f/@stage/&lt;name&gt;</code> selects an <a href="/docs/security">environment</a>.</p></div>
