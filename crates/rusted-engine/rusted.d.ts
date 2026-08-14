@@ -469,7 +469,8 @@ declare namespace Rusted {
   interface FetchInit {
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    /** Text is sent as UTF-8; Uint8Array/ArrayBuffer bytes go uncoerced. */
+    body?: string | Uint8Array | ArrayBuffer;
   }
 }
 

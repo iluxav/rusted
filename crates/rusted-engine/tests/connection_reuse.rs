@@ -20,6 +20,7 @@ fn get(budget: &OutboundBudget, url: &str) -> Duration {
         method: None,
         headers: Default::default(),
         body: None,
+        body_base64: None,
     });
     assert!(r.error.is_none(), "fetch failed: {:?}", r.error);
     t.elapsed()
@@ -43,6 +44,7 @@ fn pooling_does_not_weaken_the_deadline() {
         method: None,
         headers: Default::default(),
         body: None,
+        body_base64: None,
     });
     assert!(
         t.elapsed() < Duration::from_millis(50),
@@ -105,6 +107,7 @@ fn a_binary_response_body_is_available_without_text_coercion() {
         method: None,
         headers: Default::default(),
         body: None,
+        body_base64: None,
     });
     eprintln!(
         "BINARY status={} body_len={} error={:?}",

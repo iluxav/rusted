@@ -1,6 +1,6 @@
 [package]
 name = "rusted-server"
-version = "0.20.1"
+version = "0.21.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "The rusted server: data plane, admin API, and web console."

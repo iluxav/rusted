@@ -18,6 +18,7 @@ fn req(url: &str) -> FetchRequest {
         method: None,
         headers: Default::default(),
         body: None,
+        body_base64: None,
     }
 }
 

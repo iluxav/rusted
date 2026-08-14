@@ -47,6 +47,24 @@ pub struct FetchRequest {
     pub headers: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default, rename = "bodyBase64")]
+    pub body_base64: Option<String>,
+}
+
+impl FetchRequest {
+    /// `None` when the caller sent no body at all — distinct from an explicit
+    /// empty body, which still attaches (and so still sends Content-Length).
+    fn decoded_body(&self) -> Result<Option<Vec<u8>>, String> {
+        match (&self.body, &self.body_base64) {
+            (Some(_), Some(_)) => Err("request body must be text or binary, not both".into()),
+            (Some(body), None) => Ok(Some(body.as_bytes().to_vec())),
+            (None, Some(encoded)) => base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map(Some)
+                .map_err(|_| "binary request body is not valid base64url".into()),
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -185,6 +203,10 @@ impl OutboundBudget {
         if let Err(reason) = vet_url(&request.url) {
             return FetchResponse::refused(reason);
         }
+        let body = match request.decoded_body() {
+            Ok(body) => body,
+            Err(error) => return FetchResponse::refused(error),
+        };
         let method = request
             .method
             .unwrap_or_else(|| "GET".into())
@@ -203,8 +225,7 @@ impl OutboundBudget {
         for (k, v) in &request.headers {
             builder = builder.header(k, v);
         }
-        let body = request.body.unwrap_or_default();
-        let built = match builder.body(body) {
+        let built = match builder.body(body.unwrap_or_default()) {
             Ok(built) => built,
             Err(e) => return FetchResponse::refused(format!("bad request: {e}")),
         };
@@ -337,6 +358,10 @@ impl OutboundBudget {
         if let Err(reason) = vet_url_async(&request.url).await {
             return FetchResponse::refused(reason);
         }
+        let body = match request.decoded_body() {
+            Ok(body) => body,
+            Err(error) => return FetchResponse::refused(error),
+        };
         let method = request
             .method
             .unwrap_or_else(|| "GET".into())
@@ -357,7 +382,10 @@ impl OutboundBudget {
         for (k, v) in &request.headers {
             builder = builder.header(k, v);
         }
-        if let Some(body) = request.body {
+        if let Some(body) = body {
+            // Present means attached, even when empty — an explicit empty
+            // POST body still sends Content-Length: 0 for servers that 411
+            // without it.
             builder = builder.body(body);
         }
         let response = match builder.send().await {
@@ -479,6 +507,57 @@ fn is_private(ip: &IpAddr) -> bool {
 mod deadline_tests {
     use super::*;
 
+    fn ambiguous_free_clone(request: &FetchRequest) -> FetchRequest {
+        FetchRequest {
+            url: request.url.clone(),
+            method: request.method.clone(),
+            headers: request.headers.clone(),
+            body: None,
+            body_base64: None,
+        }
+    }
+
+    #[test]
+    fn binary_request_bodies_round_trip_without_utf8_coercion() {
+        let request = FetchRequest {
+            url: "https://example.com".into(),
+            method: Some("PUT".into()),
+            headers: Default::default(),
+            body: None,
+            body_base64: Some(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0, 128, 255]),
+            ),
+        };
+        assert_eq!(request.decoded_body().unwrap(), Some(vec![0, 128, 255]));
+
+        let absent = FetchRequest {
+            body: None,
+            body_base64: None,
+            ..ambiguous_free_clone(&request)
+        };
+        assert_eq!(
+            absent.decoded_body().unwrap(),
+            None,
+            "no body is None, not empty"
+        );
+        let empty = FetchRequest {
+            body: Some(String::new()),
+            body_base64: None,
+            ..ambiguous_free_clone(&request)
+        };
+        assert_eq!(
+            empty.decoded_body().unwrap(),
+            Some(Vec::new()),
+            "an explicit empty body stays attached"
+        );
+
+        let ambiguous = FetchRequest {
+            body: Some("text".into()),
+            ..request
+        };
+        assert!(ambiguous.decoded_body().unwrap_err().contains("not both"));
+    }
+
     fn policy() -> OutboundPolicy {
         OutboundPolicy {
             max_requests: 10,
@@ -500,6 +579,7 @@ mod deadline_tests {
             method: None,
             headers: Default::default(),
             body: None,
+            body_base64: None,
         });
         assert!(
             started.elapsed() < Duration::from_millis(100),

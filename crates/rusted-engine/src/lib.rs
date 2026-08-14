@@ -455,11 +455,18 @@ pub trait Executor: Send + Sync {
 /// captured. Log entries are capped at 100 × 1KB.
 const FETCH_PRELUDE: &str = r#"(() => {
   globalThis.fetch = async (url, init) => {
+    const raw_body = init && init.body;
+    // ArrayBuffer is what this fetch's own arrayBuffer() returns, so the
+    // download-and-reupload pipe must work — String(ArrayBuffer) silently
+    // uploading "[object ArrayBuffer]" was the alternative.
+    const body = raw_body instanceof ArrayBuffer ? new Uint8Array(raw_body) : raw_body;
+    const binary = body instanceof Uint8Array;
     const raw = await globalThis.__rustedFetch(JSON.stringify({
       url: String(url),
       method: init && init.method,
       headers: (init && init.headers) || {},
-      body: init && init.body != null ? String(init.body) : null,
+      body: body != null && !binary ? String(body) : null,
+      bodyBase64: binary ? globalThis.__rustedToBase64Url(body) : null,
     }));
     const r = JSON.parse(raw);
     if (r.error) throw new Error(r.error);
