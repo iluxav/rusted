@@ -4706,4 +4706,39 @@ async fn docs_are_public_complete_and_unauthenticated() {
         .unwrap();
     assert_eq!(r.status(), 200);
     assert!(r.url().path().ends_with("/docs/getting-started"));
+
+    // llms.txt links every docs page; llms-full.txt carries their content
+    // as plain text with no HTML left in it.
+    let r = t.client.get(admin("/llms.txt")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().await.unwrap();
+    assert!(body.starts_with("# rusted"), "{body}");
+    for page in [
+        "getting-started",
+        "cli",
+        "mcp",
+        "security",
+        "inbox",
+        "ai-agents",
+    ] {
+        assert!(
+            body.contains(&format!("/docs/{page}")),
+            "llms.txt missing {page}"
+        );
+    }
+    assert!(body.contains("/llms-full.txt"));
+
+    let r = t.client.get(admin("/llms-full.txt")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers()["content-type"].to_str().unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    let body = r.text().await.unwrap();
+    assert!(body.contains("## The sandbox"), "{}", &body[..500]);
+    assert!(body.contains("rusted inbox new"));
+    assert!(
+        !body.contains("<p>") && !body.contains("</code>"),
+        "html leaked"
+    );
 }

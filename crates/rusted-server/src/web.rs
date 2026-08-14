@@ -76,6 +76,8 @@ pub fn router(state: WebState) -> Router {
         .route("/docs/{page}", get(docs_page))
         .route("/robots.txt", get(robots_txt))
         .route("/sitemap.xml", get(sitemap_xml))
+        .route("/llms.txt", get(llms_txt))
+        .route("/llms-full.txt", get(llms_full_txt))
         .route("/login", get(login))
         .route(
             "/oauth/authorize",
@@ -486,6 +488,118 @@ async fn robots_txt(State(state): State<WebState>) -> Response {
         state.0.app.console_url("/sitemap.xml")
     );
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+/// The llms.txt convention (llmstxt.org): a curated markdown summary an LLM
+/// reads in one fetch instead of crawling HTML. For a platform whose pitch is
+/// "point your agent here", this file is the front door.
+fn llms_preamble(state: &WebState) -> String {
+    let origin = |path: &str| state.0.app.console_url(path);
+    format!(
+        "# rusted\n\n\
+         > rusted turns a JavaScript function into a live HTTPS endpoint in under a second — \
+         for humans from the CLI, for AI agents over MCP. Every call runs in a fresh QuickJS \
+         sandbox that boots in about a millisecond, with hard wall-clock, heap, and output \
+         limits, no filesystem, and SSRF-guarded fetch.\n\n\
+         Connect an agent: MCP endpoint {} (POST JSON-RPC, Authorization: Bearer <rusted API key>).\n\
+         The whole API is six tools: execute, deploy, list, delete, inbox_create, inbox_read.\n\
+         Deployed functions are plain HTTP: POST {} — per environment: {}.\n",
+        origin("/mcp"),
+        origin("/f/<name>"),
+        origin("/f/@<env>/<name>"),
+    )
+}
+
+async fn llms_txt(State(state): State<WebState>) -> Response {
+    let origin = |path: &str| state.0.app.console_url(path);
+    let mut body = llms_preamble(&state);
+    body.push_str("\n## Docs\n\n");
+    for entry in &DOCS_PAGES {
+        body.push_str(&format!(
+            "- [{}]({}): {}\n",
+            entry.title,
+            origin(&format!("/docs/{}", entry.slug)),
+            entry.description
+        ));
+    }
+    body.push_str(&format!(
+        "\n## Optional\n\n- [llms-full.txt]({}): the entire documentation as plain text in one fetch\n",
+        origin("/llms-full.txt")
+    ));
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+async fn llms_full_txt(State(state): State<WebState>) -> Response {
+    let mut body = llms_preamble(&state);
+    for entry in &DOCS_PAGES {
+        body.push_str("\n---\n");
+        body.push_str(&html_to_text(entry.content));
+    }
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+/// Good-enough markdown-ish rendering of the docs fragments: headings, list
+/// markers, and fenced code blocks survive; everything else is stripped. The
+/// fragments are hand-authored HTML with no scripts or styles, so a tag
+/// stripper is all this needs to be.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let after = &rest[lt + 1..];
+        let Some(gt) = after.find('>') else {
+            rest = "";
+            break;
+        };
+        let tag = &after[..gt];
+        let closing = tag.starts_with('/');
+        let name: String = tag
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        match (name.as_str(), closing) {
+            ("h1", false) => out.push_str("\n\n# "),
+            ("h2", false) => out.push_str("\n\n## "),
+            ("h3", false) => out.push_str("\n\n### "),
+            ("p" | "div" | "ul" | "ol" | "table", false) => out.push('\n'),
+            ("li", false) => out.push_str("\n- "),
+            ("pre", false) => out.push_str("\n\n```\n"),
+            ("pre", true) => out.push_str("\n```\n"),
+            ("br", false) => out.push('\n'),
+            ("td" | "th", true) => out.push_str("  "),
+            ("tr", true) => out.push('\n'),
+            _ => {}
+        }
+        rest = &after[gt + 1..];
+    }
+    out.push_str(rest);
+    let decoded = out
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&");
+    // Source indentation and dropped tags leave ragged blank runs; two
+    // newlines is the most markdown ever needs.
+    let mut cleaned = String::with_capacity(decoded.len());
+    let mut blank_run = 0usize;
+    for line in decoded.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+    cleaned.trim_start().to_string()
 }
 
 async fn sitemap_xml(State(state): State<WebState>) -> Response {
@@ -1879,6 +1993,27 @@ mod login_response_tests {
             "{cookies:?}"
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+}
+
+#[cfg(test)]
+mod llms_tests {
+    use super::html_to_text;
+
+    #[test]
+    fn html_to_text_keeps_structure_and_drops_markup() {
+        let html = "<h1>Title</h1>\n<p class=\"lede\">A &lt;fresh&gt; sandbox &amp; more.</p>\n<h2>Steps</h2>\n<ul><li>first</li><li>second</li></ul>\n<pre><code>rusted push <span class=\"cmt\"># deploy</span></code></pre>";
+        let text = html_to_text(html);
+        assert!(text.starts_with("# Title"), "{text}");
+        assert!(text.contains("A <fresh> sandbox & more."));
+        assert!(text.contains("## Steps"));
+        assert!(text.contains("- first"));
+        assert!(text.contains("```\nrusted push # deploy\n```"), "{text}");
+        // Decoded entities may contain '<' (that's the point); real tags
+        // must not survive.
+        for leak in ["<p", "</", "<span", "<pre", "class="] {
+            assert!(!text.contains(leak), "markup leaked ({leak}): {text}");
+        }
     }
 }
 
