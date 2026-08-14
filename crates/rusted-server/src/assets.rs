@@ -45,6 +45,12 @@ const ASSETS: &[Asset] = &[
         immutable: false,
     },
     Asset {
+        name: "rusted-metal.jpg",
+        bytes: include_bytes!("../assets/rusted-metal.jpg"),
+        content_type: "image/jpeg",
+        immutable: true,
+    },
+    Asset {
         name: "bricolage-grotesque-latin.woff2",
         bytes: include_bytes!("../assets/bricolage-grotesque-latin.woff2"),
         content_type: "font/woff2",

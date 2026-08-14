@@ -260,24 +260,26 @@
 </div>
 
 <style>
-  /* Corrosion texture over the top-right flare: SVG fractal noise at two
-     scales (broad blooms + fine pitting) tinted ember/copper, alpha-
-     thresholded into patches, radially masked so it dissolves like oxide
-     spreading from a hot spot. Pure data URI — nothing fetched. */
+  /* Real corroded steel over the top-right flare: the photo is screen-
+     blended so only its luminous rust survives against the dark ground,
+     warmed slightly, and masked so it dissolves like oxide spreading from
+     the corner. */
   .landing-rust {
-    left: 52%;
-    top: -12rem;
-    width: 52rem;
-    height: 52rem;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='820' height='820'%3E%3Cfilter id='a'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.011 0.013' numOctaves='4' seed='11'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 0.42 0 0 0 0 0.14 0 0 0 1.15 -0.28'/%3E%3C/filter%3E%3Cfilter id='b'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.055 0.048' numOctaves='3' seed='4'/%3E%3CfeColorMatrix values='0 0 0 0 0.77 0 0 0 0 0.48 0 0 0 0 0.27 0 0 0 0.85 -0.42'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23a)'/%3E%3Crect width='100%25' height='100%25' filter='url(%23b)'/%3E%3C/svg%3E");
+    left: 40%;
+    right: 0;
+    top: 0;
+    height: 44rem;
+    background-image: url("/assets/rusted-metal.jpg");
     background-size: cover;
+    background-position: 100% 30%;
     mix-blend-mode: screen;
-    opacity: .34;
-    -webkit-mask-image: radial-gradient(closest-side, rgba(0,0,0,.95), rgba(0,0,0,.35) 55%, transparent 78%);
-    mask-image: radial-gradient(closest-side, rgba(0,0,0,.95), rgba(0,0,0,.35) 55%, transparent 78%);
+    filter: saturate(1.35) contrast(1.08);
+    opacity: .8;
+    -webkit-mask-image: radial-gradient(ellipse 85% 80% at 100% 0%, black, rgba(0,0,0,.5) 55%, transparent 80%);
+    mask-image: radial-gradient(ellipse 85% 80% at 100% 0%, black, rgba(0,0,0,.5) 55%, transparent 80%);
   }
   @media (max-width: 640px) {
-    .landing-rust { left: 30%; width: 38rem; height: 38rem; }
+    .landing-rust { left: 12%; height: 30rem; }
   }
   .landing-page::before {
     content: '';
