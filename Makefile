@@ -1,7 +1,7 @@
 CARGO ?= cargo
 BIN   := target/release/rusted
 
-.PHONY: all build test lint fmt fmt-check check serve install i clean help db db-clean
+.PHONY: all build test lint fmt fmt-check check serve install i clean help db db-clean css
 
 all: check build
 
@@ -41,6 +41,9 @@ install: ## Install `rusted` into ~/.cargo/bin
 	$(CARGO) install --locked --path crates/rusted-cli
 
 i: build install ## Shorthand: build and install
+
+css: ## Recompile the Tailwind sheet inlined into every page (run after template edits)
+	cd crates/rusted-server/tailwind && npx -y tailwindcss@3.4.17 -c tailwind.config.js -i input.css -o ../templates/app.css --minify
 
 clean:
 	$(CARGO) clean

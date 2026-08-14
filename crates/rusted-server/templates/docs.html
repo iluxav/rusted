@@ -1,5 +1,15 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} — rusted docs{% endblock %}
+{% block description %}{{ description }}{% endblock %}
+{% block head %}
+<link rel="canonical" href="{{ canonical }}">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="rusted">
+<meta property="og:title" content="{{ title }} — rusted docs">
+<meta property="og:description" content="{{ description }}">
+<meta property="og:url" content="{{ canonical }}">
+<meta name="twitter:card" content="summary">
+{% endblock %}
 {% block body %}
 <div class="flex min-h-screen flex-col">
   <header class="sticky top-0 z-20 border-b border-copper/10 bg-rust-950/90 backdrop-blur-xl">

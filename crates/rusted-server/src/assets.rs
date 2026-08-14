@@ -25,6 +25,10 @@ struct Asset {
     name: &'static str,
     bytes: &'static [u8],
     content_type: &'static str,
+    /// Immutable assets carry a year-long cache lifetime; anything that could
+    /// change under its URL gets an hour plus ETag revalidation. Fonts and the
+    /// pinned htmx build only ever change by getting a new filename.
+    immutable: bool,
 }
 
 const ASSETS: &[Asset] = &[
@@ -32,11 +36,31 @@ const ASSETS: &[Asset] = &[
         name: "rusted-logo.png",
         bytes: include_bytes!("../assets/rusted-logo.png"),
         content_type: "image/png",
+        immutable: false,
     },
     Asset {
         name: "rusted-logo2.png",
         bytes: include_bytes!("../assets/rusted-logo2.png"),
         content_type: "image/png",
+        immutable: false,
+    },
+    Asset {
+        name: "bricolage-grotesque-latin.woff2",
+        bytes: include_bytes!("../assets/bricolage-grotesque-latin.woff2"),
+        content_type: "font/woff2",
+        immutable: true,
+    },
+    Asset {
+        name: "jetbrains-mono-latin.woff2",
+        bytes: include_bytes!("../assets/jetbrains-mono-latin.woff2"),
+        content_type: "font/woff2",
+        immutable: true,
+    },
+    Asset {
+        name: "htmx.min.js",
+        bytes: include_bytes!("../assets/htmx.min.js"),
+        content_type: "text/javascript; charset=utf-8",
+        immutable: true,
     },
 ];
 
@@ -72,14 +96,18 @@ async fn serve(Path(name): Path<String>, headers: HeaderMap) -> Response {
         return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
     }
 
+    // Mutable URLs get an hour of blind caching plus the ETag, so repeat
+    // visits cost a 304 and a changed file appears within the hour rather
+    // than whenever the browser feels like asking.
+    let cache = if asset.immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=3600"
+    };
     (
         [
             (header::CONTENT_TYPE, asset.content_type),
-            // The URL is stable across releases, so the image may change under
-            // it. An hour of blind caching plus the ETag means repeat visits
-            // cost a 304, and a new logo appears within the hour rather than
-            // whenever the browser feels like asking.
-            (header::CACHE_CONTROL, "public, max-age=3600"),
+            (header::CACHE_CONTROL, cache),
             (header::ETAG, etag),
         ],
         asset.bytes,
@@ -126,13 +154,19 @@ mod tests {
     }
 
     #[test]
-    fn logos_are_actually_pngs() {
+    fn bytes_match_their_content_type() {
         for asset in ASSETS {
+            let magic: &[u8] = match asset.content_type {
+                "image/png" => b"\x89PNG\r\n\x1a\n",
+                "font/woff2" => b"wOF2",
+                _ => continue,
+            };
             assert_eq!(
-                &asset.bytes[..8],
-                b"\x89PNG\r\n\x1a\n",
-                "{} is not a PNG, but is served as one",
-                asset.name
+                &asset.bytes[..magic.len()],
+                magic,
+                "{} does not match its content type {}",
+                asset.name,
+                asset.content_type
             );
         }
     }

@@ -117,14 +117,25 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .set(admin_addr)
         .expect("admin_addr set exactly once");
 
-    let data_app = api::data_router(state.clone());
+    // Negotiated per request via Accept-Encoding; the woff2 fonts are already
+    // brotli inside and recompressing them buys nothing.
+    let compression = || {
+        use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
+        tower_http::compression::CompressionLayer::new().compress_when(
+            SizeAbove::new(512)
+                .and(NotForContentType::IMAGES)
+                .and(NotForContentType::new("font/woff2")),
+        )
+    };
+    let data_app = api::data_router(state.clone()).layer(compression());
     // The public inbox write route rides the admin listener, alongside the
     // console, OAuth registration and .well-known — all public and
     // unauthenticated — so the deployed proxy needs no new rule.
     let admin_app = api::admin_router(state.clone())
         .merge(oauth::router(state.clone()))
         .merge(inbox::public_router(state.clone()))
-        .merge(web::router(web::WebState::new(state.clone())));
+        .merge(web::router(web::WebState::new(state.clone())))
+        .layer(compression());
     // Telemetry counters are cumulative per process; the persisted baseline
     // makes them cumulative per deployment instead.
     state.telemetry.load_baseline(&pool).await;

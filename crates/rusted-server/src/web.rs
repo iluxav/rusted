@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use askama::Template;
 use axum::extract::{Form, Path, Query, RawQuery, State};
-use axum::http::header::{HeaderMap, SET_COOKIE};
+use axum::http::header::{self, HeaderMap, SET_COOKIE};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
@@ -74,6 +74,8 @@ pub fn router(state: WebState) -> Router {
         .route("/", get(landing))
         .route("/docs", get(docs_index))
         .route("/docs/{page}", get(docs_page))
+        .route("/robots.txt", get(robots_txt))
+        .route("/sitemap.xml", get(sitemap_xml))
         .route("/login", get(login))
         .route(
             "/oauth/authorize",
@@ -391,73 +393,117 @@ struct DocsT {
     active: String,
     pages: Vec<(&'static str, &'static str)>,
     inner: &'static str,
+    description: &'static str,
+    canonical: String,
 }
 
-/// Slug → (nav label, page title, content). Order is the sidebar order.
-const DOCS_PAGES: [(&str, &str, &str, &str); 6] = [
-    (
-        "getting-started",
-        "Getting started",
-        "Getting started",
-        include_str!("../templates/docs/getting_started.html"),
-    ),
-    (
-        "cli",
-        "CLI reference",
-        "CLI reference",
-        include_str!("../templates/docs/cli.html"),
-    ),
-    (
-        "mcp",
-        "MCP",
-        "MCP",
-        include_str!("../templates/docs/mcp.html"),
-    ),
-    (
-        "security",
-        "Security",
-        "Security",
-        include_str!("../templates/docs/security.html"),
-    ),
-    (
-        "inbox",
-        "Inboxes",
-        "Inboxes",
-        include_str!("../templates/docs/inbox.html"),
-    ),
-    (
-        "ai-agents",
-        "AI agents",
-        "AI agents",
-        include_str!("../templates/docs/ai_agents.html"),
-    ),
+struct DocsPage {
+    slug: &'static str,
+    label: &'static str,
+    title: &'static str,
+    /// Meta description — what a search result shows under the title.
+    description: &'static str,
+    content: &'static str,
+}
+
+/// Sidebar order.
+const DOCS_PAGES: [DocsPage; 6] = [
+    DocsPage {
+        slug: "getting-started",
+        label: "Getting started",
+        title: "Getting started",
+        description: "Install the rusted CLI, sign in, deploy your first JavaScript function, and call it over HTTPS — from nothing to a live endpoint in about two minutes.",
+        content: include_str!("../templates/docs/getting_started.html"),
+    },
+    DocsPage {
+        slug: "cli",
+        label: "CLI reference",
+        title: "CLI reference",
+        description: "Every rusted CLI command — create, run, push, logs, types, inbox — the full local development loop for deployed JavaScript functions.",
+        content: include_str!("../templates/docs/cli.html"),
+    },
+    DocsPage {
+        slug: "mcp",
+        label: "MCP",
+        title: "MCP",
+        description: "Serve Model Context Protocol tools from a deployed function: schema-validated tools, optional OAuth protection, and per-environment audiences.",
+        content: include_str!("../templates/docs/mcp.html"),
+    },
+    DocsPage {
+        slug: "security",
+        label: "Security",
+        title: "Security",
+        description: "How rusted isolates untrusted code: the QuickJS sandbox, API keys, encrypted secrets, environments, sealed values, and public functions.",
+        content: include_str!("../templates/docs/security.html"),
+    },
+    DocsPage {
+        slug: "inbox",
+        label: "Inboxes",
+        title: "Inboxes",
+        description: "Inboxes give CLIs and AI agents an inbound HTTPS address: a throwaway URL that accepts POSTs from anyone and holds them until you read them.",
+        content: include_str!("../templates/docs/inbox.html"),
+    },
+    DocsPage {
+        slug: "ai-agents",
+        label: "AI agents",
+        title: "AI agents",
+        description: "rusted is the MCP server that lets AI agents write their own tools — create a live endpoint in one call, invoke it in milliseconds, delete it when done.",
+        content: include_str!("../templates/docs/ai_agents.html"),
+    },
 ];
 
 async fn docs_index() -> Response {
     Redirect::to("/docs/getting-started").into_response()
 }
 
-async fn docs_page(Path(page): Path<String>) -> Response {
-    let Some((slug, _, title, inner)) = DOCS_PAGES
-        .iter()
-        .find(|(slug, _, _, _)| *slug == page.as_str())
-    else {
+async fn docs_page(State(state): State<WebState>, Path(page): Path<String>) -> Response {
+    let Some(found) = DOCS_PAGES.iter().find(|entry| entry.slug == page.as_str()) else {
         return Redirect::to("/docs/getting-started").into_response();
     };
     Html(
         DocsT {
-            title,
-            active: slug.to_string(),
+            title: found.title,
+            active: found.slug.to_string(),
             pages: DOCS_PAGES
                 .iter()
-                .map(|(slug, label, _, _)| (*slug, *label))
+                .map(|entry| (entry.slug, entry.label))
                 .collect(),
-            inner,
+            inner: found.content,
+            description: found.description,
+            canonical: state.0.app.console_url(&format!("/docs/{}", found.slug)),
         }
         .render()
         .expect("docs render"),
     )
     .into_response()
+}
+
+/// Plain-text signposting for crawlers. The console is auth-gated anyway;
+/// disallowing it just keeps error pages out of indexes.
+async fn robots_txt(State(state): State<WebState>) -> Response {
+    let body = format!(
+        "User-agent: *\nAllow: /\nDisallow: /console\nDisallow: /login\nDisallow: /device\n\nSitemap: {}\n",
+        state.0.app.console_url("/sitemap.xml")
+    );
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+async fn sitemap_xml(State(state): State<WebState>) -> Response {
+    let mut body = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+    );
+    body.push_str(&format!(
+        "  <url><loc>{}</loc></url>\n",
+        state.0.app.console_url("/")
+    ));
+    for entry in &DOCS_PAGES {
+        body.push_str(&format!(
+            "  <url><loc>{}</loc></url>\n",
+            state.0.app.console_url(&format!("/docs/{}", entry.slug))
+        ));
+    }
+    body.push_str("</urlset>\n");
+    ([(header::CONTENT_TYPE, "application/xml")], body).into_response()
 }
 
 #[derive(Template)]
@@ -1833,5 +1879,77 @@ mod login_response_tests {
             "{cookies:?}"
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+}
+
+#[cfg(test)]
+mod static_asset_tests {
+    /// The Tailwind sheet is compiled offline (`make css`) and inlined into
+    /// every page; nothing at build time proves it matches the templates. A
+    /// canary set of classes — one per page family, including arbitrary-value
+    /// ones whose escaped selectors are easy to lose — catches a stale or
+    /// truncated sheet before it ships unstyled pages.
+    #[test]
+    fn compiled_stylesheet_covers_the_templates() {
+        let sheet = include_str!("../templates/app.css");
+        assert!(sheet.len() > 20_000, "app.css suspiciously small");
+        for canary in [
+            ".bg-rust-950",
+            ".font-display",
+            ".bg-ember\\/10",
+            ".lg\\:grid-cols-\\[1\\.02fr_\\.98fr\\]",
+            ".tracking-\\[-0\\.04em\\]",
+            ".btn-primary",
+            ".console-nav",
+            ".htmx-indicator",
+            "@font-face",
+            "Bricolage Grotesque",
+            "JetBrains Mono",
+        ] {
+            assert!(
+                sheet.contains(canary),
+                "app.css lost {canary} — run `make css`"
+            );
+        }
+    }
+
+    /// Every page must render from this binary alone: a third-party origin in
+    /// a template reintroduces the render-blocking requests this design
+    /// removed (and a CSP/availability dependency with them).
+    #[test]
+    fn no_template_references_a_third_party_origin() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates");
+        let mut queue = vec![std::path::PathBuf::from(dir)];
+        while let Some(path) = queue.pop() {
+            for entry in std::fs::read_dir(&path).expect("templates readable") {
+                let entry = entry.expect("entry readable");
+                if entry.file_type().expect("file type").is_dir() {
+                    queue.push(entry.path());
+                    continue;
+                }
+                let name = entry.file_name();
+                let templated = ["html", "css"]
+                    .iter()
+                    .any(|ext| entry.path().extension().is_some_and(|e| e == *ext));
+                if !templated {
+                    continue; // .DS_Store and friends
+                }
+                let text = std::fs::read_to_string(entry.path()).expect("template readable");
+                // Monaco on the (auth-gated, lazy-loaded) function editor is
+                // the one tolerated exception — vendoring its workers would
+                // add megabytes to the binary for a page crawlers never see.
+                for host in [
+                    "cdn.tailwindcss.com",
+                    "unpkg.com",
+                    "fonts.googleapis.com",
+                    "fonts.gstatic.com",
+                ] {
+                    assert!(
+                        !text.contains(host),
+                        "{name:?} references {host}; serve it from /assets instead"
+                    );
+                }
+            }
+        }
     }
 }

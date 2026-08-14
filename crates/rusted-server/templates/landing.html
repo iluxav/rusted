@@ -1,8 +1,15 @@
 {% extends "base.html" %}
 {% block title %}rusted — a runtime for agent-written code{% endblock %}
+{% block description %}Run agent-written JavaScript in a tiny QuickJS sandbox built in Rust. Execute once, deploy an endpoint, or receive a callback — over MCP or from the CLI.{% endblock %}
 {% block head %}
-<meta name="description" content="Run agent-written JavaScript in a tiny QuickJS sandbox built in Rust. Execute once, deploy an endpoint, or receive a callback — over MCP or from the CLI.">
 <link rel="canonical" href="https://rusted.sh/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="rusted">
+<meta property="og:title" content="rusted — a runtime for agent-written code">
+<meta property="og:description" content="Run agent-written JavaScript in a tiny QuickJS sandbox built in Rust. Execute once, deploy an endpoint, or receive a callback — over MCP or from the CLI.">
+<meta property="og:url" content="https://rusted.sh/">
+<meta property="og:image" content="https://rusted.sh/assets/rusted-logo2.png">
+<meta name="twitter:card" content="summary">
 {% endblock %}
 {% block body %}
 <div class="landing-page relative isolate min-h-full overflow-hidden">
