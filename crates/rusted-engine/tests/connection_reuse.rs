@@ -98,7 +98,7 @@ fn the_pool_survives_between_invocations() {
 /// `""` and had no way to tell that from a genuinely empty body.
 #[test]
 #[ignore = "hits the network; run explicitly"]
-fn a_binary_response_body_is_reported_not_silently_emptied() {
+fn a_binary_response_body_is_available_without_text_coercion() {
     let budget = OutboundBudget::new(policy(4));
     let r = budget.perform(FetchRequest {
         url: "https://www.google.com/favicon.ico".into(),
@@ -109,17 +109,16 @@ fn a_binary_response_body_is_reported_not_silently_emptied() {
     eprintln!(
         "BINARY status={} body_len={} error={:?}",
         r.status,
-        r.body.len(),
+        r.body.as_ref().map_or(0, String::len),
         r.error
     );
+    assert!(r.error.is_none(), "binary fetch failed: {:?}", r.error);
     assert!(
-        r.error.is_some(),
-        "a body that is not text must be reported, got {} bytes of body and no error",
-        r.body.len()
+        r.body.is_none(),
+        "binary bytes must not be coerced into text"
     );
-    let msg = r.error.as_deref().unwrap_or("");
     assert!(
-        msg.to_lowercase().contains("utf-8") || msg.to_lowercase().contains("text"),
-        "the handler needs to know why: {msg}"
+        !r.body_base64.is_empty(),
+        "arrayBuffer needs the encoded bytes"
     );
 }

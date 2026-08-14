@@ -417,8 +417,18 @@ const FETCH_PRELUDE: &str = r#"(() => {
       ok: r.ok,
       status: r.status,
       headers: r.headers,
-      text: async () => r.body,
-      json: async () => JSON.parse(r.body),
+      text: async () => {
+        if (r.body === null) throw new Error("the response body is binary; use arrayBuffer()");
+        return r.body;
+      },
+      json: async () => {
+        if (r.body === null) throw new Error("the response body is binary; use arrayBuffer()");
+        return JSON.parse(r.body);
+      },
+      arrayBuffer: async () => {
+        const bytes = new Uint8Array(globalThis.__rustedFromBase64Url(r.bodyBase64));
+        return bytes.buffer;
+      },
     };
   };
 })()"#;

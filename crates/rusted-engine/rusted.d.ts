@@ -424,6 +424,7 @@ declare namespace Rusted {
     headers: Record<string, string>;
     text(): Promise<string>;
     json<T = unknown>(): Promise<T>;
+    arrayBuffer(): Promise<ArrayBuffer>;
   }
 
   interface FetchInit {
@@ -437,8 +438,8 @@ declare namespace Rusted {
  * Outbound HTTP. http and https only; addresses that resolve to private ranges
  * are refused. Each plan caps how many calls one invocation may make.
  *
- * This is a reduced fetch: no `body` stream, `blob`, `arrayBuffer`,
- * `formData`, `url`, `statusText`, or redirect handling.
+ * This is a reduced fetch: no `body` stream, `blob`, `formData`, `url`,
+ * `statusText`, or redirect handling.
  */
 declare function fetch(
   url: string,

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -53,7 +54,9 @@ pub struct FetchResponse {
     pub ok: bool,
     pub status: u16,
     pub headers: std::collections::BTreeMap<String, String>,
-    pub body: String,
+    pub body: Option<String>,
+    #[serde(rename = "bodyBase64")]
+    pub body_base64: String,
     /// Set when the request was refused or failed; surfaces as a JS throw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -65,7 +68,8 @@ impl FetchResponse {
             ok: false,
             status: 0,
             headers: Default::default(),
-            body: String::new(),
+            body: Some(String::new()),
+            body_base64: String::new(),
             error: Some(message.into()),
         }
     }
@@ -220,7 +224,8 @@ impl OutboundBudget {
                     ok: false,
                     status: code,
                     headers: Default::default(),
-                    body: String::new(),
+                    body: Some(String::new()),
+                    body_base64: String::new(),
                     error: None,
                 }
             }
@@ -250,27 +255,14 @@ impl OutboundBudget {
             Ok(raw) => raw,
             Err(e) => return FetchResponse::refused(format!("reading the response failed: {e}")),
         };
-        let body = match String::from_utf8(raw) {
-            Ok(body) => body,
-            Err(e) => {
-                let ct = headers
-                    .get("content-type")
-                    .map(|v| format!(" (content-type: {v})"))
-                    .unwrap_or_default();
-                return FetchResponse::refused(format!(
-                    "the response is not valid UTF-8 text{ct}: {} bytes, first bad byte at \
-                     offset {}. fetch returns text, so binary responses cannot be read — \
-                     ask the upstream for a text or JSON representation.",
-                    e.as_bytes().len(),
-                    e.utf8_error().valid_up_to(),
-                ));
-            }
-        };
+        let body_base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw);
+        let body = String::from_utf8(raw).ok();
         FetchResponse {
             ok: (200..300).contains(&status),
             status,
             headers,
             body,
+            body_base64,
             error: None,
         }
     }
@@ -406,28 +398,15 @@ impl OutboundBudget {
             }
         }
 
-        let body = match String::from_utf8(raw) {
-            Ok(body) => body,
-            Err(e) => {
-                let ct = headers
-                    .get("content-type")
-                    .map(|v| format!(" (content-type: {v})"))
-                    .unwrap_or_default();
-                return FetchResponse::refused(format!(
-                    "the response is not valid UTF-8 text{ct}: {} bytes, first bad byte at \
-                     offset {}. fetch returns text, so binary responses cannot be read — \
-                     ask the upstream for a text or JSON representation.",
-                    e.as_bytes().len(),
-                    e.utf8_error().valid_up_to(),
-                ));
-            }
-        };
+        let body_base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw);
+        let body = String::from_utf8(raw).ok();
 
         FetchResponse {
             ok: (200..300).contains(&status),
             status,
             headers,
             body,
+            body_base64,
             error: None,
         }
     }
@@ -464,6 +443,13 @@ async fn vet_url_async(url: &str) -> Result<(), String> {
         .map(|addr| addr.ip())
         .collect();
     vet_addresses(&host, &addresses)
+}
+
+/// Resolve an outbound URL and reject loopback, link-local, private, and
+/// otherwise non-public destinations. Host services use the same SSRF guard as
+/// function `fetch` so security policy cannot drift between the two paths.
+pub async fn vet_public_url(url: &str) -> Result<(), String> {
+    vet_url_async(url).await
 }
 
 fn is_private(ip: &IpAddr) -> bool {
