@@ -228,15 +228,27 @@ async fn auth_github_callback(
         Err(e) => return login_error(&format!("creating your session failed: {e}")),
     };
     let next = cookie_value(&headers, "rusted_after_login")
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .filter(|n| n.starts_with('/') && !n.starts_with("//") && *n != "/login")
         .unwrap_or("/console")
         .to_string();
+    login_success_response(&session, &next)
+}
+
+/// The response that finishes a sign-in: the session cookie, the
+/// after-login cleanup, and the redirect home.
+///
+/// `AppendHeaders`, not a plain header array, and that is the whole bug this
+/// helper exists to pin: axum's array form *inserts* headers, so a second
+/// Set-Cookie silently replaced the session cookie — every login succeeded
+/// server-side and the browser never received it.
+fn login_success_response(session: &str, next: &str) -> Response {
+    use axum::response::AppendHeaders;
     (
-        [
+        AppendHeaders([
             (
                 SET_COOKIE,
                 format!(
-                    "{}={session}; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax",
+                    "{}={session}; Path=/; HttpOnly; Max-Age=2592000; SameSite=Lax; Secure",
                     auth::SESSION_COOKIE
                 ),
             ),
@@ -244,8 +256,8 @@ async fn auth_github_callback(
                 SET_COOKIE,
                 "rusted_after_login=; Path=/; Max-Age=0".to_string(),
             ),
-        ],
-        Redirect::to(&next),
+        ]),
+        Redirect::to(next),
     )
         .into_response()
 }
@@ -581,7 +593,15 @@ struct LoginQuery {
     next: Option<String>,
 }
 
-async fn login(State(state): State<WebState>, Query(query): Query<LoginQuery>) -> Response {
+async fn login(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<LoginQuery>,
+) -> Response {
+    // Already signed in: the form would only look like a failed login.
+    if current_user(&state, &headers).await.is_some() {
+        return Redirect::to("/console").into_response();
+    }
     let callback_url = state
         .0
         .oauth
@@ -1646,4 +1666,34 @@ async fn run_test(
         .expect("result renders"),
     )
     .into_response()
+}
+
+#[cfg(test)]
+mod login_response_tests {
+    use super::*;
+
+    /// Both cookies must survive into the response — the session cookie
+    /// being silently replaced by the cleanup cookie is the regression this
+    /// guards against.
+    #[test]
+    fn login_success_carries_both_cookies() {
+        let response = login_success_response("token-value", "/console");
+        let cookies: Vec<&str> = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        assert_eq!(cookies.len(), 2, "{cookies:?}");
+        assert!(
+            cookies[0].starts_with("rusted_session=token-value;"),
+            "{cookies:?}"
+        );
+        assert!(cookies[0].contains("HttpOnly") && cookies[0].contains("Secure"));
+        assert!(
+            cookies[1].starts_with("rusted_after_login=;"),
+            "{cookies:?}"
+        );
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
 }
