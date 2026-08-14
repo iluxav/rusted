@@ -27,15 +27,132 @@ use crate::store::INVALIDATION_CHANNEL;
 /// Generate one with `openssl rand -hex 32`.
 pub const KEY_ENV: &str = "RUSTED_SECRETS_KEY";
 
-/// Secrets one account may hold. A bound, not a plan feature: credentials are
-/// small and few, and an unbounded write path is what this prevents.
+/// Secrets one account may hold per environment. A bound, not a plan
+/// feature: credentials are small and few, and an unbounded write path is
+/// what this prevents.
 pub const MAX_SECRETS_PER_USER: i64 = 64;
+
+/// The default environment: always valid, never stored as a row, never
+/// deletable. Existing behavior is exactly "everything is prod".
+pub const PROD_ENV: &str = "prod";
+/// What `rusted run` reports as `context.currentEnv`; reserved so a deployed
+/// environment can never masquerade as local development.
+pub const LOCAL_ENV: &str = "local";
+/// Additional environments one account may create.
+pub const MAX_ENVIRONMENTS: i64 = 8;
+
+/// Environment names ride in URLs after `@`, so they share the function-name
+/// charset, shorter.
+pub fn valid_env_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Whether `env` is valid for this account: prod always, otherwise a row.
+pub async fn env_exists(pool: &PgPool, user_id: Uuid, env: &str) -> bool {
+    if env == PROD_ENV {
+        return true;
+    }
+    sqlx::query("SELECT 1 FROM environments WHERE user_id = $1 AND name = $2")
+        .bind(user_id)
+        .bind(env)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Every environment this account can resolve, prod first.
+pub async fn list_envs(pool: &PgPool, user_id: Uuid) -> Vec<String> {
+    let mut envs = vec![PROD_ENV.to_string()];
+    if let Ok(rows) = sqlx::query("SELECT name FROM environments WHERE user_id = $1 ORDER BY name")
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+    {
+        use sqlx::Row as _;
+        envs.extend(rows.iter().map(|row| row.get::<String, _>("name")));
+    }
+    envs
+}
+
+pub async fn create_env(pool: &PgPool, user_id: Uuid, name: &str) -> Result<(), String> {
+    if name == PROD_ENV {
+        return Err("prod always exists".to_string());
+    }
+    if name == LOCAL_ENV {
+        return Err("'local' is reserved for rusted run".to_string());
+    }
+    if !valid_env_name(name) {
+        return Err("environment names are 1-32 chars of a-z, 0-9, '-', '_'".to_string());
+    }
+    let held: i64 = sqlx::query("SELECT count(*) AS n FROM environments WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|row| {
+            use sqlx::Row as _;
+            row.get("n")
+        })?;
+    if held >= MAX_ENVIRONMENTS {
+        return Err(format!(
+            "this account already has {MAX_ENVIRONMENTS} environments besides prod"
+        ));
+    }
+    sqlx::query("INSERT INTO environments (user_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(user_id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Removes the environment and every secret stored under it. Durable state
+/// keyed to it stays, like function state generally — purge is explicit.
+pub async fn delete_env(pool: &PgPool, user_id: Uuid, name: &str) -> Result<bool, String> {
+    if name == PROD_ENV {
+        return Err("prod cannot be deleted".to_string());
+    }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let removed = sqlx::query("DELETE FROM environments WHERE user_id = $1 AND name = $2")
+        .bind(user_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    if removed == 0 {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM secrets WHERE user_id = $1 AND env = $2")
+        .bind(user_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(INVALIDATION_CHANNEL)
+        .bind(format!("secret:{user_id}:{name}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(true)
+}
 
 /// A secret is a credential, not a document. Large enough for a PEM key.
 pub const MAX_VALUE_BYTES: usize = 8 * 1024;
 
 /// AES-GCM standard nonce length; each sealed blob is nonce || ciphertext+tag.
 const NONCE_LEN: usize = 12;
+
+/// One environment's decrypted secrets, shared by reference from the cache.
+type DecryptedEnv = Arc<BTreeMap<String, String>>;
 
 /// What the console lists: everything about a secret except its value.
 pub struct SecretMeta {
@@ -82,10 +199,10 @@ pub struct SecretStore {
     pool: PgPool,
     /// `None` when the server has no master key: the store exists but refuses.
     cipher: Option<Cipher>,
-    /// user → decrypted name→value map; the invocation-path read. Decrypted
-    /// values in process memory are acceptable — they are handed to handlers
-    /// anyway — while the database only ever sees ciphertext.
-    cache: Mutex<HashMap<Uuid, Arc<BTreeMap<String, String>>>>,
+    /// (user, env) → decrypted name→value map; the invocation-path read.
+    /// Decrypted values in process memory are acceptable — they are handed to
+    /// handlers anyway — while the database only ever sees ciphertext.
+    cache: Mutex<HashMap<(Uuid, String), DecryptedEnv>>,
 }
 
 /// The one message every disabled-store path shows.
@@ -115,8 +232,11 @@ impl SecretStore {
         self.cipher.is_some()
     }
 
-    pub fn invalidate(&self, user_id: Uuid) {
-        self.cache.lock().unwrap().remove(&user_id);
+    pub fn invalidate(&self, user_id: Uuid, env: &str) {
+        self.cache
+            .lock()
+            .unwrap()
+            .remove(&(user_id, env.to_string()));
     }
 
     pub fn invalidate_all(&self) {
@@ -125,14 +245,15 @@ impl SecretStore {
 
     /// Names and timestamps only — a stored value never travels back out
     /// except into `context.env`.
-    pub async fn list(&self, user_id: Uuid) -> sqlx::Result<Vec<SecretMeta>> {
+    pub async fn list(&self, user_id: Uuid, env: &str) -> sqlx::Result<Vec<SecretMeta>> {
         let rows = sqlx::query(
             "SELECT name,
                     extract(epoch FROM created_at)::bigint AS created,
                     extract(epoch FROM updated_at)::bigint AS updated
-             FROM secrets WHERE user_id = $1 ORDER BY name",
+             FROM secrets WHERE user_id = $1 AND env = $2 ORDER BY name",
         )
         .bind(user_id)
+        .bind(env)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -147,10 +268,19 @@ impl SecretStore {
 
     /// Creates or replaces one secret. The value is sealed before the query is
     /// built, so plaintext never leaves this process.
-    pub async fn set(&self, user_id: Uuid, name: &str, value: &str) -> Result<(), String> {
+    pub async fn set(
+        &self,
+        user_id: Uuid,
+        env: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<(), String> {
         let Some(cipher) = &self.cipher else {
             return Err(DISABLED.to_string());
         };
+        if !env_exists(&self.pool, user_id, env).await {
+            return Err(format!("no environment named {env}"));
+        }
         if !rusted_engine::valid_secret_name(name) {
             return Err(
                 "secret names are 1-64 chars of A-Z, 0-9, '_', not starting with a digit \
@@ -167,56 +297,61 @@ impl SecretStore {
                 value.len()
             ));
         }
-        let held: i64 =
-            sqlx::query("SELECT count(*) AS n FROM secrets WHERE user_id = $1 AND name <> $2")
-                .bind(user_id)
-                .bind(name)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| e.to_string())?
-                .get("n");
+        let held: i64 = sqlx::query(
+            "SELECT count(*) AS n FROM secrets WHERE user_id = $1 AND env = $2 AND name <> $3",
+        )
+        .bind(user_id)
+        .bind(env)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .get("n");
         if held >= MAX_SECRETS_PER_USER {
             return Err(format!(
                 "this account already holds {MAX_SECRETS_PER_USER} secrets — delete one first"
             ));
         }
         sqlx::query(
-            "INSERT INTO secrets (user_id, name, ciphertext) VALUES ($1, $2, $3)
-             ON CONFLICT (user_id, name) DO UPDATE
-                 SET ciphertext = $3, updated_at = now()",
+            "INSERT INTO secrets (user_id, env, name, ciphertext) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id, env, name) DO UPDATE
+                 SET ciphertext = $4, updated_at = now()",
         )
         .bind(user_id)
+        .bind(env)
         .bind(name)
         .bind(cipher.seal(value))
         .execute(&self.pool)
         .await
         .map_err(|e| e.to_string())?;
-        self.notify(user_id).await;
+        self.notify(user_id, env).await;
         Ok(())
     }
 
-    pub async fn delete(&self, user_id: Uuid, name: &str) -> Result<bool, String> {
-        let result = sqlx::query("DELETE FROM secrets WHERE user_id = $1 AND name = $2")
-            .bind(user_id)
-            .bind(name)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    pub async fn delete(&self, user_id: Uuid, env: &str, name: &str) -> Result<bool, String> {
+        let result =
+            sqlx::query("DELETE FROM secrets WHERE user_id = $1 AND env = $2 AND name = $3")
+                .bind(user_id)
+                .bind(env)
+                .bind(name)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
         if result.rows_affected() == 0 {
             return Ok(false);
         }
-        self.notify(user_id).await;
+        self.notify(user_id, env).await;
         Ok(true)
     }
 
-    /// Evicts every server's cache for this user, ours included.
-    async fn notify(&self, user_id: Uuid) {
+    /// Evicts every server's cache for this (user, env), ours included.
+    async fn notify(&self, user_id: Uuid, env: &str) {
         let _ = sqlx::query("SELECT pg_notify($1, $2)")
             .bind(INVALIDATION_CHANNEL)
-            .bind(format!("secret:{user_id}"))
+            .bind(format!("secret:{user_id}:{env}"))
             .execute(&self.pool)
             .await;
-        self.invalidate(user_id);
+        self.invalidate(user_id, env);
     }
 
     /// The environment a function asked for: exactly `names`, decrypted.
@@ -228,42 +363,49 @@ impl SecretStore {
     pub async fn env_for(
         &self,
         user_id: Uuid,
+        env: &str,
         names: &[String],
     ) -> Result<BTreeMap<String, String>, String> {
         if self.cipher.is_none() {
             return Err(DISABLED.to_string());
         }
-        let all = self.all_for(user_id).await?;
-        let mut env = BTreeMap::new();
+        let all = self.all_for(user_id, env).await?;
+        let mut resolved = BTreeMap::new();
         let mut missing = Vec::new();
         for name in names {
             match all.get(name) {
                 Some(value) => {
-                    env.insert(name.clone(), value.clone());
+                    resolved.insert(name.clone(), value.clone());
                 }
                 None => missing.push(name.as_str()),
             }
         }
         if !missing.is_empty() {
             return Err(format!(
-                "secrets not set for this account: {} — add them in the console under Secrets",
+                "secrets not set in the {env} environment: {} — add them in the console under Secrets",
                 missing.join(", ")
             ));
         }
-        Ok(env)
+        Ok(resolved)
     }
 
-    /// Every secret the user holds, decrypted, through the cache.
-    async fn all_for(&self, user_id: Uuid) -> Result<Arc<BTreeMap<String, String>>, String> {
-        if let Some(hit) = self.cache.lock().unwrap().get(&user_id) {
+    /// Every secret the user holds in one environment, decrypted, cached.
+    async fn all_for(
+        &self,
+        user_id: Uuid,
+        env: &str,
+    ) -> Result<Arc<BTreeMap<String, String>>, String> {
+        if let Some(hit) = self.cache.lock().unwrap().get(&(user_id, env.to_string())) {
             return Ok(hit.clone());
         }
         let cipher = self.cipher.as_ref().expect("checked by callers");
-        let rows = sqlx::query("SELECT name, ciphertext FROM secrets WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rows =
+            sqlx::query("SELECT name, ciphertext FROM secrets WHERE user_id = $1 AND env = $2")
+                .bind(user_id)
+                .bind(env)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
         let mut all = BTreeMap::new();
         for row in &rows {
             let name: String = row.get("name");
@@ -273,7 +415,10 @@ impl SecretStore {
             all.insert(name, value);
         }
         let all = Arc::new(all);
-        self.cache.lock().unwrap().insert(user_id, all.clone());
+        self.cache
+            .lock()
+            .unwrap()
+            .insert((user_id, env.to_string()), all.clone());
         Ok(all)
     }
 }

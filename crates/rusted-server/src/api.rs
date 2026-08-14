@@ -173,14 +173,29 @@ impl Job {
 /// the services need to enforce them. Built from the stored record and the
 /// owner's plan — never from anything the caller sent. The default grants
 /// nothing, which is what ad-hoc and temp-run invocations get.
-#[derive(Default)]
 pub(crate) struct HostGrant {
     pub env: Option<BTreeMap<String, String>>,
     pub caps: rusted_engine::Capabilities,
     /// The stable function name state and objects are scoped by.
     pub function_name: Option<String>,
+    /// The environment the invocation resolved through.
+    pub env_name: String,
     pub objects: BTreeMap<String, rusted_engine::ObjectBinding>,
     pub allowance: crate::fnstate::StateAllowance,
+}
+
+impl Default for HostGrant {
+    fn default() -> Self {
+        Self {
+            env: None,
+            caps: rusted_engine::Capabilities::none()
+                .with_env(crate::secrets::PROD_ENV.to_string()),
+            function_name: None,
+            env_name: crate::secrets::PROD_ENV.to_string(),
+            objects: BTreeMap::new(),
+            allowance: crate::fnstate::StateAllowance::default(),
+        }
+    }
 }
 
 async fn execute_raw(
@@ -224,6 +239,7 @@ async fn execute_raw(
             state.clone(),
             user_id,
             grant.function_name.clone().unwrap_or_default(),
+            grant.env_name.clone(),
             grant.objects.clone(),
             grant.allowance,
         )) as Arc<dyn rusted_engine::HostServices>
@@ -358,6 +374,7 @@ pub(crate) async fn execute_serialized(
 pub(crate) async fn env_for_function(
     state: &Arc<AppState>,
     fetched: &crate::store::Fetched,
+    env: &str,
 ) -> Result<Option<BTreeMap<String, String>>, String> {
     if fetched.secrets.is_empty() {
         return Ok(None);
@@ -367,7 +384,7 @@ pub(crate) async fn env_for_function(
     };
     state
         .secrets
-        .env_for(owner, &fetched.secrets)
+        .env_for(owner, env, &fetched.secrets)
         .await
         .map(Some)
 }
@@ -383,8 +400,9 @@ pub(crate) async fn grant_for_function(
     name: &str,
     fetched: &crate::store::Fetched,
     plan: &crate::plans::Plan,
+    env_name: &str,
 ) -> Result<HostGrant, (&'static str, String)> {
-    let env = env_for_function(state, fetched)
+    let env = env_for_function(state, fetched, env_name)
         .await
         .map_err(|detail| ("missing_secrets", detail))?;
     if !fetched.objects.is_empty() {
@@ -407,12 +425,16 @@ pub(crate) async fn grant_for_function(
                 binding.access_key_id_secret.clone(),
                 binding.secret_access_key_secret.clone(),
             ];
-            state.secrets.env_for(owner, &names).await.map_err(|e| {
-                (
-                    "capability_unavailable",
-                    format!("binding {binding_name}: {e}"),
-                )
-            })?;
+            state
+                .secrets
+                .env_for(owner, env_name, &names)
+                .await
+                .map_err(|e| {
+                    (
+                        "capability_unavailable",
+                        format!("binding {binding_name}: {e}"),
+                    )
+                })?;
         }
     }
     Ok(HostGrant {
@@ -421,8 +443,10 @@ pub(crate) async fn grant_for_function(
             state: fetched.state,
             objects: fetched.objects.keys().cloned().collect(),
             auth: None,
+            env_name: Some(env_name.to_string()),
         },
         function_name: Some(name.to_string()),
+        env_name: env_name.to_string(),
         objects: fetched.objects.clone(),
         allowance: crate::fnstate::StateAllowance {
             max_keys: plan.limits.max_state_keys,
@@ -678,6 +702,30 @@ async fn serve_function(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // Environment selection: `/f/@stage/name[/rest]`. `@` can never begin a
+    // function name, so the parse is unambiguous and costs no lookup.
+    let (env, name, rest) = match name.strip_prefix('@') {
+        None => (crate::secrets::PROD_ENV.to_string(), name, rest),
+        Some(env) => {
+            let env = env.to_string();
+            let Some(r) = rest else {
+                return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+            };
+            match r.split_once('/') {
+                Some((function, sub)) if !function.is_empty() => {
+                    (env, function.to_string(), Some(sub.to_string()))
+                }
+                None if !r.is_empty() => (env, r, None),
+                _ => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
+            }
+        }
+    };
+    // Refusal details carry the env so stage noise never reads as prod's.
+    let tag = if env == crate::secrets::PROD_ENV {
+        String::new()
+    } else {
+        format!("[@{env}] ")
+    };
     // Served through the store's read cache; NOTIFY events keep it fresh.
     let fetched = match state.store.fetch(&name).await {
         Ok(Some(hit)) => hit,
@@ -690,6 +738,17 @@ async fn serve_function(
             )
         }
     };
+    // An environment the owner never created answers exactly like a missing
+    // function — probing envs must reveal as little as probing names.
+    if env != crate::secrets::PROD_ENV {
+        let known = match fetched.owner {
+            Some(owner) => crate::secrets::env_exists(&state.pool, owner, &env).await,
+            None => false,
+        };
+        if !known {
+            return err(StatusCode::NOT_FOUND, "not_found", "no such function");
+        }
+    }
     // Unpublished answers exactly like missing — the toggle must reveal
     // nothing to callers — while the owner's logs say what actually happened.
     if !fetched.published {
@@ -699,13 +758,37 @@ async fn serve_function(
             fetched.owner,
             "refused",
             404,
-            "refused: this function is unpublished".to_string(),
+            format!("{tag}refused: this function is unpublished"),
         );
         return err(StatusCode::NOT_FOUND, "not_found", "no such function");
     }
     // An mcp function has no route pattern: every POST to /f/{name} is
     // protocol, and the messages inside decide what happens.
     if fetched.kind == "mcp" {
+        // An OAuth-protected mcp function's audience is one exact URL; a
+        // token minted for it can never validate against an @env variant, so
+        // serving one would only produce confusing 401s. Refused clearly
+        // until audiences learn environments.
+        if env != crate::secrets::PROD_ENV
+            && fetched
+                .mcp
+                .as_ref()
+                .is_some_and(|meta| meta.get("auth").is_some())
+        {
+            record_refusal(
+                &state,
+                &name,
+                fetched.owner,
+                "refused",
+                400,
+                format!("{tag}refused: OAuth mcp functions serve only their canonical URL"),
+            );
+            return err(
+                StatusCode::BAD_REQUEST,
+                "env_unsupported",
+                "OAuth-protected mcp functions serve only their canonical URL",
+            );
+        }
         if rest.is_some() {
             return err(
                 StatusCode::NOT_FOUND,
@@ -720,7 +803,7 @@ async fn serve_function(
                 "allowed: POST",
             );
         }
-        return crate::mcp_host::serve(state, fetched, name, headers, body).await;
+        return crate::mcp_host::serve(state, fetched, name, env, headers, body).await;
     }
     let (source, trigger, owner) = (
         fetched.source.clone(),
@@ -739,7 +822,7 @@ async fn serve_function(
             "refused",
             405,
             format!(
-                "refused: method {method} (this function allows {})",
+                "{tag}refused: method {method} (this function allows {})",
                 trigger.methods.join(", ")
             ),
         );
@@ -758,7 +841,7 @@ async fn serve_function(
                 owner,
                 "refused",
                 404,
-                format!("refused: /{rest} — this function has no sub-path"),
+                format!("{tag}refused: /{rest} — this function has no sub-path"),
             );
             return err(
                 StatusCode::NOT_FOUND,
@@ -776,7 +859,7 @@ async fn serve_function(
                     "refused",
                     404,
                     format!(
-                        "refused: /{} does not match the declared route {pattern}",
+                        "{tag}refused: /{} does not match the declared route {pattern}",
                         rest.unwrap_or("")
                     ),
                 );
@@ -797,7 +880,7 @@ async fn serve_function(
             "refused",
             429,
             format!(
-                "refused: rate limit ({} allows {} requests per minute)",
+                "{tag}refused: rate limit ({} allows {} requests per minute)",
                 plan.name, plan.limits.rate_per_min
             ),
         );
@@ -820,7 +903,7 @@ async fn serve_function(
                 owner,
                 "refused",
                 400,
-                "refused: request body is not valid UTF-8".to_string(),
+                format!("{tag}refused: request body is not valid UTF-8"),
             );
             return *response;
         }
@@ -828,10 +911,10 @@ async fn serve_function(
     // Resolved before spending an execution slot: a function whose secrets or
     // capabilities cannot be supplied would only fail inside the handler,
     // less clearly.
-    let grant = match grant_for_function(&state, &name, &fetched, &plan).await {
+    let grant = match grant_for_function(&state, &name, &fetched, &plan, &env).await {
         Ok(grant) => grant,
         Err((code, detail)) => {
-            record_refusal(&state, &name, owner, "error", 500, detail);
+            record_refusal(&state, &name, owner, "error", 500, format!("{tag}{detail}"));
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 code,
@@ -865,9 +948,9 @@ async fn serve_function(
                     "refused",
                     status,
                     match status {
-                        503 => "refused: the server was under memory pressure".to_string(),
+                        503 => format!("{tag}refused: the server was under memory pressure"),
                         _ => format!(
-                            "refused: busy ({} concurrent allowed on {})",
+                            "{tag}refused: busy ({} concurrent allowed on {})",
                             plan.limits.concurrency, plan.name
                         ),
                     },
@@ -985,10 +1068,13 @@ async fn bearer_gate(
 /// The function name a data-plane path targets, when it's a path publicness
 /// can apply to.
 fn public_function_candidate(path: &str) -> Option<&str> {
-    path.strip_prefix("/f/")?
-        .split('/')
-        .next()
-        .filter(|name| !name.is_empty())
+    let rest = path.strip_prefix("/f/")?;
+    // `/f/@stage/name/...` — the env segment is routing, not the name.
+    let rest = match rest.strip_prefix('@') {
+        Some(after) => after.split_once('/').map(|(_, r)| r).unwrap_or(""),
+        None => rest,
+    };
+    rest.split('/').next().filter(|name| !name.is_empty())
 }
 
 pub fn data_router(state: Arc<AppState>) -> Router {
@@ -1605,13 +1691,15 @@ async fn invoke(
     let executed = match (key, fetched) {
         (Some(key), Some(hit)) => {
             // The caller here is the owner, so the refusal carries the detail.
-            let grant = match grant_for_function(&state, &key, &hit, &plan).await {
-                Ok(grant) => grant,
-                Err((code, detail)) => {
-                    record_refusal(&state, &key, hit.owner, "error", 500, detail.clone());
-                    return err(StatusCode::INTERNAL_SERVER_ERROR, code, detail);
-                }
-            };
+            let grant =
+                match grant_for_function(&state, &key, &hit, &plan, crate::secrets::PROD_ENV).await
+                {
+                    Ok(grant) => grant,
+                    Err((code, detail)) => {
+                        record_refusal(&state, &key, hit.owner, "error", 500, detail.clone());
+                        return err(StatusCode::INTERNAL_SERVER_ERROR, code, detail);
+                    }
+                };
             execute_serialized(
                 &state,
                 &key,

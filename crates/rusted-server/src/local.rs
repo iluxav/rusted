@@ -511,7 +511,7 @@ async fn dispatch(
             loaded.surface.clone(),
             loaded.sourcemap.clone(),
             loaded.sourcemap_base.clone(),
-            rusted_engine::Capabilities::from_config(&loaded.config),
+            rusted_engine::Capabilities::from_config(&loaded.config).with_env("local"),
         )
     };
     if name != expected_name {
@@ -707,7 +707,8 @@ async fn dispatch_mcp(
     crate::mcp_wire::respond(body, headers, move |msg| async move {
         crate::mcp_host::handle_message(meta, name, rev, msg, move |tool, args| async move {
             let caps =
-                rusted_engine::Capabilities::from_config(&state.loaded.read().unwrap().config);
+                rusted_engine::Capabilities::from_config(&state.loaded.read().unwrap().config)
+                    .with_env("local");
             let services: Arc<dyn rusted_engine::HostServices> = state.services.clone();
             let result = state
                 .executor

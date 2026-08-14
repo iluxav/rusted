@@ -7,8 +7,13 @@
 //! advisory lock serializes writes so the plan's key/byte accounting — checked
 //! inside the same statement — cannot be raced past.
 //!
+//! State is scoped by environment as well: a stage invocation must never CAS
+//! prod's coordination state. Prod is the default env, so pre-environment
+//! rows are prod's.
+//!
 //! Reads go through a small in-memory cache invalidated over the shared
-//! LISTEN/NOTIFY channel (`fnstate:<user_id>:<function_name>`). Correctness
+//! LISTEN/NOTIFY channel (`fnstate:<user_id>:<function_name>:<env>`).
+//! Correctness
 //! never depends on the cache: every write's version check runs in Postgres
 //! against the real row.
 
@@ -58,10 +63,13 @@ pub enum CasOutcome {
     },
 }
 
+/// (owner, function, env) — the scope one cache bucket covers.
+type StateScope = (Uuid, String, String);
+
 pub struct StateStore {
     pool: PgPool,
-    /// (owner, function) → key → entry; a read cache only.
-    cache: Mutex<HashMap<(Uuid, String), HashMap<String, Entry>>>,
+    /// Scope → key → entry; a read cache only.
+    cache: Mutex<HashMap<StateScope, HashMap<String, Entry>>>,
     /// Total cached entries, so the bound is O(1) to check.
     cached_entries: Mutex<usize>,
 }
@@ -82,9 +90,10 @@ impl StateStore {
         }
     }
 
-    pub fn invalidate(&self, user_id: Uuid, function_name: &str) {
+    pub fn invalidate(&self, user_id: Uuid, function_name: &str, env: &str) {
         let mut cache = self.cache.lock().unwrap();
-        if let Some(entries) = cache.remove(&(user_id, function_name.to_string())) {
+        if let Some(entries) = cache.remove(&(user_id, function_name.to_string(), env.to_string()))
+        {
             let mut count = self.cached_entries.lock().unwrap();
             *count = count.saturating_sub(entries.len());
         }
@@ -99,12 +108,14 @@ impl StateStore {
         &self,
         user_id: Uuid,
         function_name: &str,
+        env: &str,
         key: &str,
     ) -> Result<Option<Entry>, String> {
         vet_key(key)?;
         {
             let cache = self.cache.lock().unwrap();
-            if let Some(entries) = cache.get(&(user_id, function_name.to_string())) {
+            if let Some(entries) = cache.get(&(user_id, function_name.to_string(), env.to_string()))
+            {
                 if let Some(entry) = entries.get(key) {
                     return Ok(Some(entry.clone()));
                 }
@@ -112,10 +123,11 @@ impl StateStore {
         }
         let row = sqlx::query(
             "SELECT value, version FROM function_state
-             WHERE user_id = $1 AND function_name = $2 AND key = $3",
+             WHERE user_id = $1 AND function_name = $2 AND env = $3 AND key = $4",
         )
         .bind(user_id)
         .bind(function_name)
+        .bind(env)
         .bind(key)
         .fetch_optional(&self.pool)
         .await
@@ -135,7 +147,7 @@ impl StateStore {
             *count = 0;
         }
         cache
-            .entry((user_id, function_name.to_string()))
+            .entry((user_id, function_name.to_string(), env.to_string()))
             .or_default()
             .insert(key.to_string(), entry.clone());
         *count += 1;
@@ -146,10 +158,12 @@ impl StateStore {
     /// (`None`: create, failing if the key exists). The version check and the
     /// plan accounting both run inside the SQL statement, under a
     /// per-function advisory lock, so a refused write changes nothing.
+    #[allow(clippy::too_many_arguments)]
     pub async fn compare_and_set(
         &self,
         user_id: Uuid,
         function_name: &str,
+        env: &str,
         key: &str,
         expected: Option<i64>,
         value: &serde_json::Value,
@@ -165,23 +179,24 @@ impl StateStore {
         }
         let bytes = serialized.len() as i32;
         let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
-        lock_function(&mut tx, user_id, function_name).await?;
+        lock_function(&mut tx, user_id, function_name, env).await?;
 
         let applied: Option<i64> = match expected {
             None => sqlx::query(
-                "INSERT INTO function_state (user_id, function_name, key, value, bytes)
-                 SELECT $1, $2, $3, $4, $5
+                "INSERT INTO function_state (user_id, function_name, env, key, value, bytes)
+                 SELECT $1, $2, $3, $4, $5, $6
                  WHERE NOT EXISTS (
                          SELECT 1 FROM function_state
-                         WHERE user_id = $1 AND function_name = $2 AND key = $3)
+                         WHERE user_id = $1 AND function_name = $2 AND env = $3 AND key = $4)
                    AND (SELECT count(*) FROM function_state
-                        WHERE user_id = $1 AND function_name = $2) < $6
+                        WHERE user_id = $1 AND function_name = $2 AND env = $3) < $7
                    AND (SELECT coalesce(sum(bytes), 0) FROM function_state
-                        WHERE user_id = $1 AND function_name = $2) + $5 <= $7
+                        WHERE user_id = $1 AND function_name = $2 AND env = $3) + $6 <= $8
                  RETURNING version",
             )
             .bind(user_id)
             .bind(function_name)
+            .bind(env)
             .bind(key)
             .bind(value)
             .bind(bytes)
@@ -193,14 +208,17 @@ impl StateStore {
             .map(|row| row.get("version")),
             Some(expected) => sqlx::query(
                 "UPDATE function_state
-                 SET value = $4, bytes = $5, version = version + 1, updated_at = now()
-                 WHERE user_id = $1 AND function_name = $2 AND key = $3 AND version = $6
+                 SET value = $5, bytes = $6, version = version + 1, updated_at = now()
+                 WHERE user_id = $1 AND function_name = $2 AND env = $3 AND key = $4
+                   AND version = $7
                    AND (SELECT coalesce(sum(bytes), 0) FROM function_state
-                        WHERE user_id = $1 AND function_name = $2 AND key <> $3) + $5 <= $7
+                        WHERE user_id = $1 AND function_name = $2 AND env = $3
+                          AND key <> $4) + $6 <= $8
                  RETURNING version",
             )
             .bind(user_id)
             .bind(function_name)
+            .bind(env)
             .bind(key)
             .bind(value)
             .bind(bytes)
@@ -213,9 +231,9 @@ impl StateStore {
         };
 
         if let Some(version) = applied {
-            notify(&mut tx, user_id, function_name).await?;
+            notify(&mut tx, user_id, function_name, env).await?;
             tx.commit().await.map_err(|e| e.to_string())?;
-            self.invalidate(user_id, function_name);
+            self.invalidate(user_id, function_name, env);
             return Ok(CasOutcome::Applied { version });
         }
 
@@ -224,10 +242,11 @@ impl StateStore {
         // fix. Read under the same lock, so the answer is the one that held.
         let current: Option<i64> = sqlx::query(
             "SELECT version FROM function_state
-             WHERE user_id = $1 AND function_name = $2 AND key = $3",
+             WHERE user_id = $1 AND function_name = $2 AND env = $3 AND key = $4",
         )
         .bind(user_id)
         .bind(function_name)
+        .bind(env)
         .bind(key)
         .fetch_optional(&mut *tx)
         .await
@@ -249,10 +268,12 @@ impl StateStore {
         let (keys, total_bytes): (i64, i64) = {
             let row = sqlx::query(
                 "SELECT count(*) AS keys, coalesce(sum(bytes), 0) AS bytes
-                 FROM function_state WHERE user_id = $1 AND function_name = $2",
+                 FROM function_state
+                 WHERE user_id = $1 AND function_name = $2 AND env = $3",
             )
             .bind(user_id)
             .bind(function_name)
+            .bind(env)
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
@@ -278,18 +299,21 @@ impl StateStore {
         &self,
         user_id: Uuid,
         function_name: &str,
+        env: &str,
         key: &str,
         expected: i64,
     ) -> Result<CasOutcome, String> {
         vet_key(key)?;
         let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
-        lock_function(&mut tx, user_id, function_name).await?;
+        lock_function(&mut tx, user_id, function_name, env).await?;
         let deleted = sqlx::query(
             "DELETE FROM function_state
-             WHERE user_id = $1 AND function_name = $2 AND key = $3 AND version = $4",
+             WHERE user_id = $1 AND function_name = $2 AND env = $3 AND key = $4
+               AND version = $5",
         )
         .bind(user_id)
         .bind(function_name)
+        .bind(env)
         .bind(key)
         .bind(expected)
         .execute(&mut *tx)
@@ -297,17 +321,18 @@ impl StateStore {
         .map_err(|e| e.to_string())?
         .rows_affected();
         if deleted > 0 {
-            notify(&mut tx, user_id, function_name).await?;
+            notify(&mut tx, user_id, function_name, env).await?;
             tx.commit().await.map_err(|e| e.to_string())?;
-            self.invalidate(user_id, function_name);
+            self.invalidate(user_id, function_name, env);
             return Ok(CasOutcome::Applied { version: expected });
         }
         let current: Option<i64> = sqlx::query(
             "SELECT version FROM function_state
-             WHERE user_id = $1 AND function_name = $2 AND key = $3",
+             WHERE user_id = $1 AND function_name = $2 AND env = $3 AND key = $4",
         )
         .bind(user_id)
         .bind(function_name)
+        .bind(env)
         .bind(key)
         .fetch_optional(&mut *tx)
         .await
@@ -320,10 +345,12 @@ impl StateStore {
 
     /// Lexicographically ordered page of entries. `cursor` is the last key of
     /// the previous page; the returned cursor is present only when more exist.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list(
         &self,
         user_id: Uuid,
         function_name: &str,
+        env: &str,
         prefix: &str,
         cursor: &str,
         limit: i64,
@@ -331,14 +358,15 @@ impl StateStore {
         let limit = limit.clamp(1, MAX_LIST_LIMIT);
         let rows = sqlx::query(
             "SELECT key, value, version FROM function_state
-             WHERE user_id = $1 AND function_name = $2
-               AND ($3 = '' OR starts_with(key, $3))
-               AND key > $4
+             WHERE user_id = $1 AND function_name = $2 AND env = $3
+               AND ($4 = '' OR starts_with(key, $4))
+               AND key > $5
              ORDER BY key
-             LIMIT $5",
+             LIMIT $6",
         )
         .bind(user_id)
         .bind(function_name)
+        .bind(env)
         .bind(prefix)
         .bind(cursor)
         .bind(limit + 1)
@@ -375,10 +403,10 @@ impl StateStore {
                 .rows_affected();
         let _ = sqlx::query("SELECT pg_notify($1, $2)")
             .bind(INVALIDATION_CHANNEL)
-            .bind(format!("fnstate:{user_id}:{function_name}"))
+            .bind(format!("fnstate:{user_id}:{function_name}:*"))
             .execute(&self.pool)
             .await;
-        self.invalidate(user_id, function_name);
+        self.invalidate_all();
         Ok(removed)
     }
 }
@@ -390,9 +418,10 @@ async fn lock_function(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
     function_name: &str,
+    env: &str,
 ) -> Result<(), String> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 42))")
-        .bind(format!("{user_id}/{function_name}"))
+        .bind(format!("{user_id}/{function_name}@{env}"))
         .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
@@ -403,10 +432,11 @@ async fn notify(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
     function_name: &str,
+    env: &str,
 ) -> Result<(), String> {
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(INVALIDATION_CHANNEL)
-        .bind(format!("fnstate:{user_id}:{function_name}"))
+        .bind(format!("fnstate:{user_id}:{function_name}:{env}"))
         .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;

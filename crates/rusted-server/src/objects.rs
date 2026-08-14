@@ -323,10 +323,18 @@ enum Op {
     },
 }
 
-/// The opaque per-(owner, function) prefix every key lives under. Derived,
-/// not stored: it survives redeploys and cannot collide across owners.
-pub fn namespace(user_id: Uuid, function_name: &str) -> String {
-    let digest = Sha256::digest(format!("{user_id}/{function_name}").as_bytes());
+/// The opaque per-(owner, function, env) prefix every key lives under.
+/// Derived, not stored: it survives redeploys and cannot collide across
+/// owners. Prod keeps the pre-environment formula so existing objects stay
+/// reachable; other envs mix the env into the digest, so a stage invocation
+/// physically cannot address prod's objects.
+pub fn namespace(user_id: Uuid, function_name: &str, env: &str) -> String {
+    let seed = if env == crate::secrets::PROD_ENV {
+        format!("{user_id}/{function_name}")
+    } else {
+        format!("{user_id}/{function_name}@{env}")
+    };
+    let digest = Sha256::digest(seed.as_bytes());
     format!("{}/", &hex::encode(digest)[..32])
 }
 
@@ -423,14 +431,23 @@ mod tests {
     }
 
     #[test]
-    fn namespaces_differ_by_owner_and_function() {
+    fn namespaces_differ_by_owner_function_and_env() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        assert_ne!(namespace(a, "fn"), namespace(b, "fn"));
-        assert_ne!(namespace(a, "fn"), namespace(a, "other"));
-        // Stable: a redeploy must land in the same namespace.
-        assert_eq!(namespace(a, "fn"), namespace(a, "fn"));
-        assert!(namespace(a, "fn").ends_with('/'));
+        assert_ne!(namespace(a, "fn", "prod"), namespace(b, "fn", "prod"));
+        assert_ne!(namespace(a, "fn", "prod"), namespace(a, "other", "prod"));
+        // A stage invocation physically cannot address prod's objects.
+        assert_ne!(namespace(a, "fn", "prod"), namespace(a, "fn", "stage"));
+        assert_ne!(namespace(a, "fn", "stage"), namespace(a, "fn", "qa"));
+        // Stable: a redeploy must land in the same namespace — and prod's
+        // formula predates environments, so existing objects stay reachable.
+        assert_eq!(namespace(a, "fn", "prod"), namespace(a, "fn", "prod"));
+        let legacy = format!(
+            "{}/",
+            &hex::encode(Sha256::digest(format!("{a}/fn").as_bytes()))[..32]
+        );
+        assert_eq!(namespace(a, "fn", "prod"), legacy);
+        assert!(namespace(a, "fn", "stage").ends_with('/'));
     }
 
     #[test]

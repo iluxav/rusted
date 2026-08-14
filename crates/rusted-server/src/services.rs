@@ -24,6 +24,9 @@ pub struct OwnerScopedServices {
     /// The stable function name state and objects are scoped by. Ad-hoc
     /// invocations have none — and no capabilities either.
     function_name: String,
+    /// The environment this invocation resolved through; scopes state, the
+    /// object namespace, and every vault lookup.
+    env: String,
     /// Declared bindings, from the stored record.
     objects: BTreeMap<String, rusted_engine::ObjectBinding>,
     allowance: StateAllowance,
@@ -34,6 +37,7 @@ impl OwnerScopedServices {
         state: Arc<AppState>,
         user_id: Uuid,
         function_name: String,
+        env: String,
         objects: BTreeMap<String, rusted_engine::ObjectBinding>,
         allowance: StateAllowance,
     ) -> Self {
@@ -41,6 +45,7 @@ impl OwnerScopedServices {
             state,
             user_id,
             function_name,
+            env,
             objects,
             allowance,
         }
@@ -85,9 +90,13 @@ pub(crate) enum StateOp {
 async fn run_state_op(services: &OwnerScopedServices, op_json: String) -> Result<String, String> {
     let op: StateOp = serde_json::from_str(&op_json).map_err(|e| format!("malformed op: {e}"))?;
     let store = &services.state.fnstate;
-    let (user, function) = (services.user_id, services.function_name.as_str());
+    let (user, function, env) = (
+        services.user_id,
+        services.function_name.as_str(),
+        services.env.as_str(),
+    );
     let result = match op {
-        StateOp::Get { key } => match store.get(user, function, &key).await? {
+        StateOp::Get { key } => match store.get(user, function, env, &key).await? {
             Some(entry) => json!({ "entry": entry }),
             None => json!({ "entry": null }),
         },
@@ -98,7 +107,15 @@ async fn run_state_op(services: &OwnerScopedServices, op_json: String) -> Result
         } => {
             let expected = parse_expected(&expected_version)?;
             match store
-                .compare_and_set(user, function, &key, expected, &value, services.allowance)
+                .compare_and_set(
+                    user,
+                    function,
+                    env,
+                    &key,
+                    expected,
+                    &value,
+                    services.allowance,
+                )
                 .await?
             {
                 CasOutcome::Applied { version } => json!({ "ok": true, "version": version }),
@@ -113,7 +130,7 @@ async fn run_state_op(services: &OwnerScopedServices, op_json: String) -> Result
         } => {
             let expected = parse_expected(&expected_version)?
                 .ok_or_else(|| "delete needs the expected version".to_string())?;
-            match store.delete(user, function, &key, expected).await? {
+            match store.delete(user, function, env, &key, expected).await? {
                 CasOutcome::Applied { .. } => json!({ "ok": true }),
                 CasOutcome::Conflict { current_version } => {
                     json!({ "ok": false, "currentVersion": current_version })
@@ -126,7 +143,7 @@ async fn run_state_op(services: &OwnerScopedServices, op_json: String) -> Result
             limit,
         } => {
             let (items, next) = store
-                .list(user, function, &prefix, &cursor, limit.unwrap_or(100))
+                .list(user, function, env, &prefix, &cursor, limit.unwrap_or(100))
                 .await?;
             match next {
                 Some(cursor) => json!({ "items": items, "cursor": cursor }),
@@ -167,9 +184,10 @@ async fn run_object_op(
     let credentials = services
         .state
         .secrets
-        .env_for(services.user_id, &names)
+        .env_for(services.user_id, &services.env, &names)
         .await?;
-    let namespace = crate::objects::namespace(services.user_id, &services.function_name);
+    let namespace =
+        crate::objects::namespace(services.user_id, &services.function_name, &services.env);
     services
         .state
         .objects
@@ -218,9 +236,14 @@ impl rusted_engine::HostServices for OwnerScopedServices {
             let op = crate::secrets::SealOp::parse(&op_json)?;
             // The key secret is resolved from the vault and used here — it
             // never has to be declared in config.secrets, so the key material
-            // can stay entirely outside JavaScript.
+            // can stay entirely outside JavaScript. Env-scoped: a stage seal
+            // cannot open under prod's key, which is the point.
             let names = [op.key_secret().to_string()];
-            let material = self.state.secrets.env_for(self.user_id, &names).await?;
+            let material = self
+                .state
+                .secrets
+                .env_for(self.user_id, &self.env, &names)
+                .await?;
             op.perform(&material[&names[0]])
         })
     }

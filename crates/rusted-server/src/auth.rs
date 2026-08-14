@@ -329,15 +329,24 @@ fn dispatch(state: &AppState, payload: &str) {
                 state.plan_cache.invalidate(user_id);
             }
         }
-        Some(("secret", user_id)) => {
-            if let Ok(user_id) = user_id.parse() {
-                state.secrets.invalidate(user_id);
+        Some(("secret", rest)) => {
+            if let Some((user_id, env)) = rest.split_once(':') {
+                if let Ok(user_id) = user_id.parse() {
+                    state.secrets.invalidate(user_id, env);
+                }
             }
         }
         Some(("fnstate", rest)) => {
-            if let Some((user_id, function_name)) = rest.split_once(':') {
+            let mut parts = rest.splitn(3, ':');
+            if let (Some(user_id), Some(function_name), Some(env)) =
+                (parts.next(), parts.next(), parts.next())
+            {
                 if let Ok(user_id) = user_id.parse() {
-                    state.fnstate.invalidate(user_id, function_name);
+                    if env == "*" {
+                        state.fnstate.invalidate_all();
+                    } else {
+                        state.fnstate.invalidate(user_id, function_name, env);
+                    }
                 }
             }
         }

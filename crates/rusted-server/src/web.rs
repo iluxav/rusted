@@ -75,7 +75,9 @@ pub fn router(state: WebState) -> Router {
         .route("/console/invocations", get(page_invocations))
         .route("/console/keys", get(page_keys).post(key_create))
         .route("/console/secrets", get(page_secrets).post(secret_set))
-        .route("/console/secrets/{name}", delete(secret_delete))
+        .route("/console/secrets/{env}/{name}", delete(secret_delete))
+        .route("/console/environments", post(environment_create))
+        .route("/console/environments/{name}", delete(environment_delete))
         .route("/console/billing", get(page_billing))
         .route(
             "/console/checkout/{code}",
@@ -469,6 +471,10 @@ struct SecretsT {
     /// Why the last set/delete was refused, shown above the form.
     error: Option<String>,
     rows: Vec<SecretRow>,
+    /// Every environment this account can resolve, prod first.
+    envs: Vec<String>,
+    /// The environment the page is showing.
+    env: String,
 }
 
 pub struct PlanCard {
@@ -1063,11 +1069,20 @@ async fn key_revoke(
 // ------------------------------------------------------------------- secrets
 
 /// The whole page fragment: set and delete re-render it, so the list, the
-/// form, and any error always agree.
-async fn secrets_inner(state: &WebState, user: &User, error: Option<String>) -> String {
-    let store = &state.0.app.secrets;
+/// form, the env tabs, and any error always agree.
+async fn secrets_inner(state: &WebState, user: &User, env: &str, error: Option<String>) -> String {
+    let app = &state.0.app;
+    let envs = crate::secrets::list_envs(&app.pool, user.id).await;
+    // An unknown env in the URL falls back to prod rather than 404ing a page
+    // whose tabs are the way to navigate envs.
+    let env = if envs.iter().any(|e| e == env) {
+        env.to_string()
+    } else {
+        crate::secrets::PROD_ENV.to_string()
+    };
+    let store = &app.secrets;
     let rows = store
-        .list(user.id)
+        .list(user.id, &env)
         .await
         .unwrap_or_default()
         .into_iter()
@@ -1081,15 +1096,28 @@ async fn secrets_inner(state: &WebState, user: &User, error: Option<String>) -> 
         enabled: store.enabled(),
         error,
         rows,
+        envs,
+        env,
     }
     .render()
     .expect("secrets renders")
 }
 
-async fn page_secrets(State(state): State<WebState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct EnvQuery {
+    #[serde(default)]
+    env: Option<String>,
+}
+
+async fn page_secrets(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<EnvQuery>,
+) -> Response {
     match require_user(&state, &headers).await {
         Ok(user) => {
-            let inner = secrets_inner(&state, &user, None).await;
+            let env = query.env.unwrap_or_else(|| crate::secrets::PROD_ENV.into());
+            let inner = secrets_inner(&state, &user, &env, None).await;
             console_page(&state, &headers, &user, "secrets", inner).await
         }
         Err(redirect) => redirect,
@@ -1098,6 +1126,8 @@ async fn page_secrets(State(state): State<WebState>, headers: HeaderMap) -> Resp
 
 #[derive(Deserialize)]
 struct SecretForm {
+    #[serde(default)]
+    env: Option<String>,
     name: String,
     value: String,
 }
@@ -1111,19 +1141,57 @@ async fn secret_set(
         Ok(user) => user,
         Err(redirect) => return redirect,
     };
+    let env = form.env.unwrap_or_else(|| crate::secrets::PROD_ENV.into());
     // Trimmed because paste brings whitespace along; a credential that
     // genuinely needs surrounding whitespace does not exist.
     let error = state
         .0
         .app
         .secrets
-        .set(user.id, form.name.trim(), form.value.trim())
+        .set(user.id, &env, form.name.trim(), form.value.trim())
         .await
         .err();
-    Html(secrets_inner(&state, &user, error).await).into_response()
+    Html(secrets_inner(&state, &user, &env, error).await).into_response()
 }
 
 async fn secret_delete(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path((env, name)): Path<(String, String)>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let error = state.0.app.secrets.delete(user.id, &env, &name).await.err();
+    Html(secrets_inner(&state, &user, &env, error).await).into_response()
+}
+
+#[derive(Deserialize)]
+struct EnvironmentForm {
+    name: String,
+}
+
+async fn environment_create(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Form(form): Form<EnvironmentForm>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let name = form.name.trim().to_string();
+    match crate::secrets::create_env(&state.0.app.pool, user.id, &name).await {
+        Ok(()) => Html(secrets_inner(&state, &user, &name, None).await).into_response(),
+        Err(error) => {
+            Html(secrets_inner(&state, &user, crate::secrets::PROD_ENV, Some(error)).await)
+                .into_response()
+        }
+    }
+}
+
+async fn environment_delete(
     State(state): State<WebState>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -1132,8 +1200,10 @@ async fn secret_delete(
         Ok(user) => user,
         Err(redirect) => return redirect,
     };
-    let error = state.0.app.secrets.delete(user.id, &name).await.err();
-    Html(secrets_inner(&state, &user, error).await).into_response()
+    let error = crate::secrets::delete_env(&state.0.app.pool, user.id, &name)
+        .await
+        .err();
+    Html(secrets_inner(&state, &user, crate::secrets::PROD_ENV, error).await).into_response()
 }
 
 // ------------------------------------------------------------------- billing

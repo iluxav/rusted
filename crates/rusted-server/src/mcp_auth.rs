@@ -324,6 +324,7 @@ pub async fn authorize(
     state: &Arc<AppState>,
     fetched: &Fetched,
     name: &str,
+    env: &str,
     headers: &HeaderMap,
 ) -> Result<Option<Value>, Response> {
     let meta = fetched.mcp.as_ref().unwrap_or(&Value::Null);
@@ -361,7 +362,7 @@ pub async fn authorize(
         ) {
             (Some(id_name), Some(secret_name), Some(owner)) => {
                 let names = [id_name.to_string(), secret_name.to_string()];
-                match state.secrets.env_for(owner, &names).await {
+                match state.secrets.env_for(owner, env, &names).await {
                     Ok(resolved) => {
                         Some((resolved[&names[0]].clone(), resolved[&names[1]].clone()))
                     }

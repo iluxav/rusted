@@ -345,6 +345,10 @@ pub struct Capabilities {
     pub objects: Vec<String>,
     /// Sanitized, host-verified MCP caller identity. Never accepts raw tokens.
     pub auth: Option<serde_json::Value>,
+    /// The environment this invocation resolved through — always set by
+    /// hosts ("prod", "stage", …; "local" under rusted run), so
+    /// `context.currentEnv` is a plain string, never a null-means-prod.
+    pub env_name: Option<String>,
 }
 
 impl Capabilities {
@@ -357,6 +361,7 @@ impl Capabilities {
             state: config.wants_state(),
             objects: config.objects.keys().cloned().collect(),
             auth: None,
+            env_name: None,
         }
     }
 
@@ -365,12 +370,23 @@ impl Capabilities {
         self
     }
 
+    pub fn with_env(mut self, env: impl Into<String>) -> Self {
+        self.env_name = Some(env.into());
+        self
+    }
+
     fn to_glue_json(&self) -> String {
-        if !self.state && self.objects.is_empty() && self.auth.is_none() {
+        if !self.state && self.objects.is_empty() && self.auth.is_none() && self.env_name.is_none()
+        {
             return String::new();
         }
-        serde_json::json!({ "state": self.state, "objects": self.objects, "auth": self.auth })
-            .to_string()
+        serde_json::json!({
+            "state": self.state,
+            "objects": self.objects,
+            "auth": self.auth,
+            "currentEnv": self.env_name,
+        })
+        .to_string()
     }
 }
 
@@ -500,7 +516,7 @@ const CAPS_PRELUDE: &str = r#"(() => {
     };
   };
   globalThis.__rustedCaps = (capsJson) => {
-    if (!capsJson) return { state: undefined, objects: undefined, auth: undefined };
+    if (!capsJson) return { state: undefined, objects: undefined, auth: undefined, currentEnv: undefined };
     const caps = JSON.parse(capsJson);
     const parse = (raw) => {
       const r = JSON.parse(raw);
@@ -528,7 +544,7 @@ const CAPS_PRELUDE: &str = r#"(() => {
           list: (options) => objectOp(b, { op: "list", ...(options || {}) }),
         }]))
       : undefined;
-    return { state, objects, auth: caps.auth || undefined };
+    return { state, objects, auth: caps.auth || undefined, currentEnv: caps.currentEnv || undefined };
   };
 })()"#;
 
@@ -630,6 +646,9 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
     // the host — an undeclared capability is absent, not broken.
     state: caps.state,
     objects: caps.objects,
+    // Which environment this invocation resolved through ("prod" unless the
+    // URL said otherwise; "local" under rusted run).
+    currentEnv: caps.currentEnv,
   };
   return Promise.resolve(handler(request, context)).then(
     (r) => {
@@ -696,6 +715,9 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
     state: caps.state,
     objects: caps.objects,
     auth: caps.auth,
+    // Which environment this invocation resolved through ("prod" unless the
+    // URL said otherwise; "local" under rusted run).
+    currentEnv: caps.currentEnv,
   };
   return Promise.resolve()
     .then(() => {

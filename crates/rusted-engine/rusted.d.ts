@@ -270,6 +270,12 @@ declare namespace Rusted {
      * Present only for declared bindings the host supplies.
      */
     objects?: Record<string, ObjectStore>;
+    /**
+     * The environment this invocation resolved through: "prod" unless the
+     * URL selected another (`/f/@stage/name`), and "local" under
+     * `rusted run`. Always a string on deployed functions and local runs.
+     */
+    currentEnv?: string;
   }
 
   /**
@@ -432,6 +438,12 @@ declare namespace Rusted {
      * Present only for declared bindings the host supplies.
      */
     objects?: Record<string, ObjectStore>;
+    /**
+     * The environment this invocation resolved through: "prod" unless the
+     * URL selected another (`/f/@stage/name`), and "local" under
+     * `rusted run`. Always a string on deployed functions and local runs.
+     */
+    currentEnv?: string;
   }
 
   /**

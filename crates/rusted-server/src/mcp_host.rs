@@ -31,6 +31,7 @@ pub async fn serve(
     state: Arc<AppState>,
     fetched: Arc<Fetched>,
     name: String,
+    env: String,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -38,21 +39,23 @@ pub async fn serve(
 
     // Auth comes before parsing: an unauthorized caller learns nothing about
     // the protocol or tool surface. OAuth returns sanitized identity only.
-    let caller_auth = match crate::mcp_auth::authorize(&state, &fetched, &name, &headers).await {
-        Ok(caller) => caller,
-        Err(response) => return response,
-    };
+    let caller_auth =
+        match crate::mcp_auth::authorize(&state, &fetched, &name, &env, &headers).await {
+            Ok(caller) => caller,
+            Err(response) => return response,
+        };
 
     let state = &state;
     let fetched = &fetched;
     let meta = &meta;
     let name = name.as_str();
+    let env = env.as_str();
     mcp_wire::respond(&body, &headers, move |msg| {
         let message_auth = caller_auth.clone();
         async move {
             handle_message(meta, name, fetched.rev, msg, move |tool, args| {
                 let tool_auth = message_auth.clone();
-                async move { call_tool(state, fetched, name, tool, args, tool_auth).await }
+                async move { call_tool(state, fetched, name, env, tool, args, tool_auth).await }
             })
             .await
         }
@@ -162,6 +165,7 @@ async fn call_tool(
     state: &Arc<AppState>,
     fetched: &Arc<Fetched>,
     name: &str,
+    env: &str,
     tool: String,
     args: Value,
     caller_auth: Option<Value>,
@@ -176,7 +180,7 @@ async fn call_tool(
     // Model-visible on purpose: the secret and binding names are deploy
     // metadata, and naming what is missing is how the owner (or their agent)
     // fixes it.
-    let mut grant = match grant_for_function(state, name, fetched, &plan).await {
+    let mut grant = match grant_for_function(state, name, fetched, &plan, env).await {
         Ok(grant) => grant,
         Err((_code, detail)) => {
             record_refusal(state, name, fetched.owner, "error", 500, detail.clone());

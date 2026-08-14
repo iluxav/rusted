@@ -1557,7 +1557,7 @@ async fn every_console_page_renders() {
         .await
         .unwrap();
     rusted_server::secrets::SecretStore::new(t.pool.clone())
-        .set(t.user_id, "SMOKE_SECRET", "v")
+        .set(t.user_id, "prod", "SMOKE_SECRET", "v")
         .await
         .unwrap();
     t.client
@@ -3197,7 +3197,7 @@ async fn a_function_that_requests_secrets_gets_them_decrypted() {
     let t = boot().await;
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
     vault
-        .set(t.user_id, "API_TOKEN", "tok_live_123")
+        .set(t.user_id, "prod", "API_TOKEN", "tok_live_123")
         .await
         .unwrap();
     assert_eq!(push(&t, "envy", SECRET_READER).await.status(), 200);
@@ -3233,7 +3233,10 @@ async fn a_function_that_does_not_ask_sees_no_env_at_all() {
     enable_secret_store();
     let t = boot().await;
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
-    vault.set(t.user_id, "API_TOKEN", "tok").await.unwrap();
+    vault
+        .set(t.user_id, "prod", "API_TOKEN", "tok")
+        .await
+        .unwrap();
     let src = r#"export default async function handler(request, context) {
         return context.json({ env: typeof context.env });
     }"#;
@@ -3249,7 +3252,10 @@ async fn updating_a_secret_reaches_the_next_invocation() {
     enable_secret_store();
     let t = boot().await;
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
-    vault.set(t.user_id, "API_TOKEN", "before").await.unwrap();
+    vault
+        .set(t.user_id, "prod", "API_TOKEN", "before")
+        .await
+        .unwrap();
     assert_eq!(push(&t, "rotating", SECRET_READER).await.status(), 200);
 
     let r = t.client.post(t.data("/f/rotating")).send().await.unwrap();
@@ -3257,7 +3263,10 @@ async fn updating_a_secret_reaches_the_next_invocation() {
 
     // The vault writes through Postgres and NOTIFYs; the server's cache must
     // drop the old value. The listener is async, so poll briefly.
-    vault.set(t.user_id, "API_TOKEN", "after").await.unwrap();
+    vault
+        .set(t.user_id, "prod", "API_TOKEN", "after")
+        .await
+        .unwrap();
     let mut latest = String::new();
     for _ in 0..40 {
         let r = t.client.post(t.data("/f/rotating")).send().await.unwrap();
@@ -3279,7 +3288,7 @@ async fn secrets_never_reach_the_database_in_the_clear() {
     let t = boot().await;
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
     vault
-        .set(t.user_id, "DB_CHECK", "plaintext-canary")
+        .set(t.user_id, "prod", "DB_CHECK", "plaintext-canary")
         .await
         .unwrap();
     let stored: Vec<u8> = sqlx::query_scalar::<_, Vec<u8>>(
@@ -3296,7 +3305,7 @@ async fn secrets_never_reach_the_database_in_the_clear() {
     );
     // And a deploy declaring a name that is set still round-trips through the
     // console-style listing without exposing the value.
-    let listed = vault.list(t.user_id).await.unwrap();
+    let listed = vault.list(t.user_id, "prod").await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "DB_CHECK");
 }
@@ -3306,7 +3315,10 @@ async fn mcp_tools_get_env_the_same_way() {
     enable_secret_store();
     let t = boot().await;
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
-    vault.set(t.user_id, "SIGNING_KEY", "sk_42").await.unwrap();
+    vault
+        .set(t.user_id, "prod", "SIGNING_KEY", "sk_42")
+        .await
+        .unwrap();
     let src = r#"export const config = { secrets: ["SIGNING_KEY"] };
 export const mcp = { tools: { sign: {
     description: "d", inputSchema: { type: "object" },
@@ -3495,11 +3507,11 @@ async fn object_bindings_need_credentials_and_then_presign() {
     // bytes — string checks only, nothing leaves the process.
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
     vault
-        .set(t.user_id, "OBJ_AK", "test-access-key")
+        .set(t.user_id, "prod", "OBJ_AK", "test-access-key")
         .await
         .unwrap();
     vault
-        .set(t.user_id, "OBJ_SK", "test-secret-key")
+        .set(t.user_id, "prod", "OBJ_SK", "test-secret-key")
         .await
         .unwrap();
     let r = t.client.post(t.data("/f/blobby")).send().await.unwrap();
@@ -3530,7 +3542,7 @@ async fn seal_round_trips_through_a_vault_keyed_cookie() {
     // The key secret is NOT in config.secrets: the module seals with it
     // without ever being able to read it.
     vault
-        .set(t.user_id, "COOKIE_KEY", "k".repeat(64).as_str())
+        .set(t.user_id, "prod", "COOKIE_KEY", "k".repeat(64).as_str())
         .await
         .unwrap();
     let src = r#"export default async function handler(request, context) {
@@ -3895,11 +3907,11 @@ async fn mcp_oauth_flows_end_to_end_from_challenge_to_context_auth() {
     let (issuer, hits) = mock_authorization_server(audience.clone()).await;
     let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
     vault
-        .set(t.user_id, "AS_CLIENT_ID", "rusted-rp")
+        .set(t.user_id, "prod", "AS_CLIENT_ID", "rusted-rp")
         .await
         .unwrap();
     vault
-        .set(t.user_id, "AS_CLIENT_SECRET", "rp-secret")
+        .set(t.user_id, "prod", "AS_CLIENT_SECRET", "rp-secret")
         .await
         .unwrap();
 
@@ -4028,4 +4040,215 @@ async fn mcp_oauth_distinguishes_issuer_outage_from_bad_tokens() {
     assert_eq!(r.status(), 503);
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["error"]["code"], "auth_unavailable", "{v}");
+}
+
+// ----------------------------------------------------------- environments
+
+#[tokio::test]
+async fn environments_overlay_secrets_state_and_report_current_env() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    vault
+        .set(t.user_id, "prod", "APP_ORIGIN", "https://renote.app")
+        .await
+        .unwrap();
+    vault
+        .set(t.user_id, "stage", "APP_ORIGIN", "http://localhost:3000")
+        .await
+        .unwrap();
+
+    let src = r#"export const config = { secrets: ["APP_ORIGIN"], state: true };
+export default async function handler(request, context) {
+    const entry = await context.state.get("hits");
+    const wrote = await context.state.compareAndSet(
+        "hits", entry?.version ?? null, (entry?.value ?? 0) + 1);
+    return context.json({
+        origin: context.env.APP_ORIGIN,
+        currentEnv: context.currentEnv,
+        hits: wrote.ok ? wrote.version : null,
+    });
+}"#;
+    assert_eq!(push(&t, "enved", src).await.status(), 200);
+
+    // Prod: prod secret, prod state, currentEnv "prod".
+    let r = t.client.post(t.data("/f/enved")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["origin"], "https://renote.app", "{v}");
+    assert_eq!(v["currentEnv"], "prod", "{v}");
+    assert_eq!(v["hits"], 1, "{v}");
+
+    // Stage: its own secret AND its own counter — state does not bleed.
+    let r = t
+        .client
+        .post(t.data("/f/@stage/enved"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["origin"], "http://localhost:3000", "{v}");
+    assert_eq!(v["currentEnv"], "stage", "{v}");
+    assert_eq!(v["hits"], 1, "stage must have its own counter: {v}");
+
+    // Prod again: unaffected by the stage write.
+    let r = t.client.post(t.data("/f/enved")).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["hits"], 2);
+
+    // An env that was never created answers exactly like a missing function.
+    let r = t
+        .client
+        .post(t.data("/f/@ghost/enved"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["code"],
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn a_secret_missing_in_one_env_refuses_only_that_env() {
+    enable_secret_store();
+    let t = boot().await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    // Set in prod only.
+    vault
+        .set(t.user_id, "prod", "ONLY_PROD", "value")
+        .await
+        .unwrap();
+    let src = r#"export const config = { secrets: ["ONLY_PROD"] };
+export default async function handler(request, context) {
+    return context.json({ v: context.env.ONLY_PROD });
+}"#;
+    assert_eq!(push(&t, "halfset", src).await.status(), 200);
+
+    let r = t.client.post(t.data("/f/halfset")).send().await.unwrap();
+    assert_eq!(r.status(), 200, "prod is configured");
+
+    // Stage: refused before the handler, never an empty string, never a
+    // silent fallback to prod's value.
+    let r = t
+        .client
+        .post(t.data("/f/@stage/halfset"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 500);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "missing_secrets", "{v}");
+
+    // The owner's log names the env and the secret.
+    let detail: Value = t
+        .admin_get("/api/functions/halfset")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let entry = detail["recent"][0]["detail"].as_str().unwrap();
+    assert!(
+        entry.contains("[@stage]") && entry.contains("ONLY_PROD"),
+        "{entry}"
+    );
+}
+
+#[tokio::test]
+async fn environment_lifecycle_is_bounded_and_prod_protected() {
+    let t = boot().await;
+    let pool = &t.pool;
+    assert!(rusted_server::secrets::create_env(pool, t.user_id, "prod")
+        .await
+        .unwrap_err()
+        .contains("always exists"));
+    assert!(rusted_server::secrets::create_env(pool, t.user_id, "local")
+        .await
+        .unwrap_err()
+        .contains("reserved"));
+    assert!(
+        rusted_server::secrets::create_env(pool, t.user_id, "Bad Name")
+            .await
+            .is_err()
+    );
+    assert!(rusted_server::secrets::delete_env(pool, t.user_id, "prod")
+        .await
+        .unwrap_err()
+        .contains("cannot be deleted"));
+    for i in 0..rusted_server::secrets::MAX_ENVIRONMENTS {
+        rusted_server::secrets::create_env(pool, t.user_id, &format!("env-{i}"))
+            .await
+            .unwrap();
+    }
+    assert!(
+        rusted_server::secrets::create_env(pool, t.user_id, "one-too-many")
+            .await
+            .is_err()
+    );
+    let envs = rusted_server::secrets::list_envs(pool, t.user_id).await;
+    assert_eq!(envs[0], "prod");
+    assert_eq!(
+        envs.len() as i64,
+        1 + rusted_server::secrets::MAX_ENVIRONMENTS
+    );
+}
+
+#[tokio::test]
+async fn public_functions_stay_public_through_an_env_url() {
+    enable_secret_store();
+    let database_url = rusted_server::testsupport::create_test_database().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = boot_full(dir, 1500, database_url, true).await;
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    let src = r#"export const http = { public: true };
+export default async function handler(request, context) {
+    return context.json({ env: context.currentEnv });
+}"#;
+    assert_eq!(push(&t, "open-env", src).await.status(), 200);
+    // Keyless through the env URL: the bearer gate must parse past @stage.
+    let r = t
+        .client
+        .post(t.data("/f/@stage/open-env"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["env"], "stage");
+}
+
+#[tokio::test]
+async fn oauth_mcp_functions_refuse_env_urls() {
+    std::env::set_var("RUSTED_OAUTH_ALLOW_HTTP", "1");
+    let t = boot().await;
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    let src = r#"export const mcp = {
+  name: "envless",
+  auth: { type: "oauth", issuer: "http://127.0.0.1:9", audience: "https://api.example/f/envless" },
+  tools: { t: { description: "d", inputSchema: { type: "object" }, handler() { return 1; } } },
+};"#;
+    assert_eq!(push(&t, "envless", src).await.status(), 200);
+    let r = t
+        .client
+        .post(t.data("/f/@stage/envless"))
+        .bearer_auth("any")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["code"],
+        "env_unsupported"
+    );
 }

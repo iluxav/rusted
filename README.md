@@ -396,6 +396,21 @@ The safety shape, since a binding is a credentialed HTTP client:
 
 Under `rusted run`, objects live in an isolated temp directory and the presigned URLs point at the dev server itself, with the same create-only/length/checksum enforcement — the flow you test locally is the flow that ships. [examples/state-and-objects](examples/state-and-objects) is a complete file using both.
 
+## Environments
+
+One deployed function, different configuration per environment — selected by the URL, never by code:
+
+```
+https://rusted.sh/f/settle           → prod (every existing URL, unchanged)
+https://rusted.sh/f/@stage/settle    → stage
+```
+
+Environments are created in the console's Secrets page (`prod` always exists and cannot be deleted). Each is a full overlay: its own **secret values** for the same declared names, its own **durable state**, and its own **object namespace** — a stage invocation cannot read prod's counters or address prod's blobs, by construction. Handlers see `context.currentEnv` (`"prod"`, `"stage"`, … — always a string; `"local"` under `rusted run`), though the point is that most never need to look: the same `context.env.APP_ORIGIN` read resolves to whichever environment the URL selected.
+
+The rules that keep it honest: a declared secret unset in the resolved environment refuses the invocation before the handler runs — never an empty string, never a silent fallback to prod's value. An environment the account never created answers 404 exactly like a missing function. Host-only secrets (object-binding credentials, `seal` keys, OAuth introspection credentials) resolve through the same environment. A push never changes which environments exist; deleting one removes its secrets after a confirm, while its durable state stays until purged.
+
+Because the environment is part of the address, it survives everything code can't reach: register your dev GitHub OAuth app against `/f/@stage/renote-auth/callback` and the whole flow — redirects, cookies, third-party callbacks — stays in stage end to end. (One boundary: OAuth-protected mcp functions serve only their canonical URL, since their token audience is that exact URL.)
+
 ## Randomness
 
 `Math.random()` is fine for jitter and dice; it is not fine for anything an attacker gains by predicting — and OAuth state, PKCE verifiers, session tokens, and encryption nonces are exactly that. The host lends the real thing instead:

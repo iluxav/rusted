@@ -536,6 +536,7 @@ export default async function handler(request, context) {
         state: true,
         objects: vec!["SHARES".to_string()],
         auth: None,
+        env_name: None,
     };
     let r = QuickJsExecutor::new()
         .execute_with_services(
