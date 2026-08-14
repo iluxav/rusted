@@ -96,10 +96,13 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/console/keys/{id}", delete(key_revoke))
         .route(
-            "/console/lambda/{name}",
-            get(page_lambda).delete(lambda_delete),
+            "/console/function/{name}",
+            get(page_function).delete(function_delete),
         )
-        .route("/console/lambda/{name}/published", post(lambda_publish))
+        .route("/console/function/{name}/published", post(function_publish))
+        // The old spelling redirects — bookmarks and muscle memory keep
+        // working, and htmx requests land on the canonical page.
+        .route("/console/lambda/{name}", get(legacy_lambda_redirect))
         .route("/console/test", post(run_test))
         .with_state(state)
 }
@@ -550,14 +553,25 @@ struct ToolRow {
     schema_json: String,
 }
 
+/// One environment's invocation URL for the header.
+struct EnvUrl {
+    env: String,
+    url: String,
+}
+
 #[derive(Template)]
-#[template(path = "lambda.html")]
-struct LambdaT {
+#[template(path = "function.html")]
+struct FunctionT {
     name: String,
     published: bool,
     methods: Vec<String>,
-    url: String,
     url_example: String,
+    /// Every environment's URL, prod first.
+    env_urls: Vec<EnvUrl>,
+    /// Absolute deploy time of the serving revision, e.g. "2026-08-14 19:52 UTC".
+    deployed_at: String,
+    /// Relative form, e.g. "2 h ago".
+    deployed_ago: String,
     revision: u64,
     size: String,
     hidden_kb: usize,
@@ -1431,7 +1445,7 @@ fn pretty_size(bytes: usize) -> String {
     }
 }
 
-async fn page_lambda(
+async fn page_function(
     State(state): State<WebState>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -1445,8 +1459,44 @@ async fn page_lambda(
     };
     let source = &hit.source;
     let trigger = hit.trigger.clone();
-    let route = format!("/f/{}{}", name, trigger.path.as_deref().unwrap_or(""));
+    let route_suffix = trigger.path.as_deref().unwrap_or("").to_string();
+    let route = format!("/f/{name}{route_suffix}");
     let url = state.0.app.data_url(&route);
+    let env_urls: Vec<EnvUrl> = crate::secrets::list_envs(&state.0.app.pool, user.id)
+        .await
+        .into_iter()
+        .map(|env| {
+            let path = if env == crate::secrets::PROD_ENV {
+                format!("/f/{name}{route_suffix}")
+            } else {
+                format!("/f/@{env}/{name}{route_suffix}")
+            };
+            EnvUrl {
+                url: state.0.app.data_url(&path),
+                env,
+            }
+        })
+        .collect();
+    // When the serving revision went live — the store's cached view carries
+    // no timestamps, so one small query pays for the header line.
+    let (deployed_at, deployed_ago) = sqlx::query(
+        "SELECT to_char(r.created_at, 'YYYY-MM-DD HH24:MI \"UTC\"') AS at_text,
+                extract(epoch FROM r.created_at)::bigint AS at
+         FROM revisions r WHERE r.function_name = $1 AND r.rev = $2",
+    )
+    .bind(&name)
+    .bind(hit.rev as i64)
+    .fetch_optional(&state.0.app.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|row| {
+        (
+            row.get::<String, _>("at_text"),
+            ago(row.get::<i64, _>("at")),
+        )
+    })
+    .unwrap_or_else(|| ("unknown".to_string(), String::new()));
     let (user_code, hidden) = split_user_code(source);
     let code_json = serde_json::json!({ "user": user_code, "full": source })
         .to_string()
@@ -1479,12 +1529,14 @@ async fn page_lambda(
     } else {
         String::new()
     };
-    let inner = LambdaT {
+    let inner = FunctionT {
         name: name.clone(),
         published: hit.published,
+        env_urls,
+        deployed_at,
+        deployed_ago,
         methods: trigger.methods.clone(),
         url_example: url.clone(),
-        url,
         revision: hit.rev,
         size: pretty_size(source.len()),
         hidden_kb: hidden / 1024,
@@ -1501,7 +1553,7 @@ async fn page_lambda(
 
 /// Deletes the function — the same operation as `rusted delete`, gated on the
 /// session owner actually owning it. State survives (purge is separate).
-async fn lambda_delete(
+async fn function_delete(
     State(state): State<WebState>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -1528,7 +1580,7 @@ struct PublishForm {
 
 /// Flips the serving toggle and re-renders the page, so the banner and button
 /// always reflect what the data plane is now doing.
-async fn lambda_publish(
+async fn function_publish(
     State(state): State<WebState>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -1545,7 +1597,11 @@ async fn lambda_publish(
         .store
         .set_published(&name, user.id, publish)
         .await;
-    page_lambda(State(state), headers, Path(name)).await
+    page_function(State(state), headers, Path(name)).await
+}
+
+async fn legacy_lambda_redirect(Path(name): Path<String>) -> Response {
+    Redirect::permanent(&format!("/console/function/{name}")).into_response()
 }
 
 fn missing_lambda(name: &str) -> String {

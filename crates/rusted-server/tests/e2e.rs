@@ -1580,8 +1580,8 @@ async fn every_console_page_renders() {
         "/console/secrets",
         "/console/billing",
         "/console/checkout/pro",
-        "/console/lambda/greet",
-        "/console/lambda/does-not-exist",
+        "/console/function/greet",
+        "/console/function/does-not-exist",
         "/console/invocations",
         "/console/invocations?function=greet&errors=1",
         "/console/invocations?page=2",
@@ -1617,7 +1617,7 @@ async fn console_lambda_page_renders_mcp_tools() {
     let r = t
         .client
         .get(format!(
-            "http://{}/console/lambda/sluggy",
+            "http://{}/console/function/sluggy",
             t.handle.admin_addr
         ))
         .header("cookie", format!("rusted_session={session}"))
@@ -1675,7 +1675,7 @@ async fn missing_lambda_page_escapes_the_requested_name() {
     let r = t
         .client
         .get(format!(
-            "http://{}/console/lambda/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
+            "http://{}/console/function/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
             t.handle.admin_addr
         ))
         .header("cookie", format!("rusted_session={session}"))
@@ -3708,7 +3708,7 @@ async fn unpublished_functions_answer_like_missing_until_republished() {
     // answer, and the owner's logs record why.
     let r = t
         .client
-        .post(admin("/console/lambda/toggleable/published"))
+        .post(admin("/console/function/toggleable/published"))
         .header("cookie", &cookie)
         .form(&[("published", "false")])
         .send()
@@ -3741,7 +3741,7 @@ async fn unpublished_functions_answer_like_missing_until_republished() {
     // Republishing serves again.
     let r = t
         .client
-        .post(admin("/console/lambda/toggleable/published"))
+        .post(admin("/console/function/toggleable/published"))
         .header("cookie", &cookie)
         .form(&[("published", "true")])
         .send()
@@ -3771,7 +3771,7 @@ async fn console_delete_removes_the_function_and_only_for_its_owner() {
         .unwrap();
     let r = t
         .client
-        .delete(admin("/console/lambda/condemned"))
+        .delete(admin("/console/function/condemned"))
         .header("cookie", format!("rusted_session={other_session}"))
         .send()
         .await
@@ -3795,7 +3795,7 @@ async fn console_delete_removes_the_function_and_only_for_its_owner() {
         .unwrap();
     let r = t
         .client
-        .delete(admin("/console/lambda/condemned"))
+        .delete(admin("/console/function/condemned"))
         .header("cookie", format!("rusted_session={session}"))
         .send()
         .await
@@ -4489,4 +4489,56 @@ async fn oauth_mcp_serves_environments_with_derived_audiences() {
     // …and not prod.
     let r = call(t.data("/f/multi"), "tok-stage").await;
     assert_eq!(r.status(), 401, "stage token must not open prod");
+}
+
+#[tokio::test]
+async fn function_page_shows_env_urls_deploy_time_and_redirects_old_path() {
+    let t = boot().await;
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    push(&t, "greet", GREET).await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    let admin = |path: &str| format!("http://{}{path}", t.handle.admin_addr);
+
+    let r = t
+        .client
+        .get(admin("/console/function/greet"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().await.unwrap();
+    // One URL row per environment, prod first.
+    assert!(body.contains("@prod"), "prod badge missing");
+    assert!(body.contains("@stage"), "stage badge missing");
+    assert!(body.contains("/f/@stage/greet"), "stage URL missing");
+    // The deploy line: absolute UTC time plus a relative age.
+    assert!(
+        body.contains("deployed 20") && body.contains("UTC"),
+        "deploy time missing"
+    );
+    assert!(
+        body.contains("just now") || body.contains("ago"),
+        "deploy age missing"
+    );
+
+    // The old spelling still lands on the page (via permanent redirect).
+    let r = t
+        .client
+        .get(admin("/console/lambda/greet"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(
+        r.url().path().ends_with("/console/function/greet"),
+        "{}",
+        r.url()
+    );
 }
