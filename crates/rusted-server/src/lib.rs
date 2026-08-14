@@ -24,6 +24,7 @@ pub mod secrets;
 pub mod services;
 pub mod state;
 pub mod store;
+pub mod telemetry;
 pub mod testsupport;
 pub mod tiers;
 pub mod web;
@@ -124,7 +125,19 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .merge(oauth::router(state.clone()))
         .merge(inbox::public_router(state.clone()))
         .merge(web::router(web::WebState::new(state.clone())));
+    // Telemetry counters are cumulative per process; the persisted baseline
+    // makes them cumulative per deployment instead.
+    state.telemetry.load_baseline(&pool).await;
+    let telemetry_state = state.clone();
+    let telemetry_pool = pool.clone();
     let tasks = vec![
+        tokio::spawn(async move {
+            let interval = telemetry::persist_interval();
+            loop {
+                tokio::time::sleep(interval).await;
+                telemetry_state.telemetry.persist(&telemetry_pool).await;
+            }
+        }),
         tokio::spawn(async move {
             axum::serve(data_listener, data_app)
                 .await

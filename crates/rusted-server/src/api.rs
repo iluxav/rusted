@@ -347,6 +347,11 @@ pub(crate) async fn execute_serialized(
         status,
         logs: result.logs.clone(),
     };
+    state.telemetry.record(
+        key,
+        &record.outcome,
+        Some(result.exec_wall.as_secs_f64() * 1000.0),
+    );
     // Queued, never awaited: analytics can shed load but never delay a call.
     state.analytics.record(crate::analytics::Invocation {
         function_name: key.to_string(),
@@ -466,6 +471,7 @@ pub(crate) fn record_refusal(
     status: u16,
     detail: String,
 ) {
+    state.telemetry.record(key, outcome, None);
     state.analytics.record(crate::analytics::Invocation {
         function_name: key.to_string(),
         user_id: owner,
@@ -2408,6 +2414,27 @@ async fn purge_function_state(
     }
 }
 
+/// Per-function stats from the in-process OpenTelemetry pipeline, scoped to
+/// the caller's own functions. Totals are cumulative across restarts via the
+/// persisted baseline.
+async fn stats(State(state): Shared, headers: HeaderMap) -> Response {
+    let user_id = match caller(&state, &headers).await {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let names = state
+        .store
+        .names_for_user(user_id)
+        .await
+        .unwrap_or_default();
+    let functions = state.telemetry.snapshot(Some(&names));
+    Json(json!({
+        "source": "opentelemetry",
+        "functions": functions,
+    }))
+    .into_response()
+}
+
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
         // Also served by the data router. Public OAuth discovery metadata
@@ -2433,6 +2460,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/api/invoke", post(invoke))
         .route("/api/verify", post(verify))
         .route("/api/plan", get(current_plan))
+        .route("/api/stats", get(stats))
         // Unauthenticated by necessity: a client starting the device flow has
         // no credential yet. Both are rate limited and every code expires.
         .route("/mcp", post(mcp_endpoint))

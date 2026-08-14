@@ -2226,6 +2226,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
+dependencies = [
+ "js-sys",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry",
+ "portable-atomic",
+ "thiserror",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3725,7 +3748,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-cli"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3742,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-engine"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.22.1",
  "cpu-time",
@@ -3760,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-server"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "aes-gcm",
  "askama",
@@ -3769,6 +3792,8 @@ dependencies = [
  "hex",
  "httpdate",
  "jsonschema",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "rand",
  "reqwest",
  "rolldown",

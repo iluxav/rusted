@@ -465,6 +465,24 @@ Bundling targets a neutral platform, so a dependency reaching for a Node builtin
 
 That includes crypto. There is no `node:crypto`, no `Buffer`, and no WebCrypto either — `crypto.subtle` is a browser/Node API this runtime doesn't have. Before reaching for a package, check what the host already lends: [`context.sha256`, base64url/hex codecs, `timingSafeEqual`](#randomness), [`context.seal`/`open`](#sealed-values) for authenticated encryption, and [`context.randomBytes`](#randomness) — together they cover cookies, PKCE, checksums, and token comparison with zero dependencies. For anything beyond that (HMAC variants, other curves), pick a pure-JS implementation such as [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) rather than anything wrapping a platform API; it bundles in a few KB.
 
+## Metrics
+
+The server carries an in-process OpenTelemetry pipeline — no collector to run: every invocation increments `rusted.invocations` (by function and outcome) and executed handlers record `rusted.exec.duration`, a histogram of **pure handler execution time**. Read it back with your API key:
+
+```bash
+curl -H "Authorization: Bearer $RUSTED_API_KEY" https://rusted.sh/api/stats
+```
+
+```json
+{ "source": "opentelemetry", "functions": [
+  { "function": "renote-auth", "invocations": 812, "success": 780, "error": 2,
+    "terminated": 0, "refused": 30, "error_rate": 0.0025, "p95_exec_ms": 11.4 } ] }
+```
+
+`error_rate` counts only what a handler owns — errors and terminations over executed invocations; refusals (rate limits, wrong methods, unpublished) are tallied separately. `p95_exec_ms` is interpolated from histogram buckets tuned to the plans' execution budgets. The console dashboard's headline tiles read from this same pipeline (the day chart and invocation rows stay event-based from Postgres).
+
+Counters are cumulative per process, so a background task folds the totals into Postgres every minute and a restarting server loads them back as its baseline — stats are cumulative per deployment, and a crash loses at most a minute of counts.
+
 ## License
 
 Open source, split along the line between your machine and the service:

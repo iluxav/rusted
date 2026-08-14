@@ -1,6 +1,6 @@
 [package]
 name = "rusted-server"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "The rusted server: data plane, admin API, and web console."
@@ -11,6 +11,8 @@ rusted-engine = { workspace = true }
 aes-gcm = { workspace = true }
 rusty-s3 = { workspace = true }
 httpdate = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

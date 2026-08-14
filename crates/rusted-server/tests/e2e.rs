@@ -4542,3 +4542,125 @@ async fn function_page_shows_env_urls_deploy_time_and_redirects_old_path() {
         r.url()
     );
 }
+
+// ------------------------------------------------------------- telemetry
+
+#[tokio::test]
+async fn stats_api_reports_otel_counts_p95_and_error_rate() {
+    let t = boot().await;
+    push(&t, "steady", GREET).await;
+    push(
+        &t,
+        "faulty",
+        r#"export default async function handler() { throw new Error("boom"); }"#,
+    )
+    .await;
+    for _ in 0..4 {
+        let r = t
+            .client
+            .post(t.data("/f/steady"))
+            .body(r#"{"name":"Ada"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    let r = t.client.post(t.data("/f/faulty")).send().await.unwrap();
+    assert_eq!(r.status(), 500);
+    // A refused method counts as refused, not as handler failure.
+    let r = t.client.delete(t.data("/f/steady")).send().await.unwrap();
+    assert_eq!(r.status(), 405);
+
+    // Protected: no key, no stats.
+    let bare = t.client.get(t.admin("/api/stats")).send().await.unwrap();
+    assert_eq!(bare.status(), 401);
+
+    let v: Value = t.admin_get("/api/stats").await.json().await.unwrap();
+    assert_eq!(v["source"], "opentelemetry", "{v}");
+    let functions = v["functions"].as_array().unwrap();
+    let steady = functions
+        .iter()
+        .find(|f| f["function"] == "steady")
+        .unwrap_or_else(|| panic!("steady missing: {v}"));
+    assert_eq!(steady["invocations"], 5, "{steady}");
+    assert_eq!(steady["success"], 4, "{steady}");
+    assert_eq!(steady["refused"], 1, "{steady}");
+    assert_eq!(steady["error_rate"], 0.0, "{steady}");
+    assert!(steady["p95_exec_ms"].as_f64().unwrap() > 0.0, "{steady}");
+    let faulty = functions
+        .iter()
+        .find(|f| f["function"] == "faulty")
+        .unwrap();
+    assert_eq!(faulty["error"], 1, "{faulty}");
+    assert_eq!(faulty["error_rate"], 1.0, "{faulty}");
+
+    // Another account sees none of it.
+    let other = rusted_server::testsupport::seed_user(&t.pool).await;
+    let (_, other_key) = rusted_server::auth::create_key(&t.pool, other, "other")
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .get(t.admin("/api/stats"))
+        .bearer_auth(&other_key)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["functions"].as_array().unwrap().len(), 0, "{v}");
+}
+
+#[tokio::test]
+async fn telemetry_totals_survive_a_server_restart() {
+    std::env::set_var("RUSTED_TELEMETRY_PERSIST_SECS", "1");
+    let database_url = rusted_server::testsupport::create_test_database().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = boot_full(dir, 1500, database_url.clone(), false).await;
+    push(&t, "durable-stats", GREET).await;
+    for _ in 0..3 {
+        t.client
+            .post(t.data("/f/durable-stats"))
+            .body(r#"{"name":"Ada"}"#)
+            .send()
+            .await
+            .unwrap();
+    }
+    // Let the persist loop fold the totals into Postgres.
+    let mut persisted = false;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let n: i64 = sqlx::query_scalar(
+            "SELECT coalesce(sum(invocations), 0)::bigint FROM telemetry_counters
+             WHERE function = 'durable-stats'",
+        )
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+        if n >= 3 {
+            persisted = true;
+            break;
+        }
+    }
+    assert!(persisted, "totals never reached the snapshot table");
+
+    // A fresh process starts from the baseline, not from zero.
+    let dir2 = tempfile::tempdir().unwrap();
+    let t2 = boot_full(dir2, 1500, database_url, false).await;
+    let r = t2
+        .client
+        .get(format!("http://{}/api/stats", t2.handle.admin_addr))
+        .bearer_auth(&t.key)
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    let durable = v["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["function"] == "durable-stats")
+        .unwrap_or_else(|| panic!("baseline missing after restart: {v}"))
+        .clone();
+    assert!(durable["invocations"].as_u64().unwrap() >= 3, "{durable}");
+    assert!(durable["p95_exec_ms"].as_f64().unwrap() > 0.0, "{durable}");
+}

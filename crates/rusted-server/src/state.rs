@@ -61,6 +61,9 @@ pub struct AppState {
     pub objects: crate::objects::ObjectHost,
     pub auth: AuthCaches,
     pub analytics: Recorder,
+    /// In-process OpenTelemetry metrics: invocation counts and exec-time
+    /// histograms, read back for /api/stats and the dashboard.
+    pub telemetry: std::sync::Arc<crate::telemetry::Telemetry>,
     pub plan_cache: PlanCache,
     pub rate_limiter: RateLimiter,
     /// Require `Authorization: Bearer rk_live_…` on the data plane.
@@ -210,6 +213,7 @@ impl AppState {
             pool,
             auth: AuthCaches::default(),
             analytics,
+            telemetry: std::sync::Arc::new(crate::telemetry::Telemetry::default()),
             plan_cache: PlanCache::default(),
             rate_limiter: RateLimiter::default(),
             require_auth,

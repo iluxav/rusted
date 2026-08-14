@@ -910,7 +910,11 @@ async fn dashboard_inner(
     let app = &state.0.app;
     let plan = crate::plans::effective_plan(&app.pool, &app.plan_cache, Some(user.id)).await;
     let days = plan.limits.analytics_days.clamp(1, 30);
-    let summary = crate::analytics::summary(&app.pool, user.id, days).await;
+    // Headline tiles come from the in-process OpenTelemetry pipeline
+    // (lifetime totals, persisted across restarts); the day chart and the
+    // invocation rows below stay event-based from Postgres.
+    let names = app.store.names_for_user(user.id).await.unwrap_or_default();
+    let overall = app.telemetry.overall(Some(&names));
     let buckets = crate::analytics::per_day(&app.pool, user.id, days).await;
     let max = buckets.iter().map(|b| b.value).max().unwrap_or(0).max(1);
     let bars = buckets
@@ -924,26 +928,23 @@ async fn dashboard_inner(
         .collect();
     let invocations = invocations_inner(state, user, filter_function, filter_errors, page).await;
     let functions = crate::analytics::invoked_functions(&app.pool, user.id).await;
-    let delta = match (summary.invocations, summary.prior_invocations) {
-        (_, 0) => "—".to_string(),
-        (current, prior) => format!("{:+.0}%", (current - prior) as f64 / prior as f64 * 100.0),
-    };
-    let error_rate = if summary.invocations == 0 {
+    let error_rate = if overall.invocations == 0 {
         "0%".to_string()
     } else {
-        format!(
-            "{:.1}%",
-            summary.errors as f64 / summary.invocations as f64 * 100.0
-        )
+        format!("{:.1}%", overall.error_rate * 100.0)
     };
     DashboardT {
-        window: format!("last {days} days · {} plan retention", plan.name),
+        window: format!("all-time · opentelemetry · chart: last {days} days"),
         stats: Stats {
-            invocations: human_count(summary.invocations),
-            invocations_delta: delta,
-            p95_exec: format!("{:.1} ms", summary.p95_exec_ms),
+            invocations: human_count(overall.invocations as i64),
+            // Cumulative counters carry no prior-window to compare against.
+            invocations_delta: "—".to_string(),
+            p95_exec: overall
+                .p95_exec_ms
+                .map(|p| format!("{p:.1} ms"))
+                .unwrap_or_else(|| "—".to_string()),
             error_rate,
-            errors: human_count(summary.errors),
+            errors: human_count(overall.errors as i64),
         },
         bars,
         functions,
