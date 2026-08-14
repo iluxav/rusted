@@ -37,12 +37,23 @@ pub struct OauthConfig {
 }
 
 impl OauthConfig {
+    /// Platform sign-in credentials come from the RUSTED_CONSOLE_* variables
+    /// — operator configuration, deliberately namespaced so it can never be
+    /// confused with the identically-spelled tenant secrets that live in the
+    /// vault (a Renote-style function's GITHUB_CLIENT_ID is a different app
+    /// in a different trust domain). The bare names remain as a fallback so
+    /// existing deployments keep signing in.
     fn from_env() -> Option<OauthConfig> {
+        let var = |name: &str| {
+            std::env::var(format!("RUSTED_CONSOLE_{name}"))
+                .or_else(|_| std::env::var(name))
+                .ok()
+        };
         Some(OauthConfig {
-            client_id: std::env::var("GITHUB_CLIENT_ID").ok()?,
-            client_secret: std::env::var("GITHUB_CLIENT_SECRET").ok()?,
-            callback_url: std::env::var("GITHUB_CALLBACK_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:7412/auth/github/callback".to_string()),
+            client_id: var("GITHUB_CLIENT_ID")?,
+            client_secret: var("GITHUB_CLIENT_SECRET")?,
+            callback_url: var("GITHUB_CALLBACK_URL")
+                .unwrap_or_else(|| "http://127.0.0.1:7412/auth/github/callback".to_string()),
         })
     }
 }

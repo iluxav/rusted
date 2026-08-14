@@ -4252,3 +4252,37 @@ async fn oauth_mcp_functions_refuse_env_urls() {
         "env_unsupported"
     );
 }
+
+#[tokio::test]
+async fn console_oauth_prefers_the_platform_namespaced_variables() {
+    // Process-global env, like the other env-dependent tests: set both forms
+    // and require the RUSTED_CONSOLE_ one to win, so a tenant-style bare
+    // GITHUB_CLIENT_ID in the environment can never masquerade as platform
+    // sign-in configuration.
+    std::env::set_var("GITHUB_CLIENT_ID", "bare-id");
+    std::env::set_var("GITHUB_CLIENT_SECRET", "bare-secret");
+    std::env::set_var("RUSTED_CONSOLE_GITHUB_CLIENT_ID", "console-id");
+    std::env::set_var("RUSTED_CONSOLE_GITHUB_CLIENT_SECRET", "console-secret");
+    let t = boot().await;
+    let no_follow = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let r = no_follow
+        .get(format!("http://{}/auth/github", t.handle.admin_addr))
+        .send()
+        .await
+        .unwrap();
+    // The redirect to GitHub carries whichever client id won.
+    let location = r
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(location.contains("client_id=console-id"), "{location}");
+    std::env::remove_var("RUSTED_CONSOLE_GITHUB_CLIENT_ID");
+    std::env::remove_var("RUSTED_CONSOLE_GITHUB_CLIENT_SECRET");
+    std::env::remove_var("GITHUB_CLIENT_ID");
+    std::env::remove_var("GITHUB_CLIENT_SECRET");
+}

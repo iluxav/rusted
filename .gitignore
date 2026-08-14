@@ -23,3 +23,9 @@ tiny-quickjs-lambda-platform.md
 
 # Git worktrees
 .worktrees/
+
+issues.md
+
+renote-requirments.md
+
+secret-per-env.md

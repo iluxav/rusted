@@ -155,7 +155,7 @@ Resolution order is `--api-key` → `RUSTED_API_KEY` → that file, so CI keeps 
 
 ## Console, auth, and API keys
 
-The web console lives on the admin port (http://127.0.0.1:7412). Sign-in is real GitHub OAuth: create an OAuth app at github.com/settings/developers with callback `http://127.0.0.1:7412/auth/github/callback`, then start the server with `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` set (the login page shows these instructions until you do).
+The web console lives on the admin port (http://127.0.0.1:7412). Sign-in is real GitHub OAuth: create an OAuth app at github.com/settings/developers with callback `http://127.0.0.1:7412/auth/github/callback`, then start the server with `RUSTED_CONSOLE_GITHUB_CLIENT_ID` and `RUSTED_CONSOLE_GITHUB_CLIENT_SECRET` set (the bare `GITHUB_*` names still work as a fallback; the login page shows these instructions until you do). The `RUSTED_CONSOLE_` prefix is deliberate: this is *platform* configuration, distinct from any identically-named tenant secret in the vault — give the console its own dedicated GitHub app whose single callback URL nothing else ever repoints.
 
 API keys are minted in the console (shown once; only a hash is stored). `rusted serve --require-auth` makes every function endpoint demand `Authorization: Bearer rk_live_…`. Key verification is served from an in-memory cache invalidated over Postgres LISTEN/NOTIFY — revocation propagates in milliseconds without per-request DB reads.
 
