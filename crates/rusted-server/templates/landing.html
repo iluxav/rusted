@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}rusted — a runtime for agent-written code{% endblock %}
-{% block description %}Run agent-written JavaScript in a tiny QuickJS sandbox built in Rust. Execute once, deploy an endpoint, or receive a callback — over MCP or from the CLI.{% endblock %}
+{% block title %}rusted — ship a block of code, get a URL back{% endblock %}
+{% block description %}rusted turns a JavaScript function into a live HTTPS endpoint in under a second — agents build tools over MCP, you build from the CLI. ~1ms sandboxed cold starts, encrypted secrets, durable state, webhooks in and out.{% endblock %}
 {% block head %}
 <link rel="canonical" href="https://rusted.sh/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="rusted">
-<meta property="og:title" content="rusted — a runtime for agent-written code">
-<meta property="og:description" content="Run agent-written JavaScript in a tiny QuickJS sandbox built in Rust. Execute once, deploy an endpoint, or receive a callback — over MCP or from the CLI.">
+<meta property="og:title" content="rusted — ship a block of code, get a URL back">
+<meta property="og:description" content="rusted turns a JavaScript function into a live HTTPS endpoint in under a second — agents build tools over MCP, you build from the CLI. ~1ms sandboxed cold starts, encrypted secrets, durable state, webhooks in and out.">
 <meta property="og:url" content="https://rusted.sh/">
 <meta property="og:image" content="https://rusted.sh/assets/rusted-logo2.png">
 <meta name="twitter:card" content="summary">
@@ -36,18 +36,21 @@
         <div>
           <div class="mb-6 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-copper">
             <span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span>
-            QuickJS sandbox
+            ~1ms cold start
             <span class="text-copper/40">//</span>
-            written in Rust
+            sandboxed by construction
+            <span class="text-copper/40">//</span>
+            MCP + HTTP
           </div>
 
           <h1 class="max-w-2xl font-display text-5xl font-semibold leading-[0.96] tracking-[-0.06em] text-cream sm:text-7xl lg:text-[5.25rem]">
-            Give agents a runtime.<br><span class="text-ember">Not your machine.</span>
+            Ship a block of code.<br><span class="text-ember">Get a URL back.</span>
           </h1>
           <p class="mt-7 max-w-xl text-base leading-7 text-clay sm:text-lg">
-            rusted runs agent-written JavaScript inside a fresh, stoppable sandbox.
-            Execute code, publish an HTTP endpoint, or receive a callback — over
-            MCP, or from the CLI.
+            rusted turns a JavaScript function into a live HTTPS endpoint in under
+            a second — for you from the CLI, for your AI agent over MCP. Every call
+            boots a fresh sandbox in about a millisecond: an endpoint costs nothing
+            to create, nothing to keep, and nothing to throw away.
           </p>
 
           <div class="mt-9 flex flex-col items-start gap-4 sm:flex-row sm:items-center">
@@ -56,7 +59,7 @@
                  clicking it would serve a 405. It is an address to paste into an
                  MCP client, so present it as one. -->
             <p class="font-mono text-[11px] text-clay">
-              <span class="mr-2 text-ember">MCP</span><code class="select-all">https://rusted.sh/mcp</code>
+              <span class="mr-2 text-ember">give your agent</span><code class="select-all">https://rusted.sh/mcp</code>
             </p>
           </div>
         </div>
@@ -67,59 +70,103 @@
               <span class="h-2 w-2 rounded-full bg-blood/65"></span>
               <span class="h-2 w-2 rounded-full bg-copper/60"></span>
               <span class="h-2 w-2 rounded-full bg-sage/70"></span>
-              <span class="ml-2 font-mono text-[10px] text-clay">rusted.sh/session</span>
+              <span class="ml-2 font-mono text-[10px] text-clay">agent session · rusted.sh</span>
             </div>
             <span class="font-mono text-[9px] uppercase tracking-widest text-sage">isolated</span>
           </div>
 
           <div class="terminal-screen relative space-y-5 overflow-x-auto px-5 py-6 font-mono text-[11px] leading-relaxed sm:px-6 sm:py-7 sm:text-[12px]">
             <div class="terminal-line">
-              <p class="whitespace-nowrap text-cream"><span class="mr-2 text-ember">01:❯</span>mcp.call(<span class="text-copper">"execute"</span>, { code: <span class="text-copper">"export default () =&gt; { while (true) {} }"</span> })</p>
-              <p class="mt-1 whitespace-nowrap text-clay"><span class="mr-2 text-blood">ERR</span>wall deadline: interrupted <span class="text-clay/50">/ kind: limit / 1001.98ms</span></p>
+              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">agent</span><span class="mr-2 text-sage">⏺</span>execute <span class="text-clay">code:</span> <span class="text-copper">"export default async () =&gt; { …fetch stars… }"</span></p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span><span class="mr-2 text-sage">←</span>{ stars: 103204 } <span class="text-clay/50">/ 38ms</span></p>
             </div>
             <div class="terminal-line terminal-line-delay-1">
-              <p class="whitespace-nowrap text-cream"><span class="mr-2 text-ember">02:❯</span>mcp.call(<span class="text-copper">"execute"</span>, { code: <span class="text-copper">"export default () =&gt; fetch('http://169.254.169.254')"</span> })</p>
-              <p class="mt-1 whitespace-nowrap text-clay"><span class="mr-2 text-blood">ERR</span>169.254.169.254 resolves to a private address <span class="text-clay/50">/ kind: script</span></p>
+              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">agent</span><span class="mr-2 text-sage">⏺</span>deploy <span class="text-clay">name:</span> <span class="text-copper">"repo-stars"</span></p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span><span class="mr-2 text-sage">←</span>live: <span class="text-ember-soft">https://rusted.sh/f/repo-stars</span> <span class="text-clay/50">/ rev 1</span></p>
             </div>
             <div class="terminal-line terminal-line-delay-2 border-t border-copper/10 pt-5">
-              <p class="whitespace-nowrap text-cream"><span class="mr-2 text-ember">03:❯</span>mcp.call(<span class="text-copper">"deploy"</span>, { code, name: <span class="text-copper">"normalize"</span> })</p>
-              <p class="mt-1 whitespace-nowrap text-clay"><span class="mr-2 text-sage">OK</span><span class="text-ember-soft">https://rusted.sh/f/normalize</span> <span class="text-clay/50">/ POST / rev 1</span></p>
+              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">you</span><span class="mr-2 text-ember">$</span>curl -X POST https://rusted.sh/f/repo-stars</p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span>{ "stars": 103204 } <span class="text-clay/50">/ 2.3ms exec</span></p>
             </div>
-            <p class="terminal-line terminal-line-delay-3 caret text-cream"><span class="mr-2 text-ember">04:❯</span></p>
+            <p class="terminal-line terminal-line-delay-3 caret text-cream"><span class="terminal-actor"></span><span class="mr-2 text-ember">❯</span></p>
           </div>
         </div>
       </section>
 
       <div class="grid border-y border-copper/10 font-mono text-[10px] uppercase tracking-[0.13em] text-clay sm:grid-cols-3">
-        <div class="py-4 sm:border-r sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">host</span> Rust + QuickJS</div>
-        <div class="border-t border-copper/10 py-4 sm:border-r sm:border-t-0 sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">boot</span> ~1ms, cold every call</div>
+        <div class="py-4 sm:border-r sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">cold start</span> ~1ms, fresh sandbox</div>
+        <div class="border-t border-copper/10 py-4 sm:border-r sm:border-t-0 sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">deploy</span> code → URL in &lt; 1s</div>
         <div class="border-t border-copper/10 py-4 sm:border-t-0 sm:px-5"><span class="mr-2 text-copper">surface</span> MCP + HTTP</div>
       </div>
 
       <section class="grid gap-10 border-b border-copper/10 py-20 lg:grid-cols-[.72fr_1.28fr] lg:gap-20">
         <div>
-          <p class="eyebrow">MCP tools</p>
-          <h2 class="mt-4 max-w-sm font-display text-3xl font-semibold leading-tight tracking-[-0.04em] text-cream sm:text-4xl">Three primitives.<br>No control-panel maze.</h2>
+          <p class="eyebrow">MCP surface</p>
+          <h2 class="mt-4 max-w-sm font-display text-3xl font-semibold leading-tight tracking-[-0.04em] text-cream sm:text-4xl">Six tools. The agent already knows the seventh: JavaScript.</h2>
+          <p class="mt-5 max-w-sm text-sm leading-7 text-clay">
+            Most MCP servers hand a model dozens of tool schemas that burn context
+            before work starts. rusted hands it six — because a model that writes
+            code doesn't need a schema per capability, it needs somewhere safe to run.
+          </p>
         </div>
 
         <div class="divide-y divide-copper/10 border-y border-copper/10">
           <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
             <code class="font-mono text-xs text-ember">execute()</code>
-            <p class="text-sm leading-6 text-clay"><span class="text-cream">Run code once.</span> Return the answer and throw the sandbox away.</p>
+            <p class="text-sm leading-6 text-clay"><span class="text-cream">Try it.</span> Run a block of code once, get the answer, throw the sandbox away.</p>
           </div>
           <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
             <code class="font-mono text-xs text-ember">deploy()</code>
-            <p class="text-sm leading-6 text-clay"><span class="text-cream">Turn one file into a URL.</span> No container spec, build service, or server process.</p>
+            <p class="text-sm leading-6 text-clay"><span class="text-cream">Keep it.</span> The same block becomes a live URL in under a second — callable by you, by other agents, by anything that speaks HTTP.</p>
           </div>
           <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
             <code class="font-mono text-xs text-ember">inbox_create()</code>
-            <p class="text-sm leading-6 text-clay"><span class="text-cream">Give the agent an address.</span> Receive OAuth callbacks and webhooks, then expire it.</p>
+            <p class="text-sm leading-6 text-clay"><span class="text-cream">Be reachable.</span> Mint a throwaway URL the outside world can POST to — OAuth callbacks, webhooks, "tell me when it's done."</p>
           </div>
           <div class="primitive-row grid gap-2 py-5 sm:grid-cols-[8rem_1fr] sm:gap-5">
             <code class="font-mono text-xs text-clay/60">+ 3 more</code>
-            <p class="text-sm leading-6 text-clay/70"><code class="text-clay">inbox_read</code>, <code class="text-clay">list</code>, <code class="text-clay">delete</code> — housekeeping. Six tools is the whole API.</p>
+            <p class="text-sm leading-6 text-clay/70"><code class="text-clay">inbox_read</code>, <code class="text-clay">list</code>, <code class="text-clay">delete</code> — housekeeping. This is the whole API.</p>
           </div>
         </div>
+      </section>
+
+      <section class="border-b border-copper/10 py-20">
+        <div class="max-w-2xl">
+          <p class="eyebrow">not just glue code</p>
+          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Tools that persist, integrate, and keep secrets.</h2>
+          <p class="mt-5 text-sm leading-7 text-clay">
+            A deployed block isn't stateless glue unless you want it to be. Declare
+            a capability and the platform wires it in — nothing is on by default.
+          </p>
+        </div>
+
+        <div class="mt-10 grid gap-4 sm:grid-cols-2">
+          <div class="surface surface-interactive rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">config.secrets</p>
+            <h3 class="mt-2 text-sm font-semibold text-cream">Encrypted secrets</h3>
+            <p class="mt-2 text-sm leading-6 text-clay">Declare the names, store the values once. AES-256-GCM at rest, injected per invocation — the code never holds a credential.</p>
+          </div>
+          <div class="surface surface-interactive rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">context.state</p>
+            <h3 class="mt-2 text-sm font-semibold text-cream">Durable state</h3>
+            <p class="mt-2 text-sm leading-6 text-clay">Compare-and-swap storage that survives redeploys. Counters, sessions, queues — without standing up a database.</p>
+          </div>
+          <div class="surface surface-interactive rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">inbox + fetch</p>
+            <h3 class="mt-2 text-sm font-semibold text-cream">Webhooks in, webhooks out</h3>
+            <p class="mt-2 text-sm leading-6 text-clay">Inboxes receive from Stripe, GitHub, anyone; <code class="text-cream">fetch</code> calls out. An agent can build both halves of an integration and leave it running.</p>
+          </div>
+          <div class="surface surface-interactive rounded-lg p-5">
+            <p class="font-mono text-xs text-ember">/f/@stage/…</p>
+            <h3 class="mt-2 text-sm font-semibold text-cream">Environments</h3>
+            <p class="mt-2 text-sm leading-6 text-clay">Every environment is a full overlay — its own secrets, its own state. Try things without touching prod.</p>
+          </div>
+        </div>
+
+        <p class="mt-8 text-sm leading-7 text-clay">
+          One file, one URL, and everything a small backend needs —
+          <a href="/docs/mcp" class="text-ember-soft underline decoration-ember/30 underline-offset-4 hover:text-ember">MCP functions</a> included, OAuth and all.
+        </p>
       </section>
 
       <section class="grid gap-12 py-20 lg:grid-cols-2 lg:gap-24">
@@ -137,15 +184,18 @@
         </div>
 
         <div class="lg:pt-3">
-          <p class="eyebrow">The boundary is the product</p>
-          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Small on purpose.</h2>
+          <p class="eyebrow">why you can allow this</p>
+          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Autonomy is affordable when the blast radius is zero.</h2>
           <p class="mt-5 text-sm leading-7 text-clay">
-            rusted is JavaScript, fetch, and a return value. It has no shell to escape,
-            no filesystem to inspect, and no runaway loop the runtime cannot stop.
+            Letting an agent mint endpoints sounds reckless until you price the
+            failure: a fresh ~1ms sandbox per call, an uncatchable deadline, a heap
+            cap, no filesystem, no private network. The worst code an agent writes
+            costs one killed invocation — which is why nothing here needs review
+            before it runs.
           </p>
           <p class="mt-4 text-sm leading-7 text-clay">
-            Need Python, pip, or a whole OS? Use a microVM. Need to call an API,
-            reshape JSON, publish a webhook, or make a one-off tool? That is this.
+            Need Python or a whole OS? Use a microVM. Need code on the internet
+            <em>now</em>? That's this.
           </p>
         </div>
       </section>
@@ -195,6 +245,15 @@
     pointer-events: none;
     opacity: .12;
     background: repeating-linear-gradient(to bottom, transparent 0, transparent 3px, rgba(255,255,255,.04) 4px);
+  }
+  .terminal-actor {
+    display: inline-block;
+    width: 2.9rem;
+    margin-right: .5rem;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: #c47b45;
   }
   .terminal-line { animation: terminal-in 420ms both; }
   .terminal-line-delay-1 { animation-delay: 100ms; }
