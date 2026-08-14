@@ -420,6 +420,7 @@ pub(crate) async fn grant_for_function(
         caps: rusted_engine::Capabilities {
             state: fetched.state,
             objects: fetched.objects.keys().cloned().collect(),
+            auth: None,
         },
         function_name: Some(name.to_string()),
         objects: fetched.objects.clone(),
@@ -662,6 +663,10 @@ async fn call_function_sub(
     body: Bytes,
 ) -> Response {
     serve_function(state, name, Some(rest), method, query, headers, body).await
+}
+
+async fn mcp_protected_resource(State(state): Shared, Path(name): Path<String>) -> Response {
+    crate::mcp_auth::protected_resource(state, name).await
 }
 
 async fn serve_function(
@@ -941,13 +946,25 @@ async fn bearer_gate(
         None => false,
     };
     if !ok {
+        // Protected-resource metadata is how an unauthenticated OAuth client
+        // learns where to authorize — it is public by definition (RFC 9728),
+        // so the key gate cannot apply to it.
+        if request
+            .uri()
+            .path()
+            .starts_with("/.well-known/oauth-protected-resource/")
+        {
+            return next.run(request).await;
+        }
         // Publicness comes from the stored record, never the request; only
         // /f/<name> routes can carry it, so temp runs stay gated. A missing
         // function answers 401 like everything else — an unauthenticated
         // probe learns nothing about what exists.
         if let Some(name) = public_function_candidate(request.uri().path()) {
             if let Ok(Some(hit)) = state.store.fetch(name).await {
-                if hit.public {
+                let externally_authenticated_mcp = hit.kind == "mcp"
+                    && hit.mcp.as_ref().and_then(|meta| meta.get("auth")).is_some();
+                if hit.public || externally_authenticated_mcp {
                     return next.run(request).await;
                 }
             }
@@ -976,6 +993,10 @@ fn public_function_candidate(path: &str) -> Option<&str> {
 
 pub fn data_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource/f/{name}",
+            get(mcp_protected_resource),
+        )
         .route("/f/{name}", any(call_function_root))
         .route("/f/{name}/{*rest}", any(call_function_sub))
         .route("/r/{id}", post(call_run))
@@ -1146,7 +1167,11 @@ pub async fn deploy_function(
                     "an mcp function takes no methods or path",
                 ));
             }
-            let meta = json!({ "public": mcp_config.public, "tools": mcp_config.tools });
+            let meta = json!({
+                "public": mcp_config.public,
+                "auth": mcp_config.auth,
+                "tools": mcp_config.tools,
+            });
             let declared = crate::store::Declared::from_config(&config, mcp_config.public);
             let revision = state
                 .store

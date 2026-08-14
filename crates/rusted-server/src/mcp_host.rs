@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::Response;
 use rusted_engine::Outcome;
 use serde_json::{json, Value};
 
@@ -36,46 +36,26 @@ pub async fn serve(
 ) -> Response {
     let meta = fetched.mcp.clone().unwrap_or_else(|| json!({}));
 
-    // Auth comes before any parsing: a caller without the owner's key learns
-    // nothing about the body's validity, the tools, or the protocol.
-    let public = meta
-        .get("public")
-        .and_then(|p| p.as_bool())
-        .unwrap_or(false);
-    if !public {
-        let presented = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-        let caller = match presented {
-            Some(token) => crate::auth::user_for_key(&state, token).await,
-            None => None,
-        };
-        // Missing, invalid, and someone else's key all get the same answer: a
-        // wrong key must not learn whose function this is.
-        let authorized = matches!((caller, fetched.owner), (Some(c), Some(o)) if c == o);
-        if !authorized {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
-                Json(json!({ "error": {
-                    "code": "unauthorized",
-                    "message": "this mcp function requires its owner's API key (Authorization: Bearer rk_live_…)"
-                }})),
-            )
-                .into_response();
-        }
-    }
+    // Auth comes before parsing: an unauthorized caller learns nothing about
+    // the protocol or tool surface. OAuth returns sanitized identity only.
+    let caller_auth = match crate::mcp_auth::authorize(&state, &fetched, &name, &headers).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
 
     let state = &state;
     let fetched = &fetched;
     let meta = &meta;
     let name = name.as_str();
-    mcp_wire::respond(&body, &headers, move |msg| async move {
-        handle_message(meta, name, fetched.rev, msg, move |tool, args| async move {
-            call_tool(state, fetched, name, tool, args).await
-        })
-        .await
+    mcp_wire::respond(&body, &headers, move |msg| {
+        let message_auth = caller_auth.clone();
+        async move {
+            handle_message(meta, name, fetched.rev, msg, move |tool, args| {
+                let tool_auth = message_auth.clone();
+                async move { call_tool(state, fetched, name, tool, args, tool_auth).await }
+            })
+            .await
+        }
     })
     .await
 }
@@ -184,6 +164,7 @@ async fn call_tool(
     name: &str,
     tool: String,
     args: Value,
+    caller_auth: Option<Value>,
 ) -> Value {
     let (plan, limits) = plan_for_owner(state, fetched.owner).await;
     if let Err(retry_after) = state.rate_limiter.check(name, plan.limits.rate_per_min) {
@@ -195,13 +176,16 @@ async fn call_tool(
     // Model-visible on purpose: the secret and binding names are deploy
     // metadata, and naming what is missing is how the owner (or their agent)
     // fixes it.
-    let grant = match grant_for_function(state, name, fetched, &plan).await {
+    let mut grant = match grant_for_function(state, name, fetched, &plan).await {
         Ok(grant) => grant,
         Err((_code, detail)) => {
             record_refusal(state, name, fetched.owner, "error", 500, detail.clone());
             return mcp_wire::tool_result(detail, true);
         }
     };
+    if let Some(auth) = caller_auth {
+        grant.caps = grant.caps.with_auth(auth);
+    }
     let result = match execute_serialized(
         state,
         name,

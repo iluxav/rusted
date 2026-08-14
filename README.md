@@ -87,6 +87,31 @@ export const mcp = {
 
 You write handlers; the platform speaks the protocol. `initialize` and `tools/list` are answered from deploy-time metadata, arguments are validated against each tool's `inputSchema` before any sandbox boots, and a thrown error comes back as an `isError` tool result the model can read and retry — never a protocol error. Return a string for text content; any other value is sent as JSON text, and an object result is mirrored in `structuredContent` too (the spec types it as an object, so arrays and scalars travel as text only).
 
+Hosted end-user tools can delegate caller authentication to an external OAuth authorization server:
+
+```js
+export const mcp = {
+  name: "notes",
+  auth: {
+    type: "oauth",
+    issuer: "https://app.example.com",
+    audience: "https://rusted.sh/f/notes",
+    scopes: ["folders:read"],
+  },
+  tools: {
+    whoami: {
+      description: "Show the verified caller",
+      inputSchema: { type: "object" },
+      handler(_args, context) { return context.auth; },
+    },
+  },
+};
+```
+
+Rusted publishes protected-resource metadata, challenges unauthenticated clients, discovers the issuer's authorization-server metadata, and introspects each bearer token — authenticating the introspection call with vault-held client credentials (`introspectionClientIdSecret` / `introspectionClientSecretSecret`, HTTP Basic) that the function itself can never read. Issuer, exact audience, expiry, required scopes, and revocation status must all validate before a sandbox starts. Tool code receives only sanitized `context.auth` fields (`subject`, `clientId`, optional `connectionId`, and `scopes`); the bearer token is never exposed to JavaScript or forwarded downstream. OAuth issuers are HTTPS **origins** — no path, no trailing slash — which rules out path-style issuers (Keycloak realms, Azure tenants) and Auth0's trailing-slash issuer for now; the audience must match the token's `aud` exactly. Introspection cannot redirect, both discovery and introspection use the runtime's public-network SSRF guard, authorization-server metadata is cached briefly, rejected tokens are negatively cached by hash, and an unreachable issuer is a `503` — distinct from an invalid token's `401` challenge — so clients are never told to re-consent because a server blipped. Rejected tokens appear in the owner's logs as refusals.
+
+`public: true` and `auth` are mutually exclusive. Without either, the existing owner-key behavior remains unchanged. OAuth is authorization-server agnostic: the browser consent and identity system belong to the application publisher, not to Rusted.
+
 The declaration is checked at verify time, so a module that won't serve can't deploy: tool names are 1–64 chars of `a-z 0-9 - _` (`word_count`, not `wordCount`), at most 32 tools, and a tool entry is exactly `description`, `inputSchema`, and `handler` — spec extras like `title`, `annotations`, or `outputSchema` are rejected rather than silently dropped. An mcp module must not have a default export; tools are the interface.
 
 The push prints its deliverable — the block to paste into a client:
@@ -105,7 +130,7 @@ add to your MCP client config:
 }
 ```
 
-The endpoint demands an API key of the owner unless the file says `public: true`. A tool call is one invocation under your plan's limits; `initialize` and `tools/list` are free. A module exports `http` or `mcp`, never both — pushing one over the other switches the function's kind.
+The endpoint demands an API key of the owner unless the file says `public: true` or declares external `auth`. A tool call is one invocation under your plan's limits; `initialize` and `tools/list` are free. A module exports `http` or `mcp`, never both — pushing one over the other switches the function's kind.
 
 What an mcp function is not:
 

@@ -337,6 +337,39 @@ async fn tool_console_output_is_captured() {
 }
 
 #[tokio::test]
+async fn tools_receive_only_the_sanitized_auth_capability() {
+    let src = r#"export const mcp = { tools: { whoami: {
+        description: "d", inputSchema: { type: "object" },
+        handler(args, context) { return context.auth; } } } };"#;
+    let auth = serde_json::json!({
+        "subject": "github:42",
+        "clientId": "client-1",
+        "connectionId": "connection-1",
+        "scopes": ["folders:read"]
+    });
+    let r = QuickJsExecutor::new()
+        .execute_tool_with_services(
+            src,
+            "whoami",
+            &serde_json::json!({}),
+            &limits(1000, 0),
+            None,
+            None,
+            &Capabilities::none().with_auth(auth.clone()),
+        )
+        .await;
+    let body = match r.outcome {
+        Outcome::Success(body) => body,
+        other => panic!("expected auth response, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        auth
+    );
+    assert!(!body.contains("Bearer"));
+}
+
+#[tokio::test]
 async fn an_async_tool_can_fetch() {
     // The outbound policy refuses private addresses; seeing that refusal as the
     // tool's error proves fetch is wired through the policy, not absent.
@@ -502,6 +535,7 @@ export default async function handler(request, context) {
     let caps = Capabilities {
         state: true,
         objects: vec!["SHARES".to_string()],
+        auth: None,
     };
     let r = QuickJsExecutor::new()
         .execute_with_services(

@@ -143,8 +143,33 @@ pub struct McpConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub public: bool,
+    /// Caller authentication for this MCP resource. `public` and `auth` are
+    /// mutually exclusive; the server validates OAuth before tool discovery.
+    #[serde(default)]
+    pub auth: Option<McpAuthConfig>,
     #[serde(default)]
     pub tools: std::collections::BTreeMap<String, ToolConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpAuthConfig {
+    #[serde(rename_all = "camelCase")]
+    Oauth {
+        issuer: String,
+        audience: String,
+        #[serde(default)]
+        scopes: Vec<String>,
+        /// Vault names for RFC 7662 client authentication at the
+        /// introspection endpoint (HTTP Basic). Both or neither; resolved
+        /// host-side, never readable from JavaScript, and refused in
+        /// `config.secrets`. Absent means unauthenticated introspection,
+        /// for authorization servers that permit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        introspection_client_id_secret: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        introspection_client_secret_secret: Option<String>,
+    },
 }
 
 /// What a module declares itself to be. The export name is the declaration:
@@ -318,6 +343,8 @@ fn vet_runtime_config(config: &RuntimeConfig) -> Result<(), String> {
 pub struct Capabilities {
     pub state: bool,
     pub objects: Vec<String>,
+    /// Sanitized, host-verified MCP caller identity. Never accepts raw tokens.
+    pub auth: Option<serde_json::Value>,
 }
 
 impl Capabilities {
@@ -329,14 +356,21 @@ impl Capabilities {
         Self {
             state: config.wants_state(),
             objects: config.objects.keys().cloned().collect(),
+            auth: None,
         }
     }
 
+    pub fn with_auth(mut self, auth: serde_json::Value) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
     fn to_glue_json(&self) -> String {
-        if !self.state && self.objects.is_empty() {
+        if !self.state && self.objects.is_empty() && self.auth.is_none() {
             return String::new();
         }
-        serde_json::json!({ "state": self.state, "objects": self.objects }).to_string()
+        serde_json::json!({ "state": self.state, "objects": self.objects, "auth": self.auth })
+            .to_string()
     }
 }
 
@@ -466,7 +500,7 @@ const CAPS_PRELUDE: &str = r#"(() => {
     };
   };
   globalThis.__rustedCaps = (capsJson) => {
-    if (!capsJson) return { state: undefined, objects: undefined };
+    if (!capsJson) return { state: undefined, objects: undefined, auth: undefined };
     const caps = JSON.parse(capsJson);
     const parse = (raw) => {
       const r = JSON.parse(raw);
@@ -494,7 +528,7 @@ const CAPS_PRELUDE: &str = r#"(() => {
           list: (options) => objectOp(b, { op: "list", ...(options || {}) }),
         }]))
       : undefined;
-    return { state, objects };
+    return { state, objects, auth: caps.auth || undefined };
   };
 })()"#;
 
@@ -661,6 +695,7 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
     // the host — an undeclared capability is absent, not broken.
     state: caps.state,
     objects: caps.objects,
+    auth: caps.auth,
   };
   return Promise.resolve()
     .then(() => {
@@ -1983,6 +2018,59 @@ impl Executor for QuickJsExecutor {
             }
             let config = serde_json::from_value::<McpConfig>(probed.config)
                 .map_err(|e| format!("invalid mcp export: {e}"))?;
+            if config.public && config.auth.is_some() {
+                return Err("mcp.public and mcp.auth are mutually exclusive".to_string());
+            }
+            if let Some(McpAuthConfig::Oauth {
+                issuer,
+                audience,
+                scopes,
+                introspection_client_id_secret,
+                introspection_client_secret_secret,
+            }) = &config.auth
+            {
+                if !valid_issuer(issuer) || !valid_audience(audience) {
+                    return Err("mcp oauth issuer must be an https origin and audience an absolute https URL without fragments".to_string());
+                }
+                if scopes.len() > 16
+                    || scopes.iter().any(|scope| {
+                        scope.is_empty()
+                            || scope.len() > 128
+                            || scope.chars().any(char::is_whitespace)
+                    })
+                {
+                    return Err("mcp oauth scopes must be 1-128 non-whitespace characters (max 16)".to_string());
+                }
+                match (
+                    introspection_client_id_secret,
+                    introspection_client_secret_secret,
+                ) {
+                    (None, None) => {}
+                    (Some(id), Some(secret)) => {
+                        for name in [id, secret] {
+                            if !valid_secret_name(name) {
+                                return Err(format!(
+                                    "mcp oauth: {name:?} is not a valid secret name"
+                                ));
+                            }
+                            // Introspection credentials are used by the host
+                            // only; letting the module also read them via
+                            // context.env would defeat keeping them out of JS.
+                            if runtime_config.secrets.contains(name) {
+                                return Err(format!(
+                                    "mcp oauth: {name} is an introspection credential and cannot also be listed in config.secrets"
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(
+                            "mcp oauth: declare both introspection credential secrets or neither"
+                                .to_string(),
+                        )
+                    }
+                }
+            }
             if config.tools.is_empty() {
                 return Err("an mcp module must declare at least one tool".to_string());
             }
@@ -2009,6 +2097,57 @@ impl Executor for QuickJsExecutor {
             Ok(inspected(Surface::Mcp(config)))
         })
     }
+}
+
+fn valid_https_url(value: &str) -> bool {
+    value.len() <= 2048
+        && reqwest::Url::parse(value).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+        })
+}
+
+fn valid_https_origin(value: &str) -> bool {
+    valid_https_url(value)
+        && reqwest::Url::parse(value)
+            .is_ok_and(|url| url.path() == "/" && url.query().is_none() && !value.ends_with('/'))
+}
+
+/// Audiences are absolute https URLs — with the same loopback-http escape
+/// hatch as issuers, so a test server's own data URL can be the audience.
+fn valid_audience(value: &str) -> bool {
+    if valid_https_url(value) {
+        return true;
+    }
+    std::env::var("RUSTED_OAUTH_ALLOW_HTTP").ok().as_deref() == Some("1")
+        && value.len() <= 2048
+        && reqwest::Url::parse(value).is_ok_and(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+                && url.fragment().is_none()
+        })
+}
+
+/// Issuers are https origins — except under the test/local escape hatch,
+/// where a loopback http origin stands in for a mock authorization server
+/// (the serving side honors the same variable; see the server's mcp_auth).
+fn valid_issuer(value: &str) -> bool {
+    if valid_https_origin(value) {
+        return true;
+    }
+    std::env::var("RUSTED_OAUTH_ALLOW_HTTP").ok().as_deref() == Some("1")
+        && value.len() <= 2048
+        && reqwest::Url::parse(value).is_ok_and(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && !value.ends_with('/')
+        })
 }
 
 /// JSON.stringify an export inside the module's own context; functions are

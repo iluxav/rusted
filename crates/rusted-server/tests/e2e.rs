@@ -3796,3 +3796,236 @@ async fn console_delete_removes_the_function_and_only_for_its_owner() {
     let r = t.client.post(t.data("/f/condemned")).send().await.unwrap();
     assert_eq!(r.status(), 404);
 }
+
+// ------------------------------------------------------------- mcp oauth
+
+/// A minimal RFC 8414 + RFC 7662 authorization server on loopback, reachable
+/// only because RUSTED_OAUTH_ALLOW_HTTP relaxes the SSRF guard for tests.
+/// Counts introspection calls so caching behavior is observable.
+async fn mock_authorization_server(
+    audience: String,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::routing::{get, post};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app_issuer = issuer.clone();
+    let app_hits = hits.clone();
+    let app = axum::Router::new()
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get({
+                let issuer = app_issuer.clone();
+                move || {
+                    let issuer = issuer.clone();
+                    async move {
+                        axum::Json(json!({
+                            "issuer": issuer,
+                            "introspection_endpoint": format!("{issuer}/introspect"),
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/introspect",
+            post({
+                let issuer = app_issuer.clone();
+                let hits = app_hits.clone();
+                move |headers: axum::http::HeaderMap, body: String| {
+                    let issuer = issuer.clone();
+                    let hits = hits.clone();
+                    let audience = audience.clone();
+                    async move {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // RFC 7662 §2.1: the endpoint authenticates its callers.
+                        let authed = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .is_some_and(|v| v.starts_with("Basic "));
+                        if !authed {
+                            return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                        }
+                        let token = body
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("token="))
+                            .unwrap_or_default();
+                        if token != "good-token" {
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(json!({ "active": false })),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(json!({
+                                "active": true,
+                                "iss": issuer,
+                                "aud": audience,
+                                "exp": rusted_server::state::now_epoch() + 600,
+                                "scope": "folders:read",
+                                "sub": "github:42",
+                                "client_id": "renote-web",
+                                "connection_id": "conn-7",
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (issuer, hits)
+}
+
+#[tokio::test]
+async fn mcp_oauth_flows_end_to_end_from_challenge_to_context_auth() {
+    std::env::set_var("RUSTED_OAUTH_ALLOW_HTTP", "1");
+    enable_secret_store();
+    // require_auth on: proves oauth functions and the well-known metadata
+    // both pass the key gate without a rusted API key.
+    let database_url = rusted_server::testsupport::create_test_database().await;
+    let dir = tempfile::tempdir().unwrap();
+    let t = boot_full(dir, 1500, database_url, true).await;
+
+    let audience = t.data("/f/notes");
+    let (issuer, hits) = mock_authorization_server(audience.clone()).await;
+    let vault = rusted_server::secrets::SecretStore::new(t.pool.clone());
+    vault
+        .set(t.user_id, "AS_CLIENT_ID", "rusted-rp")
+        .await
+        .unwrap();
+    vault
+        .set(t.user_id, "AS_CLIENT_SECRET", "rp-secret")
+        .await
+        .unwrap();
+
+    let src = format!(
+        r#"export const mcp = {{
+  name: "notes",
+  auth: {{
+    type: "oauth",
+    issuer: "{issuer}",
+    audience: "{audience}",
+    scopes: ["folders:read"],
+    introspectionClientIdSecret: "AS_CLIENT_ID",
+    introspectionClientSecretSecret: "AS_CLIENT_SECRET",
+  }},
+  tools: {{ whoami: {{
+    description: "Show the verified caller",
+    inputSchema: {{ type: "object" }},
+    handler(_args, context) {{ return context.auth; }},
+  }} }},
+}};"#
+    );
+    let r = push(&t, "notes", &src).await;
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+
+    // 1. No token: a 401 challenge pointing at the resource metadata.
+    let r = t
+        .client
+        .post(t.data("/f/notes"))
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    let www = r
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert!(www.contains("resource_metadata="), "{www}");
+    let metadata_url = www.split('"').nth(1).unwrap().to_string();
+
+    // 2. The advertised metadata is fetchable with no credentials at all —
+    //    even though this server otherwise requires API keys.
+    let r = t.client.get(&metadata_url).send().await.unwrap();
+    assert_eq!(r.status(), 200, "discovery must pass the key gate");
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["authorization_servers"][0], json!(issuer), "{v}");
+    assert_eq!(v["resource"], json!(audience), "{v}");
+
+    // 3. A bad token: 401, and the issuer was asked exactly once — the
+    //    replay hits the negative cache.
+    for _ in 0..2 {
+        let r = t
+            .client
+            .post(t.data("/f/notes"))
+            .bearer_auth("bad-token")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a replayed bad token must not re-consult the issuer"
+    );
+
+    // 4. The good token reaches the tool, which sees only sanitized identity.
+    let r = t
+        .client
+        .post(t.data("/f/notes"))
+        .bearer_auth("good-token")
+        .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"whoami","arguments":{}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let identity: Value =
+        serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(identity["subject"], "github:42", "{identity}");
+    assert_eq!(identity["clientId"], "renote-web", "{identity}");
+    assert_eq!(identity["connectionId"], "conn-7", "{identity}");
+    assert_eq!(identity["scopes"], json!(["folders:read"]), "{identity}");
+    assert!(identity.get("token").is_none() && !v.to_string().contains("good-token"));
+
+    // 5. The owner's logs saw the rejected token.
+    let detail: Value = t
+        .admin_get("/api/functions/notes")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let outcomes: Vec<&str> = detail["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|inv| inv["outcome"].as_str())
+        .collect();
+    assert!(outcomes.contains(&"refused"), "{outcomes:?}");
+}
+
+#[tokio::test]
+async fn mcp_oauth_distinguishes_issuer_outage_from_bad_tokens() {
+    std::env::set_var("RUSTED_OAUTH_ALLOW_HTTP", "1");
+    let t = boot().await;
+    // An issuer nothing listens on: consulting it fails, and that must be a
+    // 503, not a challenge to re-authorize.
+    let src = r#"export const mcp = {
+  name: "orphaned",
+  auth: { type: "oauth", issuer: "http://127.0.0.1:9", audience: "https://api.example/f/orphaned" },
+  tools: { t: { description: "d", inputSchema: { type: "object" }, handler() { return 1; } } },
+};"#;
+    assert_eq!(push(&t, "orphaned", src).await.status(), 200);
+    let r = t
+        .client
+        .post(t.data("/f/orphaned"))
+        .bearer_auth("any-token")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "auth_unavailable", "{v}");
+}

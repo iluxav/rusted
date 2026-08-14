@@ -333,6 +333,46 @@ fn inspect_reads_mcp_surface() {
 }
 
 #[test]
+fn inspect_accepts_external_oauth_metadata() {
+    let src = MCP_MODULE.replace(
+        "name: \"my-mcp\",",
+        r#"name: "my-mcp",
+  auth: { type: "oauth", issuer: "https://app.example", audience: "https://api.example/f/notes", scopes: ["folders:read"] },"#,
+    );
+    match exec().inspect(&src).unwrap().surface {
+        Surface::Mcp(m) => assert!(matches!(
+            m.auth,
+            Some(rusted_engine::McpAuthConfig::Oauth { .. })
+        )),
+        s => panic!("expected mcp surface, got {s:?}"),
+    }
+}
+
+#[test]
+fn inspect_rejects_ambiguous_or_unsafe_mcp_auth() {
+    for (auth, expected) in [
+        (
+            r#"public: true, auth: { type: "oauth", issuer: "https://app.example", audience: "https://api.example/f/notes" },"#,
+            "mutually exclusive",
+        ),
+        (
+            r#"auth: { type: "oauth", issuer: "https://app.example/oauth", audience: "https://api.example/f/notes" },"#,
+            "issuer",
+        ),
+        (
+            r#"auth: { type: "oauth", issuer: "http://app.example", audience: "https://api.example/f/notes" },"#,
+            "https",
+        ),
+    ] {
+        let src = MCP_MODULE.replace("name: \"my-mcp\",", &format!("name: \"my-mcp\", {auth}"));
+        let err = exec()
+            .inspect(&src)
+            .expect_err("unsafe auth must fail inspection");
+        assert!(err.contains(expected), "{err}");
+    }
+}
+
+#[test]
 fn inspect_rejects_a_module_with_both_surfaces() {
     let src = format!("{MCP_MODULE}\nexport default async function h() {{}}");
     // mcp export + default handler is ambiguous

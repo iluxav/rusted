@@ -13,6 +13,7 @@ pub mod fnstate;
 pub mod inbox;
 pub mod local;
 pub mod localcaps;
+pub mod mcp_auth;
 pub mod mcp_host;
 pub mod mcp_wire;
 pub mod memory;

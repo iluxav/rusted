@@ -313,6 +313,26 @@ declare namespace Rusted {
     name?: string;
     /** Serve without a key. Default: a rusted API key of the owner is required. */
     public?: boolean;
+    /** Host-validated caller authentication. Mutually exclusive with `public`. */
+    auth?: {
+      type: "oauth";
+      /**
+       * An https origin, exactly as the server reports its own `issuer` —
+       * no path, no trailing slash. (Path-style issuers — Keycloak realms,
+       * Azure tenants — and Auth0's trailing-slash issuer are not supported.)
+       */
+      issuer: string;
+      audience: string;
+      scopes?: string[];
+      /**
+       * Vault names for RFC 7662 introspection client credentials, sent as
+       * HTTP Basic. Both or neither; never readable from JavaScript, and
+       * refused in `config.secrets`. Omit only if the issuer allows
+       * unauthenticated introspection.
+       */
+      introspectionClientIdSecret?: string;
+      introspectionClientSecretSecret?: string;
+    };
     tools: Record<string, Tool>;
   }
 
@@ -334,6 +354,13 @@ declare namespace Rusted {
 
   /** What a tool handler is lent. */
   interface ToolContext {
+    /** Sanitized identity verified by the MCP host; raw bearer tokens are never exposed. */
+    auth?: {
+      subject: string;
+      clientId: string;
+      connectionId?: string;
+      scopes: string[];
+    };
     /**
      * Present on a deployed function. Absent when running somewhere the
      * host lends no services — `rusted run` locally, for instance — so a
