@@ -3814,7 +3814,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-cli"
-version = "0.25.4"
+version = "0.25.5"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-engine"
-version = "0.25.4"
+version = "0.25.5"
 dependencies = [
  "base64 0.22.1",
  "cpu-time",
@@ -3849,7 +3849,7 @@ dependencies = [
 
 [[package]]
 name = "rusted-server"
-version = "0.25.4"
+version = "0.25.5"
 dependencies = [
  "aes-gcm",
  "askama",
