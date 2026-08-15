@@ -466,6 +466,54 @@ async fn adhoc_invoke_with_source_works() {
     assert_eq!(v["response"], "SHOUT");
 }
 
+/// HTTP functions are open by default, but an explicit `public: false` opts
+/// the URL out of the open data plane: callers must then present one of the
+/// owner's API keys — someone else's valid key is not enough.
+#[tokio::test]
+async fn explicit_public_false_gates_an_http_function() {
+    let t = boot().await;
+    let source = r#"export const http = { name: "gated", public: false, methods: ["POST"] };
+export default async function handler(request, context) {
+  return context.json({ ok: true });
+}"#;
+    let r = push(&t, "gated", source).await;
+    assert_eq!(r.status(), 200);
+
+    let keyless = t
+        .client
+        .post(t.data("/f/gated"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(keyless.status(), 401, "no key must be refused");
+
+    let stranger = rusted_server::testsupport::seed_user(&t.pool).await;
+    let (_, stranger_key) = rusted_server::auth::create_key(&t.pool, stranger, "stranger")
+        .await
+        .unwrap();
+    let wrong = t
+        .client
+        .post(t.data("/f/gated"))
+        .bearer_auth(&stranger_key)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401, "someone else's key must be refused");
+
+    let owner = t
+        .client
+        .post(t.data("/f/gated"))
+        .bearer_auth(&t.key)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), 200, "the owner's key must pass");
+    assert_eq!(owner.text().await.unwrap(), r#"{"ok":true}"#);
+}
+
 #[tokio::test]
 async fn invoke_reports_status_content_type_and_headers() {
     let t = boot().await;
@@ -927,9 +975,9 @@ async fn redeploying_an_mcp_function_as_http_switches_back() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["kind"], "http");
     assert!(v.get("tools").is_none(), "http detail must not carry tools");
-    // Since `public: true` became an http declaration too, the detail names
-    // the flag for every kind — a plain handler is simply not public.
-    assert_eq!(v["public"], json!(false));
+    // The flag is tri-state: a plain handler declares nothing, and the detail
+    // says so with null — false would claim it demands the owner's key.
+    assert_eq!(v["public"], json!(null));
 }
 
 #[tokio::test]

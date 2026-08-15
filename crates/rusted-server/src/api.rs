@@ -803,6 +803,42 @@ async fn serve_function(
         }
         return crate::mcp_host::serve(state, fetched, name, env, headers, body).await;
     }
+    // An explicit `public: false` opts this URL out of the open data plane:
+    // the caller must present one of the owner's keys — anyone's valid key is
+    // not enough on a multi-tenant server. Undeclared functions never enter
+    // this branch; they follow the server-wide gate.
+    if fetched.public == Some(false) {
+        let presented = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        let authorized = match presented {
+            Some(token) => {
+                let caller = crate::auth::user_for_key(&state, token).await;
+                caller.is_some() && caller == fetched.owner
+            }
+            None => false,
+        };
+        if !authorized {
+            record_refusal(
+                &state,
+                &name,
+                fetched.owner,
+                "refused",
+                401,
+                format!("{tag}refused: this function requires the owner's API key"),
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                Json(json!({ "error": {
+                    "code": "unauthorized",
+                    "message": "this function requires its owner's API key — Authorization: Bearer rk_live_…"
+                }})),
+            )
+                .into_response();
+        }
+    }
     let (source, trigger, owner) = (
         fetched.source.clone(),
         fetched.trigger.clone(),
@@ -1045,7 +1081,7 @@ async fn bearer_gate(
             if let Ok(Some(hit)) = state.store.fetch(name).await {
                 let externally_authenticated_mcp = hit.kind == "mcp"
                     && hit.mcp.as_ref().and_then(|meta| meta.get("auth")).is_some();
-                if hit.public || externally_authenticated_mcp {
+                if hit.public == Some(true) || externally_authenticated_mcp {
                     return next.run(request).await;
                 }
             }
@@ -1260,7 +1296,7 @@ pub async fn deploy_function(
                 "auth": mcp_config.auth,
                 "tools": mcp_config.tools,
             });
-            let declared = crate::store::Declared::from_config(&config, mcp_config.public);
+            let declared = crate::store::Declared::from_config(&config, Some(mcp_config.public));
             let revision = state
                 .store
                 .push_full(
@@ -1999,8 +2035,9 @@ fn mcp_tools() -> Value {
              function stays live until deleted. What the module exports decides what it \
              becomes:\
              \n\nA module with `export default async function handler(request, context)` \
-             (optionally `export const http = { name, methods, path }`) deploys as an \
-             HTTP endpoint anyone can call — no key required. Reach for this when \
+             (optionally `export const http = { name, methods, path, public }`) deploys \
+             as an HTTP endpoint anyone can call — no key required — unless it declares \
+             `public: false`, which demands the owner's API key on every call. Reach for this when \
              something needs an address rather than an answer: a webhook endpoint, an API \
              for someone else to call, or a callback URL for a service that will POST \
              back to you. The handler is written exactly as for `execute`, with the same \

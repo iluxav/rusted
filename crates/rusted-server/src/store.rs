@@ -58,10 +58,12 @@ pub struct FunctionRecord {
     /// at deploy time so invocation needs no re-inspection.
     #[serde(default)]
     pub secrets: Vec<String>,
-    /// Callable without an API key even under --require-auth. Captured at
-    /// deploy time from the module's own declaration, for either kind.
+    /// Caller authentication, captured at deploy time from the module's own
+    /// declaration. NULL is undeclared (http: follows the server; mcp never
+    /// stores NULL). TRUE: no key needed even under --require-auth. FALSE:
+    /// requires one of the owner's keys on every call, even on an open server.
     #[serde(default)]
-    pub public: bool,
+    pub public: Option<bool>,
     /// Whether the module declared `config.state = true`.
     #[serde(default)]
     pub state: bool,
@@ -84,13 +86,13 @@ fn default_published() -> bool {
 #[derive(Debug, Default, Clone)]
 pub struct Declared {
     pub secrets: Vec<String>,
-    pub public: bool,
+    pub public: Option<bool>,
     pub state: bool,
     pub objects: std::collections::BTreeMap<String, rusted_engine::ObjectBinding>,
 }
 
 impl Declared {
-    pub fn from_config(config: &rusted_engine::RuntimeConfig, public: bool) -> Declared {
+    pub fn from_config(config: &rusted_engine::RuntimeConfig, public: Option<bool>) -> Declared {
         Declared {
             secrets: config.secrets.clone(),
             public,
@@ -124,8 +126,8 @@ pub struct Fetched {
     pub mcp: Option<serde_json::Value>,
     /// Secret names to decrypt into `context.env` for every invocation.
     pub secrets: Vec<String>,
-    /// Whether the auth gate lets keyless callers through to this function.
-    pub public: bool,
+    /// Tri-state caller authentication — see [`FunctionRecord::public`].
+    pub public: Option<bool>,
     /// Whether `context.state` was declared.
     pub state: bool,
     /// Whether the owner has this function on the air.

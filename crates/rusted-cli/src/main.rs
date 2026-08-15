@@ -531,8 +531,15 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                             .join(",")
                     })
                     .unwrap_or_default();
+                // Only an explicit `public: false` prints the auth line —
+                // undeclared functions follow the server and say nothing.
+                let gated = if v["public"] == json!(false) {
+                    "\ncallers need your API key (public: false) — Authorization: Bearer <key>"
+                } else {
+                    ""
+                };
                 format!(
-                    "pushed {} revision {} ({} bytes)\nbudget: {}ms wall · {}MB memory · {}KB request/response · concurrency {}\n{} {}",
+                    "pushed {} revision {} ({} bytes)\nbudget: {}ms wall · {}MB memory · {}KB request/response · concurrency {}\n{} {}{gated}",
                     v["name"].as_str().unwrap_or(""),
                     v["revision"],
                     v["size_bytes"],
