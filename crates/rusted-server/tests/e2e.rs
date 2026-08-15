@@ -1720,6 +1720,122 @@ async fn every_console_page_renders() {
     }
 }
 
+/// The security property of the admin section: to a signed-in account without
+/// the flag, every admin surface — pages and the toggle endpoint — is a 404,
+/// indistinguishable from not existing.
+#[tokio::test]
+async fn admin_section_is_invisible_without_the_flag() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    for path in [
+        "/console/admin",
+        "/console/admin/users",
+        "/console/admin/functions",
+    ] {
+        let r = t
+            .client
+            .get(format!("http://{}{path}", t.handle.admin_addr))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{path} must 404 for non-admins");
+    }
+    let r = t
+        .client
+        .post(format!(
+            "http://{}/console/admin/users/{}/admin",
+            t.handle.admin_addr, t.user_id
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "the toggle must 404 for non-admins");
+}
+
+#[tokio::test]
+async fn admin_pages_render_and_toggle_works() {
+    let t = boot().await;
+    push(&t, "greet", GREET).await;
+    sqlx::query("UPDATE users SET admin = TRUE WHERE id = $1")
+        .bind(t.user_id)
+        .execute(&t.pool)
+        .await
+        .unwrap();
+    // A fresh session so the auth cache never held the pre-flag user.
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    for path in [
+        "/console/admin",
+        "/console/admin/users",
+        "/console/admin/users?q=test&sort=lastlogin&dir=asc&page=2",
+        "/console/admin/functions",
+        "/console/admin/functions?q=gre&sort=created&dir=asc",
+    ] {
+        let r = t
+            .client
+            .get(format!("http://{}{path}", t.handle.admin_addr))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{path} should render for an admin");
+        assert!(!r.text().await.unwrap().is_empty());
+    }
+
+    // Granting and revoking another account round-trips through the database.
+    let other = rusted_server::testsupport::seed_user(&t.pool).await;
+    let toggle = format!(
+        "http://{}/console/admin/users/{other}/admin",
+        t.handle.admin_addr
+    );
+    for expected in [true, false] {
+        let r = t
+            .client
+            .post(&toggle)
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let flag: bool = sqlx::query_scalar("SELECT admin FROM users WHERE id = $1")
+            .bind(other)
+            .fetch_one(&t.pool)
+            .await
+            .unwrap();
+        assert_eq!(flag, expected);
+    }
+
+    // Self-demotion is refused: the last admin must not lock themselves out.
+    let r = t
+        .client
+        .post(format!(
+            "http://{}/console/admin/users/{}/admin",
+            t.handle.admin_addr, t.user_id
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .text()
+        .await
+        .unwrap()
+        .contains("cannot change your own admin flag"));
+    let still_admin: bool = sqlx::query_scalar("SELECT admin FROM users WHERE id = $1")
+        .bind(t.user_id)
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    assert!(still_admin);
+}
+
 /// The lambda page for an mcp function swaps the http affordances for the
 /// tools table, the client-config block, and the tools/call test template.
 #[tokio::test]
