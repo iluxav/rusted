@@ -36,6 +36,7 @@ pub struct User {
     pub login: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    pub email: Option<String>,
 }
 
 struct KeyEntry {
@@ -232,7 +233,7 @@ pub async fn resolve_session(state: &AppState, token: &str) -> Option<User> {
         }
     }
     let user = sqlx::query(
-        "SELECT u.id, u.login, u.name, u.avatar_url
+        "SELECT u.id, u.login, u.name, u.avatar_url, u.email
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = $1 AND s.expires_at > now()",
     )
@@ -246,6 +247,7 @@ pub async fn resolve_session(state: &AppState, token: &str) -> Option<User> {
         login: row.get("login"),
         name: row.get("name"),
         avatar_url: row.get("avatar_url"),
+        email: row.get("email"),
     });
     state.auth.sessions.lock().unwrap().insert(
         token_hash,
@@ -277,17 +279,22 @@ pub async fn upsert_github_user(
     login: &str,
     name: Option<&str>,
     avatar_url: Option<&str>,
+    email: Option<&str>,
 ) -> sqlx::Result<Uuid> {
+    // COALESCE: a login where the email fetch failed must not erase an
+    // address we already know.
     let id: Uuid = sqlx::query(
-        "INSERT INTO users (github_id, login, name, avatar_url) VALUES ($1, $2, $3, $4)
+        "INSERT INTO users (github_id, login, name, avatar_url, email) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (github_id) DO UPDATE
-             SET login = $2, name = $3, avatar_url = $4
+             SET login = $2, name = $3, avatar_url = $4,
+                 email = COALESCE($5, users.email)
          RETURNING id",
     )
     .bind(github_id)
     .bind(login)
     .bind(name)
     .bind(avatar_url)
+    .bind(email)
     .fetch_one(pool)
     .await?
     .get("id");

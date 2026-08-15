@@ -136,7 +136,7 @@ async fn auth_github(State(state): State<WebState>) -> Response {
     };
     let csrf = auth::random_token(16);
     let authorize = format!(
-        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user&state={csrf}",
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=read:user%20user:email&state={csrf}",
         oauth.client_id, oauth.callback_url,
     );
     (
@@ -167,6 +167,28 @@ struct GithubUser {
     login: String,
     name: Option<String>,
     avatar_url: Option<String>,
+    /// Only set when the profile email is public; the real source is
+    /// /user/emails, which the user:email scope unlocks.
+    email: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GithubEmail {
+    email: String,
+    primary: bool,
+    verified: bool,
+}
+
+/// The address GitHub considers the account's own: primary and verified
+/// first, any verified one second, nothing otherwise — an unverified string
+/// is a claim, not an address.
+fn pick_github_email(mut emails: Vec<GithubEmail>) -> Option<String> {
+    emails.retain(|e| e.verified);
+    emails
+        .iter()
+        .position(|e| e.primary)
+        .map(|i| emails.swap_remove(i).email)
+        .or_else(|| emails.into_iter().next().map(|e| e.email))
 }
 
 async fn auth_github_callback(
@@ -219,6 +241,30 @@ async fn auth_github_callback(
         },
         Err(e) => return login_error(&format!("github profile fetch failed: {e}")),
     };
+    // The profile's public email is often absent; /user/emails has the real
+    // list. Best-effort — a login must not fail because this endpoint did.
+    let email = match gh_user.email.clone() {
+        Some(public) => Some(public),
+        None => {
+            let response = state
+                .0
+                .http
+                .get("https://api.github.com/user/emails")
+                .bearer_auth(&access_token)
+                .header("user-agent", "rusted-console")
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+            match response {
+                Ok(r) => r
+                    .json::<Vec<GithubEmail>>()
+                    .await
+                    .ok()
+                    .and_then(pick_github_email),
+                Err(_) => None,
+            }
+        }
+    };
     let pool = &state.0.app.pool;
     let user_id = match auth::upsert_github_user(
         pool,
@@ -226,6 +272,7 @@ async fn auth_github_callback(
         &gh_user.login,
         gh_user.name.as_deref(),
         gh_user.avatar_url.as_deref(),
+        email.as_deref(),
     )
     .await
     {
@@ -1995,6 +2042,35 @@ mod login_response_tests {
             "{cookies:?}"
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+}
+
+#[cfg(test)]
+mod github_email_tests {
+    use super::{pick_github_email, GithubEmail};
+
+    fn e(email: &str, primary: bool, verified: bool) -> GithubEmail {
+        GithubEmail {
+            email: email.into(),
+            primary,
+            verified,
+        }
+    }
+
+    #[test]
+    fn primary_verified_wins_and_unverified_never_surfaces() {
+        assert_eq!(
+            pick_github_email(vec![e("a@x.io", false, true), e("b@x.io", true, true)]),
+            Some("b@x.io".into())
+        );
+        // An unverified primary is a claim, not an address: fall back to the
+        // verified one.
+        assert_eq!(
+            pick_github_email(vec![e("a@x.io", false, true), e("b@x.io", true, false)]),
+            Some("a@x.io".into())
+        );
+        assert_eq!(pick_github_email(vec![e("b@x.io", true, false)]), None);
+        assert_eq!(pick_github_email(vec![]), None);
     }
 }
 
