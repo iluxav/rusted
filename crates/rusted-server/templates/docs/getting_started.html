@@ -12,13 +12,14 @@
 <h2>3 · Create a function</h2>
 <pre><code>rusted new hello --js
 cd hello</code></pre>
-<p>That scaffolds a ready-to-run directory. Open <code>index.js</code> and make it public — meaning callable without an API key even on servers that require one, which is what an endpoint you hand to the world (or a webhook sender) wants:</p>
-<pre><code>export const http = { name: "hello", methods: ["POST"], public: true };
+<p>That scaffolds a ready-to-run directory. <code>index.js</code> is a complete function already:</p>
+<pre><code>export const http = { name: "hello", methods: ["POST"] };
 
 export default async function handler(request, context) {
-  const { name } = await request.json();
+  const { name } = await request.json().catch(() => ({}));
   return context.json({ message: `Hello, ${name ?? "world"}` });
 }</code></pre>
+<p>The optional <code>access</code> field in the <code>http</code> export decides who may call the URL. Undeclared, it follows the server — on rusted.sh that means open to anyone. <code>access: "private"</code> demands one of your API keys on every call, even here; <code>access: "public"</code> keeps it keyless even on a self-hosted server running <code>--require-auth</code> — what a webhook target or OAuth callback needs, since the third party calling it cannot present your key.</p>
 <p>Develop it locally first if you like — <code>rusted run index.js</code> serves it at <code>http://127.0.0.1:7400/f/hello</code> with hot reload, no server or database needed. When it works:</p>
 <pre><code>rusted push index.js
 <span class="out">→ deployed hello (rev 1) at https://rusted.sh/f/hello</span></code></pre>
@@ -26,6 +27,6 @@ export default async function handler(request, context) {
 <h2>4 · Call it</h2>
 <pre><code>curl -X POST https://rusted.sh/f/hello -d '{"name":"Ada"}'
 <span class="out">→ {"message":"Hello, Ada"}</span></code></pre>
-<p>That URL is live for anyone, rate-limited and sandboxed under your plan. Every invocation is recorded — <code>rusted logs hello</code> shows outcomes, timings, and your <code>console.log</code> output; the <a href="/console">console dashboard</a> shows the aggregates.</p>
+<p>That URL is live for anyone (unless the function declares <code>access: "private"</code>), rate-limited and sandboxed under your plan. Every invocation is recorded — <code>rusted logs hello</code> shows outcomes, timings, and your <code>console.log</code> output; the <a href="/console">console dashboard</a> shows the aggregates.</p>
 
 <div class="callout"><p><strong>Where to next:</strong> the <a href="/docs/cli">CLI reference</a> for the full command set, <a href="/docs/security">security</a> for secrets and environments, <a href="/docs/mcp">MCP</a> to serve tools to AI models, or <a href="/docs/ai-agents">AI agents</a> if a model is the one doing the building.</p></div>

@@ -19,7 +19,7 @@ export RUSTED_ADMIN=http://127.0.0.1:7412</code></pre>
 <h2>Deploying</h2>
 <table>
   <tr><th>command</th><th>what it does</th></tr>
-  <tr><td><code>rusted push &lt;file&gt;</code></td><td>Bundle and deploy. The file's own <code>http</code>/<code>mcp</code> export supplies name, methods, and route; <code>--name</code>, <code>--method</code>, <code>--path</code> override it.</td></tr>
+  <tr><td><code>rusted push &lt;file&gt;</code></td><td>Bundle and deploy. The file's own <code>http</code>/<code>mcp</code> export supplies name, methods, route, and <code>access</code> (<code>"public"</code> or <code>"private"</code> — see <a href="/docs/security">security</a>); <code>--name</code>, <code>--method</code>, <code>--path</code> override the first three.</td></tr>
   <tr><td><code>rusted preview &lt;file&gt;</code></td><td>A temporary endpoint that expires on its own (<code>--ttl</code> seconds, default 120).</td></tr>
   <tr><td><code>rusted list</code></td><td>Your functions and live temporary runs.</td></tr>
   <tr><td><code>rusted pull &lt;name&gt;</code></td><td>Print (or <code>-o</code> save) the deployed source.</td></tr>
@@ -39,6 +39,6 @@ export RUSTED_ADMIN=http://127.0.0.1:7412</code></pre>
 <h2>Self-hosting</h2>
 <pre><code>make db          <span class="cmt"># postgres via docker compose</span>
 rusted serve     <span class="cmt"># functions on :7411, admin API + console on :7412</span></code></pre>
-<p>Flags worth knowing: <code>--require-auth</code> demands an API key on every function endpoint (functions declaring <code>public: true</code> and OAuth-protected MCP functions are exempt), <code>--debug</code> prints per-invocation detail to stdout, and <code>PUBLIC_URL</code> sets the origin the console advertises. Migrations run at boot.</p>
+<p>Flags worth knowing: <code>--require-auth</code> demands an API key on every function endpoint (functions declaring <code>access: "public"</code> and OAuth-protected MCP functions are exempt), <code>--debug</code> prints per-invocation detail to stdout, and <code>PUBLIC_URL</code> sets the origin the console advertises. Migrations run at boot.</p>
 
 <div class="callout"><p>Deployed function URLs look like <code>https://rusted.sh/f/&lt;name&gt;</code> — and <code>https://rusted.sh/f/@stage/&lt;name&gt;</code> selects an <a href="/docs/security">environment</a>.</p></div>
