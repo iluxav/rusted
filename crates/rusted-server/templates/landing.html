@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}rusted — push a function, get a URL back{% endblock %}
-{% block description %}rusted turns a JavaScript function into a live HTTPS endpoint in under a second — agents build tools over MCP, you build from the CLI. ~1ms sandboxed cold starts, encrypted secrets, durable state, webhooks in and out.{% endblock %}
+{% block title %}rusted — a capability runtime for AI agents{% endblock %}
+{% block description %}When an AI agent needs a tool, rusted lets it write JavaScript, try it in a fresh sandbox, and keep what works as a live HTTP endpoint or MCP server.{% endblock %}
 {% block head %}
 <link rel="canonical" href="https://rusted.sh/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="rusted">
-<meta property="og:title" content="rusted — push a function, get a URL back">
-<meta property="og:description" content="rusted turns a JavaScript function into a live HTTPS endpoint in under a second — agents build tools over MCP, you build from the CLI. ~1ms sandboxed cold starts, encrypted secrets, durable state, webhooks in and out.">
+<meta property="og:title" content="rusted — a capability runtime for AI agents">
+<meta property="og:description" content="When an AI agent needs a tool, rusted lets it write JavaScript, try it in a fresh sandbox, and keep what works as a live HTTP endpoint or MCP server.">
 <meta property="og:url" content="https://rusted.sh/">
 <meta property="og:image" content="https://rusted.sh/assets/rusted-logo2.png">
 <meta name="twitter:card" content="summary">
@@ -36,34 +36,26 @@
     <main class="flex-1 pb-24">
       <section class="grid items-center gap-14 pb-16 pt-16 sm:pt-24 lg:grid-cols-[1.02fr_.98fr] lg:gap-16 lg:pb-24 lg:pt-28">
         <div>
-          <div class="mb-6 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-copper">
+          <div class="mb-6 flex items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-copper">
             <span class="status-dot h-1.5 w-1.5 rounded-full bg-sage"></span>
-            ~1ms cold start
-            <span class="text-copper/40">//</span>
-            sandboxed by construction
-            <span class="text-copper/40">//</span>
-            MCP + HTTP
+            A capability runtime for AI agents
           </div>
 
           <h1 class="max-w-2xl font-display text-5xl font-semibold leading-[0.96] tracking-[-0.06em] text-cream sm:text-7xl lg:text-[5.25rem]">
-            Push a function.<br><span class="text-ember">Get a URL back.</span>
+            When your agent needs a tool, <span class="text-ember">it builds one.</span>
           </h1>
           <p class="mt-7 max-w-xl text-base leading-7 text-clay sm:text-lg">
-            rusted turns a JavaScript/TS function into a live HTTPS endpoint in
-            under a second — from your CLI, or by your AI agent over MCP.
-            Every call boots a fresh sandbox in about a millisecond.
-            Create, push, execute, and throw away at zero cost.
+            Connect rusted once. Your agent can write JavaScript, run it in a
+            fresh sandbox, and keep what works as a live HTTP endpoint or MCP
+            server — in under a second.
           </p>
 
           <div class="mt-9 flex flex-col items-start gap-4 sm:flex-row sm:items-center">
-            <a href="/login" class="btn-primary px-5 py-3 text-sm">Open the console <span aria-hidden="true">→</span></a>
-            <!-- Not a link: this endpoint only answers JSON-RPC over POST, so
-                 clicking it would serve a 405. It is an address to paste into an
-                 MCP client, so present it as one. -->
-            <p class="font-mono text-[11px] text-clay">
-              <span class="mr-2 text-ember">give your agent</span><code class="select-all">https://rusted.sh/mcp</code>
-            </p>
+            <a href="#connect" class="btn-primary px-5 py-3 text-sm">Connect your agent <span aria-hidden="true">→</span></a>
+            <a href="#how-it-works" class="font-mono text-[11px] text-clay transition-colors hover:text-cream">See how it works <span class="text-ember" aria-hidden="true">↓</span></a>
           </div>
+
+          <p class="mt-5 font-mono text-[10px] uppercase tracking-[0.12em] text-clay/70">One connection <span class="ml-2 mr-2 text-copper/40">//</span> six primitives <span class="ml-2 mr-2 text-copper/40">//</span> tools on demand</p>
         </div>
 
         <div class="terminal surface relative min-w-0 overflow-hidden rounded-xl shadow-[0_30px_100px_-35px_rgba(255,107,36,0.32)]">
@@ -72,25 +64,27 @@
               <span class="h-2 w-2 rounded-full bg-blood/65"></span>
               <span class="h-2 w-2 rounded-full bg-copper/60"></span>
               <span class="h-2 w-2 rounded-full bg-sage/70"></span>
-              <span class="ml-2 font-mono text-[10px] text-clay">agent session · rusted.sh</span>
+              <span class="ml-2 font-mono text-[10px] text-clay">capability build · rusted.sh</span>
             </div>
-            <span class="font-mono text-[9px] uppercase tracking-widest text-sage">isolated</span>
+            <span class="font-mono text-[9px] uppercase tracking-widest text-sage">try → keep</span>
           </div>
 
           <div class="terminal-screen relative space-y-5 overflow-x-auto px-5 py-6 font-mono text-[11px] leading-relaxed sm:px-6 sm:py-7 sm:text-[12px]">
             <div class="terminal-line">
-              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">agent</span><span class="mr-2 text-sage">⏺</span>execute <span class="text-clay">code:</span> <span class="text-copper">"export default async () =&gt; { …fetch stars… }"</span></p>
-              <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span><span class="mr-2 text-sage">←</span>{ stars: 103204 } <span class="text-clay/50">/ 38ms</span></p>
+              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">need</span><span class="mr-2 text-copper">→</span>Track a repo's stars for release notes</p>
             </div>
             <div class="terminal-line terminal-line-delay-1">
+              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">agent</span><span class="mr-2 text-sage">⏺</span>execute <span class="text-clay">code:</span> <span class="text-copper">"export default async ({ repo }) =&gt; { … }"</span></p>
+              <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span><span class="mr-2 text-sage">←</span>{ stars: 103204 } <span class="text-clay/50">/ 38ms</span></p>
+            </div>
+            <div class="terminal-line terminal-line-delay-2">
               <p class="whitespace-nowrap text-cream"><span class="terminal-actor">agent</span><span class="mr-2 text-sage">⏺</span>deploy <span class="text-clay">name:</span> <span class="text-copper">"repo-stars"</span></p>
               <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span><span class="mr-2 text-sage">←</span>live: <span class="text-ember-soft">https://rusted.sh/f/repo-stars</span> <span class="text-clay/50">/ rev 1</span></p>
             </div>
-            <div class="terminal-line terminal-line-delay-2 border-t border-copper/10 pt-5">
-              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">you</span><span class="mr-2 text-ember">$</span>curl -X POST https://rusted.sh/f/repo-stars</p>
+            <div class="terminal-line terminal-line-delay-3 border-t border-copper/10 pt-5">
+              <p class="whitespace-nowrap text-cream"><span class="terminal-actor">later</span><span class="mr-2 text-ember">$</span>curl -X POST https://rusted.sh/f/repo-stars</p>
               <p class="mt-1 whitespace-nowrap text-clay"><span class="terminal-actor"></span>{ "stars": 103204 } <span class="text-clay/50">/ 2.3ms exec</span></p>
             </div>
-            <p class="terminal-line terminal-line-delay-3 caret text-cream"><span class="terminal-actor"></span><span class="mr-2 text-ember">❯</span></p>
           </div>
         </div>
       </section>
@@ -101,13 +95,14 @@
         <p class="font-mono text-[10px] text-clay/70">Run locally. Point at rusted.sh when you are ready.</p>
       </div>
 
-      <section class="pb-16 lg:pb-20">
+      <section id="connect" class="pb-16 lg:pb-20">
         <div class="mb-8 text-center">
-          <p class="eyebrow">connect an agent</p>
-          <h2 class="mt-3 font-display text-2xl font-semibold tracking-[-0.03em] text-cream sm:text-3xl">One endpoint. OAuth or a key.</h2>
+          <p class="eyebrow">connect rusted once</p>
+          <h2 class="mt-3 font-display text-2xl font-semibold tracking-[-0.03em] text-cream sm:text-3xl">One endpoint. Six primitives. Tools on demand.</h2>
           <p class="mx-auto mt-3 max-w-xl text-sm leading-6 text-clay">
-            Hosted assistants sign in with OAuth in the browser — nothing to paste.
-            CLIs and IDEs can do the same, or send an API key as a header.
+            Give your agent a small surface for writing, testing, deploying, and
+            removing the capabilities it needs. Use OAuth in hosted assistants,
+            or an API key from a CLI or IDE.
           </p>
         </div>
         <div class="mx-auto flex max-w-3xl flex-col gap-4">
@@ -143,17 +138,18 @@
       <div class="grid border-y border-copper/10 font-mono text-[10px] uppercase tracking-[0.13em] text-clay sm:grid-cols-3">
         <div class="py-4 sm:border-r sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">cold start</span> ~1ms, fresh sandbox</div>
         <div class="border-t border-copper/10 py-4 sm:border-r sm:border-t-0 sm:border-copper/10 sm:px-5"><span class="mr-2 text-copper">deploy</span> code → URL in &lt; 1s</div>
-        <div class="border-t border-copper/10 py-4 sm:border-t-0 sm:px-5"><span class="mr-2 text-copper">surface</span> MCP + HTTP</div>
+        <div class="border-t border-copper/10 py-4 sm:border-t-0 sm:px-5"><span class="mr-2 text-copper">toolbox</span> one endpoint, six primitives</div>
       </div>
 
-      <section class="grid gap-10 border-b border-copper/10 py-20 lg:grid-cols-[.72fr_1.28fr] lg:gap-20">
+      <section id="how-it-works" class="grid gap-10 border-b border-copper/10 py-20 lg:grid-cols-[.72fr_1.28fr] lg:gap-20">
         <div>
-          <p class="eyebrow">MCP surface</p>
-          <h2 class="mt-4 max-w-sm font-display text-3xl font-semibold leading-tight tracking-[-0.04em] text-cream sm:text-4xl">Six tools. The agent already knows the seventh: JavaScript.</h2>
+          <p class="eyebrow">how it works</p>
+          <h2 class="mt-4 max-w-sm font-display text-3xl font-semibold leading-tight tracking-[-0.04em] text-cream sm:text-4xl">Six primitives. JavaScript supplies the rest.</h2>
           <p class="mt-5 max-w-sm text-sm leading-7 text-clay">
-            Most MCP servers hand a model dozens of tool schemas that burn context
-            before work starts. rusted hands it six — because a model that writes
-            code doesn't need a schema per capability, it needs somewhere safe to run.
+            A fixed tool catalog only covers what someone predicted in advance.
+            rusted gives an agent a compact execution surface instead. When a
+            capability is missing, the agent can write it, try it, and decide
+            whether it should persist.
           </p>
         </div>
 
@@ -179,11 +175,12 @@
 
       <section class="border-b border-copper/10 py-20">
         <div class="max-w-2xl">
-          <p class="eyebrow">not just glue code</p>
-          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Tools that persist, integrate, and keep secrets.</h2>
+          <p class="eyebrow">after the conversation</p>
+          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Tools that outlive the conversation.</h2>
           <p class="mt-5 text-sm leading-7 text-clay">
-            A deployed block isn't stateless glue unless you want it to be. Declare
-            a capability and the platform wires it in — nothing is on by default.
+            Keep what works. A deployed function stays addressable and gains only
+            the capabilities you declare — secrets, state, object storage, or an
+            inbox. Nothing is on by default.
           </p>
         </div>
 
@@ -210,9 +207,10 @@
           </div>
         </div>
 
-        <p class="mt-8 text-sm leading-7 text-clay">
-          One file, one URL, and everything a small backend needs —
-          <a href="/docs/mcp" class="text-ember-soft underline decoration-ember/30 underline-offset-4 hover:text-ember">MCP functions</a> included, OAuth and all.
+        <p class="mt-8 max-w-2xl text-sm leading-7 text-clay">
+          Use HTTP when a URL is enough. When a capability needs a set of tools,
+          deploy a complete <a href="/docs/mcp" class="text-ember-soft underline decoration-ember/30 underline-offset-4 hover:text-ember">MCP server</a>
+          from the same runtime. rusted is the factory, not the catalog.
         </p>
       </section>
 
@@ -231,19 +229,28 @@
         </div>
 
         <div class="lg:pt-3">
-          <p class="eyebrow">why you can allow this</p>
-          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Autonomy is affordable when the blast radius is zero.</h2>
+          <p class="eyebrow">bounded autonomy</p>
+          <h2 class="mt-4 font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Capabilities are explicit. Limits are hard.</h2>
           <p class="mt-5 text-sm leading-7 text-clay">
-            Letting an agent mint endpoints sounds reckless until you price the
-            failure: a fresh ~1ms sandbox per call, an uncatchable deadline, a heap
-            cap, no filesystem, no private network. The worst code an agent writes
-            costs one killed invocation — which is why nothing here needs review
-            before it runs.
+            Every invocation starts in a fresh sandbox with an uncatchable deadline,
+            a heap cap, no filesystem, and no private network. Secrets, state, and
+            object access appear only when declared. You choose who can connect
+            and deploy; rusted keeps each function's authority visible and bounded.
           </p>
           <p class="mt-4 text-sm leading-7 text-clay">
-            Need Python or a whole OS? Use a microVM. Need code on the internet
-            <em>now</em>? That's this.
+            Need Python or a whole OS? Use a microVM. Need a small capability an
+            agent can create, keep, and remove? That's rusted.
           </p>
+        </div>
+      </section>
+
+      <section class="border-t border-copper/10 py-20 text-center">
+        <p class="eyebrow">give your agent a place to build</p>
+        <h2 class="mx-auto mt-4 max-w-2xl font-display text-3xl font-semibold tracking-[-0.04em] text-cream sm:text-4xl">Connect rusted once. Let your agent build what it needs.</h2>
+        <p class="mx-auto mt-5 max-w-xl text-sm leading-7 text-clay">Start with six primitives. Keep the useful results as live HTTP endpoints or MCP servers.</p>
+        <div class="mt-8 flex flex-col items-center justify-center gap-4 sm:flex-row">
+          <a href="#connect" class="btn-primary px-5 py-3 text-sm">Connect your agent <span aria-hidden="true">↑</span></a>
+          <a href="/docs/ai-agents" class="btn-secondary px-5 py-3 text-sm">Read the agent guide <span aria-hidden="true">→</span></a>
         </div>
       </section>
 
@@ -261,6 +268,7 @@
 </div>
 
 <style>
+  html { scroll-behavior: smooth; }
   .landing-page::before {
     content: '';
     position: absolute;
@@ -314,6 +322,9 @@
   @media (max-width: 640px) {
     .landing-page::before { display: none; }
     .primitive-row:hover { padding-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
   }
 </style>
 {% endblock %}

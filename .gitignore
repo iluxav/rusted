@@ -6,6 +6,7 @@ node_modules/
 # Local scratch, not part of the product
 /js
 /docs
+/.features/
 tests.rest
 tiny-quickjs-lambda-platform.md
 
@@ -28,4 +29,4 @@ issues.md
 
 renote-requirments.md
 
-secret-per-env.md
+secrets-per-env.md
