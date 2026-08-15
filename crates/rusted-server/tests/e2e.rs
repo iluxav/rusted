@@ -467,6 +467,125 @@ async fn adhoc_invoke_with_source_works() {
 }
 
 #[tokio::test]
+async fn invoke_reports_status_content_type_and_headers() {
+    let t = boot().await;
+    let source = r#"export default async function handler(request, context) {
+        return context.json({ made: true }, { status: 201, headers: { "x-made-by": "test" } });
+    }"#;
+    push(&t, "maker", source).await;
+    let r = t
+        .admin_post("/api/invoke", json!({ "name": "maker" }))
+        .await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "success");
+    assert_eq!(v["status"], 201);
+    assert!(v["content_type"]
+        .as_str()
+        .unwrap()
+        .starts_with("application/json"));
+    assert_eq!(v["headers"]["x-made-by"], "test");
+}
+
+#[tokio::test]
+async fn invoke_sniffs_content_type_like_the_data_plane() {
+    let t = boot().await;
+    let r = t
+        .admin_post(
+            "/api/invoke",
+            json!({
+                "source": "export default async function handler() { return \"plain words\"; }",
+            }),
+        )
+        .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "success");
+    assert_eq!(v["status"], 200);
+    assert!(v["content_type"]
+        .as_str()
+        .unwrap()
+        .starts_with("text/plain"));
+}
+
+#[tokio::test]
+async fn invoke_refuses_function_that_does_not_answer_post() {
+    let t = boot().await;
+    t.admin_post(
+        "/api/functions",
+        json!({ "name": "getter", "source": GREET, "methods": ["GET"] }),
+    )
+    .await;
+    let r = t
+        .admin_post("/api/invoke", json!({ "name": "getter" }))
+        .await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "method_mismatch");
+    // The refusal must point at the address that does work.
+    assert!(v["error"]["url"].as_str().unwrap().contains("/f/getter"));
+}
+
+#[tokio::test]
+async fn invoke_refuses_function_with_a_route_path() {
+    let t = boot().await;
+    t.admin_post(
+        "/api/functions",
+        json!({ "name": "router", "source": GREET, "path": "/users/{id}" }),
+    )
+    .await;
+    let r = t
+        .admin_post("/api/invoke", json!({ "name": "router" }))
+        .await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "path_mismatch");
+    assert!(v["error"]["url"].as_str().unwrap().contains("/f/router"));
+}
+
+#[tokio::test]
+async fn invoke_env_must_exist_and_then_works() {
+    let t = boot().await;
+    push(&t, "greet", GREET).await;
+    let r = t
+        .admin_post(
+            "/api/invoke",
+            json!({ "name": "greet", "body": r#"{"name":"Eve"}"#, "env": "stage" }),
+        )
+        .await;
+    assert_eq!(r.status(), 404);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "no_such_env");
+
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    let r = t
+        .admin_post(
+            "/api/invoke",
+            json!({ "name": "greet", "body": r#"{"name":"Eve"}"#, "env": "stage" }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "success");
+    assert_eq!(v["response"], r#"{"message":"Hello, Eve"}"#);
+}
+
+#[tokio::test]
+async fn invoke_rejects_env_for_adhoc_source() {
+    let t = boot().await;
+    let r = t
+        .admin_post(
+            "/api/invoke",
+            json!({ "source": "export default async () => \"x\";", "env": "stage" }),
+        )
+        .await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "bad_request");
+}
+
+#[tokio::test]
 async fn list_includes_live_temp_runs() {
     let t = boot().await;
     t.admin_post("/api/runs", json!({ "source": GREET, "ttl_seconds": 60 }))

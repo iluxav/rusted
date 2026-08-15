@@ -29,7 +29,7 @@ export RUSTED_ADMIN=http://127.0.0.1:7412</code></pre>
 <h2>Operating</h2>
 <table>
   <tr><th>command</th><th>what it does</th></tr>
-  <tr><td><code>rusted invoke &lt;name&gt;</code></td><td>Run a deployed function without HTTP (<code>--body</code> for input). Owner-only; returns the real error and logs.</td></tr>
+  <tr><td><code>rusted invoke &lt;name&gt;</code></td><td>Run a deployed function without HTTP. <code>--input</code> takes JSON (checked locally, <code>-</code> reads stdin), <code>--body</code> sends raw text, <code>--env</code> picks the environment. Owner-only; returns the real error and logs, plus the status, content type, and headers the URL would have answered with. Exit codes tell outcomes apart: 0&nbsp;success, 1&nbsp;the function threw, 2&nbsp;usage or connection trouble, 3&nbsp;terminated by a limit, 4&nbsp;not invocable this way (mcp kind, non-POST methods, or a route path — call its URL instead).</td></tr>
   <tr><td><code>rusted logs &lt;name&gt;</code></td><td>Recent invocations with outcome, HTTP status, timings, and console output. <code>--errors</code> filters to failures — including 4xx/5xx responses and refusals (rate limits, wrong methods) that never reached the handler.</td></tr>
   <tr><td><code>rusted state purge &lt;name&gt;</code></td><td>Permanently delete <em>every</em> durable-state key the function holds, across all environments. The one explicit way state goes away.</td></tr>
   <tr><td><code>rusted inbox new|get|list|rm</code></td><td>Throwaway URLs that accept POSTs from anyone — see <a href="/docs/inbox">inboxes</a>.</td></tr>

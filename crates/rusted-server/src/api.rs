@@ -555,21 +555,25 @@ fn prune_keys(state: &Arc<AppState>, keys: impl IntoIterator<Item = String>) {
     }
 }
 
+/// context.json/context.text set an explicit type; bare returns are sniffed.
+fn response_content_type(explicit: Option<String>, body: &str) -> String {
+    explicit.unwrap_or_else(|| {
+        if serde_json::from_str::<serde_json::Value>(body).is_ok() {
+            "application/json"
+        } else {
+            "text/plain; charset=utf-8"
+        }
+        .to_string()
+    })
+}
+
 /// Maps an outcome to a data-plane HTTP response. Endpoint callers are third
 /// parties: JS error messages and console logs never appear here — the owner
 /// inspects them through the admin API (`recent`) or `rusted logs`.
 fn outcome_to_http(result: InvocationResult) -> Response {
     match result.outcome {
         Outcome::Success(body) => {
-            // context.json/context.text set an explicit type; bare returns are sniffed.
-            let content_type = result.content_type.unwrap_or_else(|| {
-                if serde_json::from_str::<serde_json::Value>(&body).is_ok() {
-                    "application/json"
-                } else {
-                    "text/plain; charset=utf-8"
-                }
-                .to_string()
-            });
+            let content_type = response_content_type(result.content_type, &body);
             let status =
                 StatusCode::from_u16(result.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
             let mut response = (status, [(CONTENT_TYPE, content_type)], body).into_response();
@@ -1627,6 +1631,9 @@ struct InvokeBody {
     source: Option<String>,
     #[serde(default)]
     body: String,
+    /// Environment to run in — scopes secrets and durable state, exactly as
+    /// `/f/@env/name` does on the data plane. Deployed functions only.
+    env: Option<String>,
 }
 
 async fn invoke(
@@ -1661,6 +1668,39 @@ async fn invoke(
                     )
                         .into_response()
                 }
+                // Invoke is a bare POST to the function root. A function that
+                // does not answer POST, or one that captures from a route
+                // path, would silently exercise different behavior than its
+                // deployed URL — refuse rather than misrepresent, pointing at
+                // the address that is faithful.
+                Ok(Some(hit)) if !hit.trigger.methods.iter().any(|m| m == "POST") => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": {
+                            "code": "method_mismatch",
+                            "message": format!(
+                                "invoke sends POST, but this function answers {} — call its URL instead",
+                                hit.trigger.methods.join(", ")
+                            ),
+                            "url": state.data_url(&format!("/f/{name}")),
+                        }})),
+                    )
+                        .into_response()
+                }
+                Ok(Some(hit)) if hit.trigger.path.is_some() => {
+                    let pattern = hit.trigger.path.clone().unwrap_or_default();
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": {
+                            "code": "path_mismatch",
+                            "message": format!(
+                                "this function serves the route {pattern}, which invoke cannot represent — call its URL instead"
+                            ),
+                            "url": state.data_url(&format!("/f/{name}{pattern}")),
+                        }})),
+                    )
+                        .into_response()
+                }
                 Ok(Some(hit)) => (Some(name.clone()), hit.source.clone(), Some(hit)),
                 Ok(None) => return err(StatusCode::NOT_FOUND, "not_found", "no such function"),
                 Err(e) => {
@@ -1683,21 +1723,43 @@ async fn invoke(
             )
         }
     };
+    // The caller is the authenticated owner, so unlike the data plane's
+    // 404-masking, a wrong environment gets told what is actually wrong.
+    let env = match &body.env {
+        None => crate::secrets::PROD_ENV.to_string(),
+        Some(env) => {
+            if key.is_none() {
+                return err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "bad_request",
+                    "env applies to deployed functions, not ad-hoc source",
+                );
+            }
+            if env != crate::secrets::PROD_ENV
+                && !crate::secrets::env_exists(&state.pool, user_id, env).await
+            {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    "no_such_env",
+                    format!("no such environment: {env} — create it in the console first"),
+                );
+            }
+            env.clone()
+        }
+    };
     let request = HttpRequest::post_json(body.body);
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     let limits = limits_for_plan(&state, &plan.limits);
     let executed = match (key, fetched) {
         (Some(key), Some(hit)) => {
             // The caller here is the owner, so the refusal carries the detail.
-            let grant =
-                match grant_for_function(&state, &key, &hit, &plan, crate::secrets::PROD_ENV).await
-                {
-                    Ok(grant) => grant,
-                    Err((code, detail)) => {
-                        record_refusal(&state, &key, hit.owner, "error", 500, detail.clone());
-                        return err(StatusCode::INTERNAL_SERVER_ERROR, code, detail);
-                    }
-                };
+            let grant = match grant_for_function(&state, &key, &hit, &plan, &env).await {
+                Ok(grant) => grant,
+                Err((code, detail)) => {
+                    record_refusal(&state, &key, hit.owner, "error", 500, detail.clone());
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, code, detail);
+                }
+            };
             execute_serialized(
                 &state,
                 &key,
@@ -1741,6 +1803,12 @@ async fn invoke(
     match result.outcome {
         Outcome::Success(s) => {
             response["outcome"] = json!("success");
+            // The same status, content type, and vetted headers the deployed
+            // URL would have answered with — invoke reports the full reply,
+            // not just its body.
+            response["status"] = json!(result.status.unwrap_or(200));
+            response["content_type"] = json!(response_content_type(result.content_type, &s));
+            response["headers"] = json!(result.headers);
             response["response"] = json!(s);
         }
         Outcome::Terminated(reason) => {

@@ -116,14 +116,84 @@ fn push_invoke_list_roundtrip() {
         .stdout
         .clone();
     let invoked: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(invoked["ok"], true);
     assert_eq!(invoked["outcome"], "success");
-    assert_eq!(invoked["response"], r#"{"message":"Hello, Ada"}"#);
+    assert_eq!(invoked["status"], 200);
+    assert!(invoked["content_type"]
+        .as_str()
+        .unwrap()
+        .starts_with("application/json"));
+    assert_eq!(invoked["body"], r#"{"message":"Hello, Ada"}"#);
+    assert!(invoked["timing"]["wall_ms"].as_f64().is_some());
 
     h.rusted()
         .arg("list")
         .assert()
         .success()
         .stdout(predicates::str::contains("greet"));
+}
+
+#[test]
+fn invoke_reads_json_input_from_stdin() {
+    let h = boot();
+    let script = h.script("greet.js", GREET);
+    h.rusted()
+        .args(["push", &script, "--name", "greet"])
+        .assert()
+        .success();
+    h.rusted()
+        .args(["invoke", "greet", "--input", "-"])
+        .write_stdin(r#"{"name":"Pipe"}"#)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Hello, Pipe"));
+}
+
+#[test]
+fn invoke_rejects_invalid_input_json_with_exit_two() {
+    let h = boot();
+    h.rusted()
+        .args(["invoke", "greet", "--input", "{not json"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("not valid JSON"));
+}
+
+#[test]
+fn invoke_exit_codes_tell_function_failure_from_refusal() {
+    let h = boot();
+    let throwing = h.script(
+        "boom.js",
+        "export default async function handler() { throw new Error(\"kapow\"); }",
+    );
+    h.rusted()
+        .args(["push", &throwing, "--name", "boom"])
+        .assert()
+        .success();
+    // The function ran and threw: exit 1, and --json still carries it.
+    let out = h
+        .rusted()
+        .args(["invoke", "boom", "--json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["outcome"], "error");
+
+    // The function is not invocable this way: exit 4, pointing at its URL.
+    let script = h.script("greet.js", GREET);
+    h.rusted()
+        .args(["push", &script, "--name", "getter", "--method", "GET"])
+        .assert()
+        .success();
+    h.rusted()
+        .args(["invoke", "getter"])
+        .assert()
+        .code(4)
+        .stderr(predicates::str::contains("/f/getter"));
 }
 
 #[test]

@@ -139,12 +139,23 @@ enum Cmd {
         #[arg(long)]
         ttl: Option<u64>,
     },
-    /// Invoke a deployed function without HTTP
+    /// Invoke a deployed function without HTTP.
+    ///
+    /// Exit codes, for scripts and agent harnesses: 0 the function succeeded,
+    /// 1 it threw, 2 usage or connection problems, 3 a resource limit
+    /// terminated it, 4 this function cannot be invoked this way (mcp kind,
+    /// non-POST methods, or a route path — call its URL instead).
     Invoke {
         name: String,
-        /// Request body
+        /// JSON input, checked before sending; '-' reads it from stdin
+        #[arg(long, conflicts_with = "body")]
+        input: Option<String>,
+        /// Raw request body, sent exactly as given
         #[arg(long, default_value = "")]
         body: String,
+        /// Environment to run in — scopes secrets and state; default prod
+        #[arg(long)]
+        env: Option<String>,
     },
     /// Validate a script without deploying it
     Verify { file: PathBuf },
@@ -579,32 +590,54 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 )
             })
         }
-        Cmd::Invoke { ref name, ref body } => {
-            let v = api(
-                &cli,
-                Method::POST,
-                "/api/invoke",
-                Some(json!({ "name": name, "body": body })),
-            )
-            .map_err(|e| friendly_kind_mismatch(name, &e).unwrap_or(e))?;
-            if cli.json {
-                println!("{v}");
-                return Ok(());
-            }
-            for log in v["logs"].as_array().into_iter().flatten() {
-                eprintln!(
-                    "[{}] {}",
-                    log["level"].as_str().unwrap_or("log"),
-                    log["message"].as_str().unwrap_or("")
-                );
-            }
-            match v["outcome"].as_str() {
-                Some("success") => {
-                    println!("{}", v["response"].as_str().unwrap_or(""));
-                    Ok(())
+        Cmd::Invoke {
+            ref name,
+            ref input,
+            ref body,
+            ref env,
+        } => {
+            // Usage mistakes exit 2 before anything is sent, so a harness can
+            // tell "my input was wrong" from "the function failed".
+            let payload_body = match input {
+                Some(raw) => {
+                    let text = if raw == "-" {
+                        let mut text = String::new();
+                        if let Err(e) =
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                        {
+                            eprintln!("reading stdin: {e}");
+                            std::process::exit(EXIT_USAGE);
+                        }
+                        text
+                    } else {
+                        raw.clone()
+                    };
+                    if let Err(e) = serde_json::from_str::<Value>(&text) {
+                        eprintln!("--input is not valid JSON: {e}");
+                        std::process::exit(EXIT_USAGE);
+                    }
+                    text
                 }
-                Some("terminated") => Err(format!("terminated: {}", v["reason"])),
-                _ => Err(format!("function error: {}", v["message"])),
+                None => body.clone(),
+            };
+            let mut payload = json!({ "name": name, "body": payload_body });
+            if let Some(env) = env {
+                payload["env"] = json!(env);
+            }
+            let outcome = api(&cli, Method::POST, "/api/invoke", Some(payload));
+            let report = invoke_report(name, &outcome, cli.json);
+            for line in &report.stderr {
+                eprintln!("{line}");
+            }
+            if let Some(out) = &report.stdout {
+                println!("{out}");
+            }
+            // Exit here rather than through main: the code carries the
+            // outcome, not just pass/fail.
+            if report.code == 0 {
+                Ok(())
+            } else {
+                std::process::exit(report.code)
             }
         }
         Cmd::Verify { ref file } => {
@@ -891,6 +924,155 @@ fn api(cli: &Cli, method: Method, path: &str, body: Option<Value>) -> Result<Val
     Err(value.to_string())
 }
 
+/// `rusted invoke`'s exit contract, stable for scripts and agent harnesses.
+const EXIT_FUNCTION_ERROR: i32 = 1;
+const EXIT_USAGE: i32 = 2;
+const EXIT_TERMINATED: i32 = 3;
+const EXIT_REFUSED: i32 = 4;
+
+/// Everything one invocation should print, and how the process should exit.
+struct InvokeReport {
+    stdout: Option<String>,
+    stderr: Vec<String>,
+    code: i32,
+}
+
+/// Maps the server's reply to output and an exit code. Pure, so the contract
+/// is testable: 0 success, 1 the function threw, 2 usage/transport trouble,
+/// 3 a limit terminated it, 4 refused as not invocable this way.
+///
+/// In `--json` mode stdout is one stable document. `body` is the exact
+/// response text — deliberately not parsed into a duplicate `json` field, so
+/// large replies aren't paid for twice; `outcome` survives alongside `ok`
+/// because an error (fix the code) and a termination (raise the limit or
+/// retry) warrant different reactions.
+fn invoke_report(name: &str, outcome: &Result<Value, String>, json_mode: bool) -> InvokeReport {
+    match outcome {
+        Ok(v) => {
+            let timing = json!({ "wall_ms": v["wall_ms"], "cpu_ms": v["cpu_ms"] });
+            let human_logs = || {
+                v["logs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|log| {
+                        format!(
+                            "[{}] {}",
+                            log["level"].as_str().unwrap_or("log"),
+                            log["message"].as_str().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (code, doc, human) = match v["outcome"].as_str() {
+                Some("success") => (
+                    0,
+                    json!({
+                        "ok": true,
+                        "outcome": "success",
+                        "status": v["status"],
+                        "content_type": v["content_type"],
+                        "headers": v["headers"],
+                        "body": v["response"],
+                        "logs": v["logs"],
+                        "timing": timing,
+                    }),
+                    Ok(v["response"].as_str().unwrap_or("").to_string()),
+                ),
+                Some("terminated") => (
+                    EXIT_TERMINATED,
+                    json!({
+                        "ok": false,
+                        "outcome": "terminated",
+                        "reason": v["reason"],
+                        "logs": v["logs"],
+                        "timing": timing,
+                    }),
+                    Err(format!("terminated: {}", v["reason"])),
+                ),
+                _ => (
+                    EXIT_FUNCTION_ERROR,
+                    json!({
+                        "ok": false,
+                        "outcome": "error",
+                        "message": v["message"],
+                        "logs": v["logs"],
+                        "timing": timing,
+                    }),
+                    Err(format!("function error: {}", v["message"])),
+                ),
+            };
+            if json_mode {
+                InvokeReport {
+                    stdout: Some(doc.to_string()),
+                    stderr: vec![],
+                    code,
+                }
+            } else {
+                let mut stderr = human_logs();
+                let stdout = match human {
+                    Ok(body) => Some(body),
+                    Err(message) => {
+                        stderr.push(message);
+                        None
+                    }
+                };
+                InvokeReport {
+                    stdout,
+                    stderr,
+                    code,
+                }
+            }
+        }
+        Err(raw) => {
+            // `api` surfaces server error envelopes as their JSON text;
+            // anything unparseable is transport-level trouble.
+            let e: serde_json::Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+            let error_code = e["error"]["code"].as_str().unwrap_or("").to_string();
+            let refused = matches!(
+                error_code.as_str(),
+                "kind_mismatch" | "method_mismatch" | "path_mismatch"
+            );
+            let mut message = friendly_kind_mismatch(name, raw).unwrap_or_else(|| {
+                e["error"]["message"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| raw.clone())
+            });
+            if refused && error_code != "kind_mismatch" {
+                if let Some(url) = e["error"]["url"].as_str() {
+                    message.push_str(&format!("\ncall it at {url}"));
+                }
+            }
+            let code = if refused { EXIT_REFUSED } else { EXIT_USAGE };
+            if json_mode {
+                let mut doc = json!({
+                    "ok": false,
+                    "outcome": if refused { "refused" } else { "failed" },
+                    "message": message,
+                });
+                if !error_code.is_empty() {
+                    doc["code"] = json!(error_code);
+                }
+                if let Some(url) = e["error"]["url"].as_str() {
+                    doc["url"] = json!(url);
+                }
+                InvokeReport {
+                    stdout: Some(doc.to_string()),
+                    stderr: vec![],
+                    code,
+                }
+            } else {
+                InvokeReport {
+                    stdout: None,
+                    stderr: vec![message],
+                    code,
+                }
+            }
+        }
+    }
+}
+
 /// Invoking an mcp function as http is refused by the server with
 /// `kind_mismatch`; turn that envelope into advice. `None` means the error was
 /// something else and should pass through untouched.
@@ -1069,4 +1251,123 @@ fn serve(
         std::future::pending::<()>().await;
         unreachable!()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn success_envelope() -> Value {
+        json!({
+            "outcome": "success",
+            "status": 201,
+            "content_type": "application/json",
+            "headers": { "x-made-by": "test" },
+            "response": "{\"made\":true}",
+            "logs": [{ "level": "log", "message": "hi" }],
+            "wall_ms": 1.5,
+            "cpu_ms": 0.4,
+        })
+    }
+
+    #[test]
+    fn success_json_is_one_stable_document_with_exit_zero() {
+        let report = invoke_report("fn", &Ok(success_envelope()), true);
+        assert_eq!(report.code, 0);
+        assert!(report.stderr.is_empty());
+        let doc: Value = serde_json::from_str(&report.stdout.unwrap()).unwrap();
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["outcome"], "success");
+        assert_eq!(doc["status"], 201);
+        assert_eq!(doc["content_type"], "application/json");
+        assert_eq!(doc["body"], "{\"made\":true}");
+        assert_eq!(doc["headers"]["x-made-by"], "test");
+        assert_eq!(doc["timing"]["wall_ms"], 1.5);
+        // The body stays a string: no duplicated parsed copy.
+        assert!(doc["body"].is_string());
+        assert!(doc.get("json").is_none());
+    }
+
+    #[test]
+    fn success_human_prints_body_and_logs_apart() {
+        let report = invoke_report("fn", &Ok(success_envelope()), false);
+        assert_eq!(report.code, 0);
+        assert_eq!(report.stdout.as_deref(), Some("{\"made\":true}"));
+        assert_eq!(report.stderr, vec!["[log] hi"]);
+    }
+
+    #[test]
+    fn function_error_exits_one_even_in_json_mode() {
+        let envelope =
+            json!({ "outcome": "error", "message": "boom", "logs": [], "wall_ms": 1, "cpu_ms": 1 });
+        let report = invoke_report("fn", &Ok(envelope), true);
+        assert_eq!(report.code, EXIT_FUNCTION_ERROR);
+        let doc: Value = serde_json::from_str(&report.stdout.unwrap()).unwrap();
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["outcome"], "error");
+        assert_eq!(doc["message"], "boom");
+    }
+
+    #[test]
+    fn termination_exits_three_and_keeps_its_reason() {
+        let envelope = json!({ "outcome": "terminated", "reason": "wall_ms", "logs": [], "wall_ms": 1, "cpu_ms": 1 });
+        let json_report = invoke_report("fn", &Ok(envelope.clone()), true);
+        assert_eq!(json_report.code, EXIT_TERMINATED);
+        let doc: Value = serde_json::from_str(&json_report.stdout.unwrap()).unwrap();
+        assert_eq!(doc["outcome"], "terminated");
+        assert_eq!(doc["reason"], "wall_ms");
+        let human = invoke_report("fn", &Ok(envelope), false);
+        assert_eq!(human.code, EXIT_TERMINATED);
+        assert!(human.stderr.last().unwrap().contains("terminated"));
+    }
+
+    #[test]
+    fn mismatch_refusals_exit_four_with_the_working_url() {
+        for code in ["kind_mismatch", "method_mismatch", "path_mismatch"] {
+            let raw = json!({ "error": {
+                "code": code,
+                "message": "not this way",
+                "url": "https://rusted.sh/f/thing",
+            }})
+            .to_string();
+            let report = invoke_report("thing", &Err(raw), true);
+            assert_eq!(report.code, EXIT_REFUSED, "{code} should refuse");
+            let doc: Value = serde_json::from_str(&report.stdout.unwrap()).unwrap();
+            assert_eq!(doc["outcome"], "refused");
+            assert_eq!(doc["code"], code);
+            assert_eq!(doc["url"], "https://rusted.sh/f/thing");
+        }
+    }
+
+    #[test]
+    fn refusal_human_message_points_at_the_url() {
+        let raw = json!({ "error": {
+            "code": "method_mismatch",
+            "message": "invoke sends POST, but this function answers GET — call its URL instead",
+            "url": "https://rusted.sh/f/getter",
+        }})
+        .to_string();
+        let report = invoke_report("getter", &Err(raw), false);
+        assert_eq!(report.code, EXIT_REFUSED);
+        assert!(report.stderr[0].contains("https://rusted.sh/f/getter"));
+    }
+
+    #[test]
+    fn other_api_errors_exit_two() {
+        let raw =
+            json!({ "error": { "code": "no_such_env", "message": "no such environment: staje" }})
+                .to_string();
+        let report = invoke_report("fn", &Err(raw), true);
+        assert_eq!(report.code, EXIT_USAGE);
+        let doc: Value = serde_json::from_str(&report.stdout.unwrap()).unwrap();
+        assert_eq!(doc["outcome"], "failed");
+        assert_eq!(doc["message"], "no such environment: staje");
+    }
+
+    #[test]
+    fn transport_gibberish_exits_two_and_passes_through() {
+        let report = invoke_report("fn", &Err("connection refused".to_string()), false);
+        assert_eq!(report.code, EXIT_USAGE);
+        assert_eq!(report.stderr, vec!["connection refused"]);
+    }
 }

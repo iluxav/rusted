@@ -47,7 +47,7 @@ curl -X POST http://127.0.0.1:7411/f/greet -d '{"name":"Ada"}'
 # {"message":"Hello, Ada"}
 
 rusted preview greet.js --ttl 120        # temporary endpoint, expires on its own
-rusted invoke greet --body '{"name":"Bob"}'
+rusted invoke greet --input '{"name":"Bob"}'
 rusted logs greet                        # recent invocations with console output
 rusted list | rusted pull greet | rusted verify greet.js | rusted delete greet
 ```
