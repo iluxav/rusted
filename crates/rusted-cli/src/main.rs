@@ -318,7 +318,8 @@ fn scaffold(name: &str, js: bool, mcp: bool) -> Result<(), String> {
             "export const http = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
              \n\
              export default async function handler(request, context) {{\n\
-             \x20 const {{ name }} = await request.json();\n\
+             \x20 // .catch: a bare POST has no body, and that should greet, not throw.\n\
+             \x20 const {{ name }} = await request.json().catch(() => ({{}}));\n\
              \x20 return context.json({{ message: `Hello, ${{name ?? \"world\"}}` }});\n\
              }}\n"
         )
@@ -333,7 +334,8 @@ fn scaffold(name: &str, js: bool, mcp: bool) -> Result<(), String> {
              export const http: Rusted.Http = {{ name: \"{name}\", methods: [\"POST\"] }};\n\
              \n\
              const handler: Rusted.Handler = async (request, context) => {{\n\
-             \x20 const {{ name }} = await request.json<Input>();\n\
+             \x20 // .catch: a bare POST has no body, and that should greet, not throw.\n\
+             \x20 const {{ name }} = await request.json<Input>().catch((): Input => ({{}}));\n\
              \x20 return context.json({{ message: `Hello, ${{name ?? \"world\"}}` }});\n\
              }};\n\
              \n\

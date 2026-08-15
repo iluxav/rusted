@@ -1434,6 +1434,32 @@ fn new_scaffolds_a_project_that_builds() {
 }
 
 #[test]
+fn scaffold_survives_an_empty_body() {
+    let h = boot();
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("rusted")
+        .unwrap()
+        .args(["new", "hello", "--js"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let file = dir.path().join("hello/index.js");
+    h.rusted()
+        .args(["push", file.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // The advertised URL must answer a bare POST — the very first thing a
+    // curious new user tries — not 500 on it.
+    h.rusted()
+        .args(["invoke", "hello"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Hello, world"));
+}
+
+#[test]
 fn new_refuses_to_overwrite_existing_work() {
     let dir = tempfile::tempdir().unwrap();
     let existing = dir.path().join("taken");
