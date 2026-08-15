@@ -34,6 +34,14 @@
         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z"/></svg>
         Billing
       </a>
+      <!-- Docs render in the site shell, not the console's: a plain link that
+           navigates, deliberately without hx-get so htmx never swaps a full
+           page into #content. -->
+      <a href="/docs"
+         class="nav-item flex rounded-full items-center gap-2.5 px-3 py-2.5 text-[13px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25"/></svg>
+        Docs
+      </a>
 
       <details open class="pt-5">
         <summary class="flex cursor-pointer list-none items-center justify-between px-3 pb-2 font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-copper/70 hover:text-copper">
