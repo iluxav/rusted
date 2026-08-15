@@ -117,14 +117,17 @@ pub struct HttpConfig {
     pub methods: Option<Vec<String>>,
     #[serde(default)]
     pub path: Option<String>,
-    /// Tri-state caller authentication. Undeclared (`None`) follows the
-    /// server: open unless it runs `--require-auth`. `Some(true)` is callable
-    /// without a key even under `--require-auth` — what an OAuth callback or
-    /// webhook target needs, since the third party calling it cannot present
-    /// a key. `Some(false)` requires one of the owner's API keys on every
-    /// call, even on an open server.
+    /// Callable without a key even under `--require-auth` — what an OAuth
+    /// callback or webhook target needs, since the third party calling it
+    /// cannot present a key. `public: false` means the same as not declaring
+    /// it: the function follows the server.
     #[serde(default)]
-    pub public: Option<bool>,
+    pub public: bool,
+    /// Requires one of the owner's API keys on every call, even on an open
+    /// server. `private: false` means the same as not declaring it.
+    /// Mutually exclusive with `public: true`.
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// One tool's deploy-time metadata. At inspect time the handler function is
@@ -1990,10 +1993,12 @@ impl Executor for QuickJsExecutor {
                     return Ok(inspected(Surface::Http(HttpConfig::default())));
                 };
                 let json = stringify(&c, config, "http")?;
-                return serde_json::from_str::<HttpConfig>(&json)
-                    .map(Surface::Http)
-                    .map(inspected)
-                    .map_err(|e| format!("invalid http export: {e}"));
+                let config = serde_json::from_str::<HttpConfig>(&json)
+                    .map_err(|e| format!("invalid http export: {e}"))?;
+                if config.public && config.private {
+                    return Err("http.public and http.private are mutually exclusive".to_string());
+                }
+                return Ok(inspected(Surface::Http(config)));
             };
 
             if has_default {

@@ -466,13 +466,13 @@ async fn adhoc_invoke_with_source_works() {
     assert_eq!(v["response"], "SHOUT");
 }
 
-/// HTTP functions are open by default, but an explicit `public: false` opts
-/// the URL out of the open data plane: callers must then present one of the
-/// owner's API keys — someone else's valid key is not enough.
+/// HTTP functions are open by default, but `private: true` opts the URL out
+/// of the open data plane: callers must then present one of the owner's API
+/// keys — someone else's valid key is not enough.
 #[tokio::test]
-async fn explicit_public_false_gates_an_http_function() {
+async fn private_true_gates_an_http_function() {
     let t = boot().await;
-    let source = r#"export const http = { name: "gated", public: false, methods: ["POST"] };
+    let source = r#"export const http = { name: "gated", private: true, methods: ["POST"] };
 export default async function handler(request, context) {
   return context.json({ ok: true });
 }"#;
@@ -512,6 +512,23 @@ export default async function handler(request, context) {
         .unwrap();
     assert_eq!(owner.status(), 200, "the owner's key must pass");
     assert_eq!(owner.text().await.unwrap(), r#"{"ok":true}"#);
+}
+
+#[tokio::test]
+async fn public_and_private_together_are_refused_at_push() {
+    let t = boot().await;
+    let source = r#"export const http = { name: "confused", public: true, private: true };
+export default async function handler() { return "?"; }"#;
+    let r = push(&t, "confused", source).await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mutually exclusive"),
+        "{v}"
+    );
 }
 
 #[tokio::test]

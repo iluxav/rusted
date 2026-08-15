@@ -1030,6 +1030,9 @@ struct FunctionT {
     code_json: String,
     /// Data-plane protocol: `"http"` or `"mcp"`.
     kind: String,
+    /// Who may call it on THIS server: "public", "private", or "key required"
+    /// (undeclared on a --require-auth server).
+    access: &'static str,
     /// Empty for http functions.
     tools: Vec<ToolRow>,
     mcp_public: bool,
@@ -1984,6 +1987,12 @@ async fn page_function(
     } else {
         String::new()
     };
+    let access = match hit.public {
+        Some(true) => "public",
+        Some(false) => "private",
+        None if state.0.app.require_auth => "key required",
+        None => "public",
+    };
     let inner = FunctionT {
         name: name.clone(),
         published: hit.published,
@@ -1997,6 +2006,7 @@ async fn page_function(
         hidden_kb: hidden / 1024,
         code_json,
         kind: hit.kind.clone(),
+        access,
         tools,
         mcp_public,
         client_config,
@@ -2507,6 +2517,7 @@ struct AdminFnRow {
     name: String,
     owner: String,
     rev: i64,
+    access: &'static str,
     created: String,
     updated: String,
 }
@@ -2544,7 +2555,7 @@ async fn page_admin_functions(
     // AssertSqlSafe: {order} interpolates one of four literals from the
     // whitelist above, never caller text.
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT f.name, f.current_rev, coalesce(u.login, '—') AS owner,
+        "SELECT f.name, f.current_rev, f.public, coalesce(u.login, '—') AS owner,
                 extract(epoch FROM f.created_at)::bigint AS created,
                 extract(epoch FROM f.updated_at)::bigint AS updated
          FROM functions f LEFT JOIN users u ON u.id = f.user_id
@@ -2566,6 +2577,12 @@ async fn page_admin_functions(
             name: row.get("name"),
             owner: row.get("owner"),
             rev: row.get("current_rev"),
+            access: match row.get::<Option<bool>, _>("public") {
+                Some(true) => "public",
+                Some(false) => "private",
+                None if state.0.app.require_auth => "key required",
+                None => "public",
+            },
             created: ago(row.get("created")),
             updated: ago(row.get("updated")),
         })

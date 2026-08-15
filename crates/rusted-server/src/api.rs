@@ -803,7 +803,8 @@ async fn serve_function(
         }
         return crate::mcp_host::serve(state, fetched, name, env, headers, body).await;
     }
-    // An explicit `public: false` opts this URL out of the open data plane:
+    // An explicit `private: true` (stored as public = FALSE) opts this URL
+    // out of the open data plane:
     // the caller must present one of the owner's keys — anyone's valid key is
     // not enough on a multi-tenant server. Undeclared functions never enter
     // this branch; they follow the server-wide gate.
@@ -1357,7 +1358,14 @@ pub async fn deploy_function(
         None
     };
 
-    let declared = crate::store::Declared::from_config(&config, http_config.public);
+    // The stored column stays tri-state: TRUE for public, FALSE for private,
+    // NULL for a module that declared neither and follows the server.
+    let access = match (http_config.public, http_config.private) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    let declared = crate::store::Declared::from_config(&config, access);
     let pushed = match new_trigger {
         Some(trigger) => {
             state
@@ -1409,7 +1417,7 @@ pub async fn deploy_function(
         "methods": trigger.methods,
         "path": trigger.path,
         "secrets": declared.secrets,
-        "public": http_config.public,
+        "public": access,
         "state": declared.state,
         "objects": declared.objects.keys().collect::<Vec<_>>(),
         "limits": limits_json(state, &plan),
@@ -2035,9 +2043,9 @@ fn mcp_tools() -> Value {
              function stays live until deleted. What the module exports decides what it \
              becomes:\
              \n\nA module with `export default async function handler(request, context)` \
-             (optionally `export const http = { name, methods, path, public }`) deploys \
+             (optionally `export const http = { name, methods, path, private }`) deploys \
              as an HTTP endpoint anyone can call — no key required — unless it declares \
-             `public: false`, which demands the owner's API key on every call. Reach for this when \
+             `private: true`, which demands the owner's API key on every call. Reach for this when \
              something needs an address rather than an answer: a webhook endpoint, an API \
              for someone else to call, or a callback URL for a service that will POST \
              back to you. The handler is written exactly as for `execute`, with the same \
