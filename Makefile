@@ -67,7 +67,12 @@ release: ## Cut a patch release: bump crate versions, commit, tag, push
 	git commit -q -m "v$$new"; \
 	git tag "v$$new"; \
 	git push origin main "v$$new"; \
-	echo "pushed v$$new — the release workflow is building; deploy with .do/deploy.sh once it publishes"
+	echo "pushed v$$new — waiting for the release workflow"; \
+	sleep 10; \
+	run_id=$$(gh run list --workflow=release.yml --branch "v$$new" --limit 1 --json databaseId -q '.[0].databaseId'); \
+	[ -n "$$run_id" ] || { echo "error: no workflow run found for v$$new — check GitHub Actions"; exit 1; }; \
+	gh run watch "$$run_id" --exit-status; \
+	echo "v$$new published — deploy with .do/deploy.sh"
 
 css: ## Recompile the Tailwind sheet inlined into every page (run after template edits)
 	cd crates/rusted-server/tailwind && npx -y tailwindcss@3.4.17 -c tailwind.config.js -i input.css -o ../templates/app.css --minify
