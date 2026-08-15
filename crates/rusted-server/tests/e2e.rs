@@ -466,13 +466,13 @@ async fn adhoc_invoke_with_source_works() {
     assert_eq!(v["response"], "SHOUT");
 }
 
-/// HTTP functions are open by default, but `private: true` opts the URL out
-/// of the open data plane: callers must then present one of the owner's API
-/// keys — someone else's valid key is not enough.
+/// HTTP functions are open by default, but `access: "private"` opts the URL
+/// out of the open data plane: callers must then present one of the owner's
+/// API keys — someone else's valid key is not enough.
 #[tokio::test]
-async fn private_true_gates_an_http_function() {
+async fn access_private_gates_an_http_function() {
     let t = boot().await;
-    let source = r#"export const http = { name: "gated", private: true, methods: ["POST"] };
+    let source = r#"export const http = { name: "gated", access: "private", methods: ["POST"] };
 export default async function handler(request, context) {
   return context.json({ ok: true });
 }"#;
@@ -514,21 +514,45 @@ export default async function handler(request, context) {
     assert_eq!(owner.text().await.unwrap(), r#"{"ok":true}"#);
 }
 
+/// The legacy `public: true` alias still deploys (it predates `access`), but
+/// contradicting an explicit access value is refused, as is a value outside
+/// the enum.
 #[tokio::test]
-async fn public_and_private_together_are_refused_at_push() {
+async fn access_values_are_validated_at_push() {
     let t = boot().await;
-    let source = r#"export const http = { name: "confused", public: true, private: true };
+    let contradiction = r#"export const http = { name: "confused", public: true, access: "private" };
 export default async function handler() { return "?"; }"#;
-    let r = push(&t, "confused", source).await;
+    let r = push(&t, "confused", contradiction).await;
     assert_eq!(r.status(), 422);
     let v: Value = r.json().await.unwrap();
     assert!(
         v["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("mutually exclusive"),
+            .contains("contradicts"),
         "{v}"
     );
+
+    let unknown = r#"export const http = { name: "confused", access: "secret" };
+export default async function handler() { return "?"; }"#;
+    let r = push(&t, "confused", unknown).await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("must be \"public\" or \"private\""),
+        "{v}"
+    );
+
+    // The alias alone still works and stores as public.
+    let legacy = r#"export const http = { name: "hooky", public: true };
+export default async function handler() { return "ok"; }"#;
+    let r = push(&t, "hooky", legacy).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["public"], json!(true));
 }
 
 #[tokio::test]

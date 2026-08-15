@@ -117,17 +117,17 @@ pub struct HttpConfig {
     pub methods: Option<Vec<String>>,
     #[serde(default)]
     pub path: Option<String>,
-    /// Callable without a key even under `--require-auth` — what an OAuth
-    /// callback or webhook target needs, since the third party calling it
-    /// cannot present a key. `public: false` means the same as not declaring
-    /// it: the function follows the server.
+    /// Who may call this function. `"public"`: no key needed, even under
+    /// `--require-auth` — what an OAuth callback or webhook target needs,
+    /// since the third party calling it cannot present a key. `"private"`:
+    /// every call must present one of the owner's API keys, even on an open
+    /// server. Undeclared: follows the server's auth mode.
+    #[serde(default)]
+    pub access: Option<String>,
+    /// Legacy alias for `access: "public"`, kept because deployed modules
+    /// already declare it. Contradicting an explicit `access` is an error.
     #[serde(default)]
     pub public: bool,
-    /// Requires one of the owner's API keys on every call, even on an open
-    /// server. `private: false` means the same as not declaring it.
-    /// Mutually exclusive with `public: true`.
-    #[serde(default)]
-    pub private: bool,
 }
 
 /// One tool's deploy-time metadata. At inspect time the handler function is
@@ -1995,8 +1995,20 @@ impl Executor for QuickJsExecutor {
                 let json = stringify(&c, config, "http")?;
                 let config = serde_json::from_str::<HttpConfig>(&json)
                     .map_err(|e| format!("invalid http export: {e}"))?;
-                if config.public && config.private {
-                    return Err("http.public and http.private are mutually exclusive".to_string());
+                match config.access.as_deref() {
+                    None | Some("public") => {}
+                    Some("private") => {
+                        if config.public {
+                            return Err(
+                                "http.public contradicts access: \"private\"".to_string()
+                            );
+                        }
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "http.access must be \"public\" or \"private\", not \"{other}\""
+                        ));
+                    }
                 }
                 return Ok(inspected(Surface::Http(config)));
             };

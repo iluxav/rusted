@@ -803,8 +803,8 @@ async fn serve_function(
         }
         return crate::mcp_host::serve(state, fetched, name, env, headers, body).await;
     }
-    // An explicit `private: true` (stored as public = FALSE) opts this URL
-    // out of the open data plane:
+    // An explicit `access: "private"` (stored as public = FALSE) opts this
+    // URL out of the open data plane:
     // the caller must present one of the owner's keys — anyone's valid key is
     // not enough on a multi-tenant server. Undeclared functions never enter
     // this branch; they follow the server-wide gate.
@@ -1359,10 +1359,11 @@ pub async fn deploy_function(
     };
 
     // The stored column stays tri-state: TRUE for public, FALSE for private,
-    // NULL for a module that declared neither and follows the server.
-    let access = match (http_config.public, http_config.private) {
-        (true, _) => Some(true),
-        (_, true) => Some(false),
+    // NULL for a module that declared nothing and follows the server. The
+    // engine has already validated the value and the legacy-alias conflict.
+    let access = match (http_config.access.as_deref(), http_config.public) {
+        (Some("private"), _) => Some(false),
+        (Some("public"), _) | (None, true) => Some(true),
         _ => None,
     };
     let declared = crate::store::Declared::from_config(&config, access);
@@ -2043,9 +2044,9 @@ fn mcp_tools() -> Value {
              function stays live until deleted. What the module exports decides what it \
              becomes:\
              \n\nA module with `export default async function handler(request, context)` \
-             (optionally `export const http = { name, methods, path, private }`) deploys \
+             (optionally `export const http = { name, methods, path, access }`) deploys \
              as an HTTP endpoint anyone can call — no key required — unless it declares \
-             `private: true`, which demands the owner's API key on every call. Reach for this when \
+             `access: \"private\"`, which demands the owner's API key on every call. Reach for this when \
              something needs an address rather than an answer: a webhook endpoint, an API \
              for someone else to call, or a callback URL for a service that will POST \
              back to you. The handler is written exactly as for `execute`, with the same \

@@ -531,10 +531,10 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                             .join(",")
                     })
                     .unwrap_or_default();
-                // Only an explicit `private: true` prints the auth line —
+                // Only an explicit `access: "private"` prints the auth line —
                 // undeclared functions follow the server and say nothing.
                 let gated = if v["public"] == json!(false) {
-                    "\ncallers need your API key (private: true) — Authorization: Bearer <key>"
+                    "\ncallers need your API key (access: \"private\") — Authorization: Bearer <key>"
                 } else {
                     ""
                 };

@@ -305,18 +305,18 @@ declare namespace Rusted {
     /** Route nested under /f/<name>, e.g. "/users/{id}". */
     path?: string;
     /**
-     * Callable without an API key even when the server requires auth.
-     * What an OAuth callback or webhook target needs — the third party
-     * calling it cannot present your key. Default: whatever the server's
-     * auth mode demands. Mutually exclusive with `private`.
-     */
-    public?: boolean;
-    /**
-     * Every call must present one of the owner's API keys
+     * Who may call this function.
+     * "public": no key needed, even when the server requires auth — what an
+     * OAuth callback or webhook target needs, since the third party calling
+     * it cannot present your key.
+     * "private": every call must present one of your API keys
      * (Authorization: Bearer), even on a server whose endpoints are
-     * otherwise open. Mutually exclusive with `public`.
+     * otherwise open.
+     * Undeclared: follows the server's auth mode.
      */
-    private?: boolean;
+    access?: "public" | "private";
+    /** @deprecated Legacy alias for `access: "public"`. */
+    public?: boolean;
   }
 
   /** `export const mcp = { … }` — the mcp surface, read at deploy time. */
