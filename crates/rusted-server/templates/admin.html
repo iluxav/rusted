@@ -1,0 +1,75 @@
+<div class="page-wrap mx-auto max-w-5xl px-10 py-10">
+  <div class="mb-8">
+    <p class="eyebrow mb-2">Platform</p>
+    <h1 class="page-title">Admin</h1>
+    <p class="mt-2 text-sm text-clay">Everything on this server, across every account.</p>
+  </div>
+
+  <div class="mb-8 flex flex-wrap items-center gap-2">
+    <a hx-get="/console/admin" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin"
+       class="cursor-pointer rounded-full border border-ember/40 bg-ember/10 px-3.5 py-1.5 font-mono text-[11px] text-ember">Overview</a>
+    <a hx-get="/console/admin/users" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin/users"
+       class="cursor-pointer rounded-full border border-copper/15 px-3.5 py-1.5 font-mono text-[11px] text-clay hover:border-copper/40 hover:text-cream">Users</a>
+    <a hx-get="/console/admin/functions" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin/functions"
+       class="cursor-pointer rounded-full border border-copper/15 px-3.5 py-1.5 font-mono text-[11px] text-clay hover:border-copper/40 hover:text-cream">Functions</a>
+  </div>
+
+  <div class="mb-10 grid gap-4 sm:grid-cols-3">
+    <div class="surface rounded-xl px-6 py-5">
+      <p class="font-mono text-[10px] uppercase tracking-wider text-clay">users</p>
+      <p class="mt-2 font-display text-3xl font-semibold text-cream">{{ total_users }}</p>
+    </div>
+    <div class="surface rounded-xl px-6 py-5">
+      <p class="font-mono text-[10px] uppercase tracking-wider text-clay">functions</p>
+      <p class="mt-2 font-display text-3xl font-semibold text-cream">{{ total_functions }}</p>
+    </div>
+    <div class="surface rounded-xl px-6 py-5">
+      <p class="font-mono text-[10px] uppercase tracking-wider text-clay">invocations this month</p>
+      <p class="mt-2 font-display text-3xl font-semibold text-cream">{{ month_invocations }}</p>
+      <p class="mt-1 font-mono text-[9px] text-clay/60">within each plan's retention window</p>
+    </div>
+  </div>
+
+  <div class="grid gap-8 lg:grid-cols-2">
+    <div>
+      <h2 class="mb-3 font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-copper/70">Newest users</h2>
+      <div class="surface overflow-x-auto rounded-xl">
+        {% if recent_users.is_empty() %}
+        <p class="px-6 py-8 text-center font-mono text-[11px] text-clay">nobody yet</p>
+        {% else %}
+        <table class="w-full font-mono text-[12px]">
+          <tbody>
+            {% for row in recent_users %}
+            <tr class="border-b border-copper/[0.07] last:border-0">
+              <td class="px-5 py-3 text-cream">{{ row.login }}</td>
+              <td class="px-3 py-3 text-clay">{{ row.email }}</td>
+              <td class="px-5 py-3 text-right text-clay/70">{{ row.when }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </div>
+    <div>
+      <h2 class="mb-3 font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-copper/70">Newest functions</h2>
+      <div class="surface overflow-x-auto rounded-xl">
+        {% if recent_functions.is_empty() %}
+        <p class="px-6 py-8 text-center font-mono text-[11px] text-clay">nothing deployed yet</p>
+        {% else %}
+        <table class="w-full font-mono text-[12px]">
+          <tbody>
+            {% for row in recent_functions %}
+            <tr class="border-b border-copper/[0.07] last:border-0">
+              <td class="px-5 py-3 text-cream"><span class="mr-2 text-copper">ƒ</span>{{ row.name }}</td>
+              <td class="px-3 py-3 text-clay">{{ row.owner }}</td>
+              <td class="px-5 py-3 text-right text-clay/70">{{ row.when }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>

@@ -130,6 +130,12 @@ pub fn router(state: WebState) -> Router {
             get(page_function).delete(function_delete),
         )
         .route("/console/function/{name}/published", post(function_publish))
+        .route("/console/admin", get(page_admin))
+        .route("/console/admin/users", get(page_admin_users))
+        .route("/console/admin/users/{id}/admin", post(admin_toggle_admin))
+        .route("/console/admin/functions", get(page_admin_functions))
+        // The short spelling lands on the console section.
+        .route("/admin", get(|| async { Redirect::to("/console/admin") }))
         // The old spelling redirects — bookmarks and muscle memory keep
         // working, and htmx requests land on the canonical page.
         .route("/console/lambda/{name}", get(legacy_lambda_redirect))
@@ -849,6 +855,7 @@ struct ConsoleT {
     lambdas: Vec<String>,
     user_name: String,
     user_initial: String,
+    is_admin: bool,
     inner: String,
 }
 
@@ -1273,6 +1280,7 @@ async fn console_page(
             .to_uppercase()
             .to_string(),
         user_name: display,
+        is_admin: user.admin,
         inner,
     };
     Html(shell.render().expect("console renders")).into_response()
@@ -2169,6 +2177,419 @@ async fn run_test(
         .expect("result renders"),
     )
     .into_response()
+}
+
+// ------------------------------------------------------------------- admin
+
+/// Signed-in non-admins get a plain 404: to everyone without the flag,
+/// /console/admin does not exist. Anonymous visitors bounce to /login like any
+/// console page.
+async fn require_admin(state: &WebState, headers: &HeaderMap) -> Result<User, Response> {
+    let user = require_user(state, headers).await?;
+    if user.admin {
+        Ok(user)
+    } else {
+        Err((StatusCode::NOT_FOUND, "not found").into_response())
+    }
+}
+
+/// One page of a paged admin table, and whether more follows.
+const ADMIN_PAGE_SIZE: i64 = 25;
+
+/// `ILIKE` treats `%`, `_`, and `\` specially; a search for a literal
+/// percent sign should find one.
+fn like_escape(q: &str) -> String {
+    q.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+struct AdminRecentUser {
+    login: String,
+    email: String,
+    when: String,
+}
+
+struct AdminRecentFn {
+    name: String,
+    owner: String,
+    when: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin.html")]
+struct AdminT {
+    total_users: String,
+    total_functions: String,
+    month_invocations: String,
+    recent_users: Vec<AdminRecentUser>,
+    recent_functions: Vec<AdminRecentFn>,
+}
+
+async fn page_admin(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    let user = match require_admin(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let pool = &state.0.app.pool;
+    // Retention pruning trims invocation rows per plan, so the monthly count
+    // is "within retention" — the template says so.
+    let totals = sqlx::query(
+        "SELECT (SELECT count(*) FROM users) AS users,
+                (SELECT count(*) FROM functions) AS functions,
+                (SELECT count(*) FROM invocations
+                  WHERE at >= date_trunc('month', now())) AS month_invocations",
+    )
+    .fetch_one(pool)
+    .await;
+    let (users, functions, month): (i64, i64, i64) = match &totals {
+        Ok(row) => (
+            row.get("users"),
+            row.get("functions"),
+            row.get("month_invocations"),
+        ),
+        Err(_) => (0, 0, 0),
+    };
+    let recent_users = sqlx::query(
+        "SELECT login, email, extract(epoch FROM created_at)::bigint AS added
+         FROM users ORDER BY created_at DESC LIMIT 10",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| AdminRecentUser {
+        login: row.get("login"),
+        email: row
+            .get::<Option<String>, _>("email")
+            .unwrap_or_else(|| "—".into()),
+        when: ago(row.get("added")),
+    })
+    .collect();
+    let recent_functions = sqlx::query(
+        "SELECT f.name, coalesce(u.login, '—') AS owner,
+                extract(epoch FROM f.created_at)::bigint AS added
+         FROM functions f LEFT JOIN users u ON u.id = f.user_id
+         ORDER BY f.created_at DESC LIMIT 10",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| AdminRecentFn {
+        name: row.get("name"),
+        owner: row.get("owner"),
+        when: ago(row.get("added")),
+    })
+    .collect();
+    let inner = AdminT {
+        total_users: human_count(users),
+        total_functions: human_count(functions),
+        month_invocations: human_count(month),
+        recent_users,
+        recent_functions,
+    }
+    .render()
+    .expect("admin renders");
+    console_page(&state, &headers, &user, "admin", inner).await
+}
+
+// ------------------------------------------------------------- admin: users
+
+#[derive(Deserialize, Default)]
+struct AdminListQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+}
+
+impl AdminListQuery {
+    fn page(&self) -> i64 {
+        self.page.unwrap_or(1).max(1)
+    }
+    /// (sort, dir) validated against this page's whitelist — anything else
+    /// falls back to the default, so the ORDER BY below is never user text.
+    fn sort_dir<'k>(&self, keys: &[&'k str], default: (&'k str, &'k str)) -> (&'k str, &'k str) {
+        let sort = keys
+            .iter()
+            .find(|k| Some(**k) == self.sort.as_deref())
+            .copied()
+            .unwrap_or(default.0);
+        let dir = match self.dir.as_deref() {
+            Some("asc") => "asc",
+            Some("desc") => "desc",
+            _ => default.1,
+        };
+        (sort, dir)
+    }
+    fn url(&self, base: &str, sort: &str, dir: &str, page: i64) -> String {
+        format!(
+            "{base}?q={}&sort={sort}&dir={dir}&page={page}",
+            urlencoding::encode(&self.q)
+        )
+    }
+}
+
+struct AdminUserRow {
+    id: String,
+    login: String,
+    email: String,
+    plan: String,
+    added: String,
+    last_login: String,
+    admin: bool,
+    /// The signed-in admin cannot toggle themselves; the button hides.
+    is_self: bool,
+}
+
+#[derive(Template)]
+#[template(path = "admin_users.html")]
+struct AdminUsersT {
+    rows: Vec<AdminUserRow>,
+    q: String,
+    sort: String,
+    dir: String,
+    page: i64,
+    /// Header links flip direction when re-sorting the active column.
+    added_url: String,
+    login_url: String,
+    prev_url: Option<String>,
+    next_url: Option<String>,
+    toggle_query: String,
+    error: Option<String>,
+}
+
+async fn admin_users_inner(
+    state: &WebState,
+    user: &User,
+    query: &AdminListQuery,
+    error: Option<String>,
+) -> String {
+    let (sort, dir) = query.sort_dir(&["added", "lastlogin"], ("added", "desc"));
+    let order = match (sort, dir) {
+        ("added", "asc") => "u.created_at ASC",
+        ("added", _) => "u.created_at DESC",
+        ("lastlogin", "asc") => "u.last_login_at ASC NULLS FIRST",
+        _ => "u.last_login_at DESC NULLS LAST",
+    };
+    let page = query.page();
+    let pattern = format!("%{}%", like_escape(query.q.trim()));
+    // AssertSqlSafe: {order} interpolates one of four literals from the
+    // whitelist above, never caller text.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT u.id, u.login, u.email, u.admin,
+                extract(epoch FROM u.created_at)::bigint AS added,
+                extract(epoch FROM u.last_login_at)::bigint AS last_login,
+                p.name AS plan
+         FROM users u
+         LEFT JOIN LATERAL (
+             SELECT pl.name FROM subscriptions s JOIN plans pl ON pl.id = s.plan_id
+             WHERE s.user_id = u.id AND s.status = 'active'
+             ORDER BY s.started_at DESC LIMIT 1
+         ) p ON TRUE
+         WHERE $1 = '' OR u.email ILIKE $2 OR u.login ILIKE $2
+         ORDER BY {order} LIMIT $3 OFFSET $4"
+    )))
+    .bind(query.q.trim())
+    .bind(&pattern)
+    .bind(ADMIN_PAGE_SIZE + 1)
+    .bind((page - 1) * ADMIN_PAGE_SIZE)
+    .fetch_all(&state.0.app.pool)
+    .await
+    .unwrap_or_default();
+    let has_next = rows.len() as i64 > ADMIN_PAGE_SIZE;
+    let rows = rows
+        .into_iter()
+        .take(ADMIN_PAGE_SIZE as usize)
+        .map(|row| {
+            let id: Uuid = row.get("id");
+            AdminUserRow {
+                id: id.to_string(),
+                login: row.get("login"),
+                email: row
+                    .get::<Option<String>, _>("email")
+                    .unwrap_or_else(|| "—".into()),
+                plan: row
+                    .get::<Option<String>, _>("plan")
+                    .unwrap_or_else(|| "Dev".into()),
+                added: ago(row.get("added")),
+                last_login: row
+                    .get::<Option<i64>, _>("last_login")
+                    .map(ago)
+                    .unwrap_or_else(|| "never".into()),
+                admin: row.get("admin"),
+                is_self: id == user.id,
+            }
+        })
+        .collect();
+    let base = "/console/admin/users";
+    let flip = |key: &str| {
+        if sort == key && dir == "desc" {
+            "asc"
+        } else {
+            "desc"
+        }
+    };
+    AdminUsersT {
+        added_url: query.url(base, "added", flip("added"), 1),
+        login_url: query.url(base, "lastlogin", flip("lastlogin"), 1),
+        prev_url: (page > 1).then(|| query.url(base, sort, dir, page - 1)),
+        next_url: has_next.then(|| query.url(base, sort, dir, page + 1)),
+        toggle_query: format!(
+            "q={}&sort={sort}&dir={dir}&page={page}",
+            urlencoding::encode(query.q.trim())
+        ),
+        rows,
+        q: query.q.trim().to_string(),
+        sort: sort.to_string(),
+        dir: dir.to_string(),
+        page,
+        error,
+    }
+    .render()
+    .expect("admin users renders")
+}
+
+async fn page_admin_users(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminListQuery>,
+) -> Response {
+    let user = match require_admin(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let inner = admin_users_inner(&state, &user, &query, None).await;
+    console_page(&state, &headers, &user, "admin-users", inner).await
+}
+
+async fn admin_toggle_admin(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(query): Query<AdminListQuery>,
+) -> Response {
+    let user = match require_admin(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    // Toggling yourself off would lock the last admin out mid-click; the
+    // database is the way back in, so refuse the footgun outright.
+    let error = if id == user.id {
+        Some("you cannot change your own admin flag".to_string())
+    } else {
+        let updated = sqlx::query("UPDATE users SET admin = NOT admin WHERE id = $1")
+            .bind(id)
+            .execute(&state.0.app.pool)
+            .await;
+        match updated {
+            Ok(result) if result.rows_affected() == 1 => {
+                // Cached sessions still carry the old flag; drop them all so
+                // the change is effective now, not in five minutes.
+                state.0.app.auth.clear();
+                None
+            }
+            Ok(_) => Some("no such user".to_string()),
+            Err(e) => Some(e.to_string()),
+        }
+    };
+    Html(admin_users_inner(&state, &user, &query, error).await).into_response()
+}
+
+// --------------------------------------------------------- admin: functions
+
+struct AdminFnRow {
+    name: String,
+    owner: String,
+    rev: i64,
+    created: String,
+    updated: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin_functions.html")]
+struct AdminFunctionsT {
+    rows: Vec<AdminFnRow>,
+    q: String,
+    page: i64,
+    created_url: String,
+    updated_url: String,
+    prev_url: Option<String>,
+    next_url: Option<String>,
+}
+
+async fn page_admin_functions(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminListQuery>,
+) -> Response {
+    let user = match require_admin(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let (sort, dir) = query.sort_dir(&["created", "updated"], ("updated", "desc"));
+    let order = match (sort, dir) {
+        ("created", "asc") => "f.created_at ASC",
+        ("created", _) => "f.created_at DESC",
+        ("updated", "asc") => "f.updated_at ASC",
+        _ => "f.updated_at DESC",
+    };
+    let page = query.page();
+    let pattern = format!("%{}%", like_escape(query.q.trim()));
+    // AssertSqlSafe: {order} interpolates one of four literals from the
+    // whitelist above, never caller text.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT f.name, f.current_rev, coalesce(u.login, '—') AS owner,
+                extract(epoch FROM f.created_at)::bigint AS created,
+                extract(epoch FROM f.updated_at)::bigint AS updated
+         FROM functions f LEFT JOIN users u ON u.id = f.user_id
+         WHERE $1 = '' OR f.name ILIKE $2
+         ORDER BY {order} LIMIT $3 OFFSET $4"
+    )))
+    .bind(query.q.trim())
+    .bind(&pattern)
+    .bind(ADMIN_PAGE_SIZE + 1)
+    .bind((page - 1) * ADMIN_PAGE_SIZE)
+    .fetch_all(&state.0.app.pool)
+    .await
+    .unwrap_or_default();
+    let has_next = rows.len() as i64 > ADMIN_PAGE_SIZE;
+    let rows = rows
+        .into_iter()
+        .take(ADMIN_PAGE_SIZE as usize)
+        .map(|row| AdminFnRow {
+            name: row.get("name"),
+            owner: row.get("owner"),
+            rev: row.get("current_rev"),
+            created: ago(row.get("created")),
+            updated: ago(row.get("updated")),
+        })
+        .collect();
+    let base = "/console/admin/functions";
+    let flip = |key: &str| {
+        if sort == key && dir == "desc" {
+            "asc"
+        } else {
+            "desc"
+        }
+    };
+    let inner = AdminFunctionsT {
+        created_url: query.url(base, "created", flip("created"), 1),
+        updated_url: query.url(base, "updated", flip("updated"), 1),
+        prev_url: (page > 1).then(|| query.url(base, sort, dir, page - 1)),
+        next_url: has_next.then(|| query.url(base, sort, dir, page + 1)),
+        rows,
+        q: query.q.trim().to_string(),
+        page,
+    }
+    .render()
+    .expect("admin functions renders");
+    console_page(&state, &headers, &user, "admin-functions", inner).await
 }
 
 #[cfg(test)]

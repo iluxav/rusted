@@ -1,0 +1,77 @@
+<div id="admin-functions-page" class="page-wrap mx-auto max-w-5xl px-10 py-10">
+  <div class="mb-8">
+    <p class="eyebrow mb-2">Platform</p>
+    <h1 class="page-title">Functions</h1>
+    <p class="mt-2 text-sm text-clay">Everything deployed on this server, across every account.</p>
+  </div>
+
+  <div class="mb-6 flex flex-wrap items-center gap-2">
+    <a hx-get="/console/admin" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin"
+       class="cursor-pointer rounded-full border border-copper/15 px-3.5 py-1.5 font-mono text-[11px] text-clay hover:border-copper/40 hover:text-cream">Overview</a>
+    <a hx-get="/console/admin/users" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin/users"
+       class="cursor-pointer rounded-full border border-copper/15 px-3.5 py-1.5 font-mono text-[11px] text-clay hover:border-copper/40 hover:text-cream">Users</a>
+    <a hx-get="/console/admin/functions" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin/functions"
+       class="cursor-pointer rounded-full border border-ember/40 bg-ember/10 px-3.5 py-1.5 font-mono text-[11px] text-ember">Functions</a>
+
+    <form hx-get="/console/admin/functions" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" class="ml-auto flex items-center gap-1.5">
+      <input name="q" value="{{ q }}" spellcheck="false" autocomplete="off" placeholder="search by name"
+             hx-get="/console/admin/functions" hx-target="#content" hx-swap="innerHTML" hx-push-url="true"
+             hx-trigger="keyup changed delay:400ms" hx-include="closest form"
+             class="field w-56 px-3 py-1.5 font-mono text-[11px] text-cream">
+    </form>
+  </div>
+
+  <div class="surface overflow-x-auto rounded-xl">
+    {% if rows.is_empty() %}
+    <p class="px-6 py-8 text-center font-mono text-[11px] text-clay">no functions match</p>
+    {% else %}
+    <table class="w-full min-w-[560px] font-mono text-[12px]">
+      <thead>
+        <tr class="border-b border-copper/[0.07] text-left text-[10px] uppercase tracking-wider text-clay/70">
+          <th class="px-6 py-2 font-normal">function</th>
+          <th class="px-3 py-2 font-normal">owner</th>
+          <th class="px-3 py-2 text-right font-normal">rev</th>
+          <th class="px-3 py-2 font-normal">
+            <a hx-get="{{ created_url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="{{ created_url }}"
+               class="cursor-pointer hover:text-ember">created</a>
+          </th>
+          <th class="px-6 py-2 font-normal">
+            <a hx-get="{{ updated_url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="{{ updated_url }}"
+               class="cursor-pointer hover:text-ember">last pushed</a>
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="border-b border-copper/[0.07] last:border-0 hover:bg-rust-800/50 transition-colors">
+          <td class="px-6 py-3 text-cream"><span class="mr-2 text-copper">ƒ</span>{{ row.name }}</td>
+          <td class="px-3 py-3 text-clay">{{ row.owner }}</td>
+          <td class="px-3 py-3 text-right text-clay">{{ row.rev }}</td>
+          <td class="px-3 py-3 text-clay/70">{{ row.created }}</td>
+          <td class="px-6 py-3 text-clay/70">{{ row.updated }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if prev_url.is_some() || next_url.is_some() %}
+    <div class="flex items-center justify-between border-t border-copper/10 px-6 py-3 font-mono text-[11px] text-clay">
+      <span>page {{ page }}</span>
+      <div class="flex items-center gap-2">
+        {% match prev_url %}{% when Some with (url) %}
+        <button hx-get="{{ url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true"
+                class="rounded-md border border-copper/25 px-2.5 py-1 transition-colors hover:border-ember hover:text-ember">← prev</button>
+        {% when None %}
+        <span class="rounded-md border border-copper/10 px-2.5 py-1 opacity-30">← prev</span>
+        {% endmatch %}
+        {% match next_url %}{% when Some with (url) %}
+        <button hx-get="{{ url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true"
+                class="rounded-md border border-copper/25 px-2.5 py-1 transition-colors hover:border-ember hover:text-ember">next →</button>
+        {% when None %}
+        <span class="rounded-md border border-copper/10 px-2.5 py-1 opacity-30">next →</span>
+        {% endmatch %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>

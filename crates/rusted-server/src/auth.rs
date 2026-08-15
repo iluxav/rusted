@@ -37,6 +37,9 @@ pub struct User {
     pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub email: Option<String>,
+    /// Platform administrator — console-wide read access and user management.
+    /// Nobody has it by default; granted by hand in the database.
+    pub admin: bool,
 }
 
 struct KeyEntry {
@@ -216,6 +219,11 @@ pub async fn create_session(pool: &PgPool, user_id: Uuid) -> sqlx::Result<String
     .bind(SESSION_DAYS as i32)
     .execute(pool)
     .await?;
+    // A session is a sign-in; the admin user list sorts by this.
+    let _ = sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await;
     Ok(token)
 }
 
@@ -233,7 +241,7 @@ pub async fn resolve_session(state: &AppState, token: &str) -> Option<User> {
         }
     }
     let user = sqlx::query(
-        "SELECT u.id, u.login, u.name, u.avatar_url, u.email
+        "SELECT u.id, u.login, u.name, u.avatar_url, u.email, u.admin
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = $1 AND s.expires_at > now()",
     )
@@ -248,6 +256,7 @@ pub async fn resolve_session(state: &AppState, token: &str) -> Option<User> {
         name: row.get("name"),
         avatar_url: row.get("avatar_url"),
         email: row.get("email"),
+        admin: row.get("admin"),
     });
     state.auth.sessions.lock().unwrap().insert(
         token_hash,

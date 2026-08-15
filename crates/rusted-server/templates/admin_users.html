@@ -1,0 +1,99 @@
+<div id="admin-users-page" class="page-wrap mx-auto max-w-5xl px-10 py-10">
+  <div class="mb-8">
+    <p class="eyebrow mb-2">Platform</p>
+    <h1 class="page-title">Users</h1>
+    <p class="mt-2 text-sm text-clay">Every account on this server.</p>
+  </div>
+
+  <div class="mb-6 flex flex-wrap items-center gap-2">
+    <a hx-get="/console/admin" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin"
+       class="cursor-pointer rounded-full border border-copper/15 px-3.5 py-1.5 font-mono text-[11px] text-clay hover:border-copper/40 hover:text-cream">Overview</a>
+    <a hx-get="/console/admin/users" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin/users"
+       class="cursor-pointer rounded-full border border-ember/40 bg-ember/10 px-3.5 py-1.5 font-mono text-[11px] text-ember">Users</a>
+    <a hx-get="/console/admin/functions" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/admin/functions"
+       class="cursor-pointer rounded-full border border-copper/15 px-3.5 py-1.5 font-mono text-[11px] text-clay hover:border-copper/40 hover:text-cream">Functions</a>
+
+    <form hx-get="/console/admin/users" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" class="ml-auto flex items-center gap-1.5">
+      <input type="hidden" name="sort" value="{{ sort }}">
+      <input type="hidden" name="dir" value="{{ dir }}">
+      <input name="q" value="{{ q }}" spellcheck="false" autocomplete="off" placeholder="search email or login"
+             hx-get="/console/admin/users" hx-target="#content" hx-swap="innerHTML" hx-push-url="true"
+             hx-trigger="keyup changed delay:400ms" hx-include="closest form"
+             class="field w-56 px-3 py-1.5 font-mono text-[11px] text-cream">
+    </form>
+  </div>
+
+  {% if let Some(message) = error %}
+  <div class="mb-4 rounded-xl border border-blood/40 bg-rust-950 px-6 py-4 font-mono text-xs text-blood">{{ message }}</div>
+  {% endif %}
+
+  <div class="surface overflow-x-auto rounded-xl">
+    {% if rows.is_empty() %}
+    <p class="px-6 py-8 text-center font-mono text-[11px] text-clay">no users match</p>
+    {% else %}
+    <table class="w-full min-w-[640px] font-mono text-[12px]">
+      <thead>
+        <tr class="border-b border-copper/[0.07] text-left text-[10px] uppercase tracking-wider text-clay/70">
+          <th class="px-6 py-2 font-normal">user</th>
+          <th class="px-3 py-2 font-normal">email</th>
+          <th class="px-3 py-2 font-normal">plan</th>
+          <th class="px-3 py-2 font-normal">
+            <a hx-get="{{ added_url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="{{ added_url }}"
+               class="cursor-pointer hover:text-ember {% if sort == "added" %}text-ember{% endif %}">added {% if sort == "added" %}{% if dir == "desc" %}↓{% else %}↑{% endif %}{% endif %}</a>
+          </th>
+          <th class="px-3 py-2 font-normal">
+            <a hx-get="{{ login_url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="{{ login_url }}"
+               class="cursor-pointer hover:text-ember {% if sort == "lastlogin" %}text-ember{% endif %}">last login {% if sort == "lastlogin" %}{% if dir == "desc" %}↓{% else %}↑{% endif %}{% endif %}</a>
+          </th>
+          <th class="px-6 py-2 text-right font-normal">admin</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="border-b border-copper/[0.07] last:border-0 hover:bg-rust-800/50 transition-colors">
+          <td class="px-6 py-3 text-cream">{{ row.login }}{% if row.is_self %} <span class="text-clay/50">(you)</span>{% endif %}</td>
+          <td class="px-3 py-3 text-clay">{{ row.email }}</td>
+          <td class="px-3 py-3 text-clay">{{ row.plan }}</td>
+          <td class="px-3 py-3 text-clay/70">{{ row.added }}</td>
+          <td class="px-3 py-3 text-clay/70">{{ row.last_login }}</td>
+          <td class="px-6 py-3 text-right">
+            {% if row.is_self %}
+            <span class="font-mono text-[10px] uppercase tracking-wider text-ember">admin</span>
+            {% else if row.admin %}
+            <button hx-post="/console/admin/users/{{ row.id }}/admin?{{ toggle_query }}"
+                    hx-target="#admin-users-page" hx-swap="outerHTML"
+                    hx-confirm="Revoke {{ row.login }}'s admin access?"
+                    class="rounded-md border border-ember/40 bg-ember/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-ember transition-colors hover:bg-blood/10 hover:border-blood/40 hover:text-blood">admin ✓</button>
+            {% else %}
+            <button hx-post="/console/admin/users/{{ row.id }}/admin?{{ toggle_query }}"
+                    hx-target="#admin-users-page" hx-swap="outerHTML"
+                    hx-confirm="Make {{ row.login }} a platform admin? They will see every user and function."
+                    class="rounded-md border border-copper/25 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-clay transition-colors hover:border-ember hover:text-ember">make admin</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if prev_url.is_some() || next_url.is_some() %}
+    <div class="flex items-center justify-between border-t border-copper/10 px-6 py-3 font-mono text-[11px] text-clay">
+      <span>page {{ page }}</span>
+      <div class="flex items-center gap-2">
+        {% match prev_url %}{% when Some with (url) %}
+        <button hx-get="{{ url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true"
+                class="rounded-md border border-copper/25 px-2.5 py-1 transition-colors hover:border-ember hover:text-ember">← prev</button>
+        {% when None %}
+        <span class="rounded-md border border-copper/10 px-2.5 py-1 opacity-30">← prev</span>
+        {% endmatch %}
+        {% match next_url %}{% when Some with (url) %}
+        <button hx-get="{{ url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true"
+                class="rounded-md border border-copper/25 px-2.5 py-1 transition-colors hover:border-ember hover:text-ember">next →</button>
+        {% when None %}
+        <span class="rounded-md border border-copper/10 px-2.5 py-1 opacity-30">next →</span>
+        {% endmatch %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
