@@ -308,9 +308,15 @@ declare namespace Rusted {
      * Callable without an API key even when the server requires auth.
      * What an OAuth callback or webhook target needs — the third party
      * calling it cannot present your key. Default: whatever the server's
-     * auth mode demands.
+     * auth mode demands. Mutually exclusive with `private`.
      */
     public?: boolean;
+    /**
+     * Every call must present one of the owner's API keys
+     * (Authorization: Bearer), even on a server whose endpoints are
+     * otherwise open. Mutually exclusive with `public`.
+     */
+    private?: boolean;
   }
 
   /** `export const mcp = { … }` — the mcp surface, read at deploy time. */
