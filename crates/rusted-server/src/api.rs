@@ -2016,11 +2016,11 @@ fn mcp_tools() -> Value {
              \u{0020} return context.json({ answer: data.items.length });\n\
              }\
              \n\nAvailable: fetch (http/https, text and JSON only), console.log/warn/error, \
+             URL and URLSearchParams, TextEncoder/TextDecoder (utf-8), \
              and the ECMAScript standard library — JSON, RegExp, Date, Math, Map, Set, \
              Promise, BigInt, Proxy, Reflect, btoa/atob.\
-             \n\nNot available, so do it by hand: URL and URLSearchParams (parse with \
-             string operations or a regex), setTimeout and timers of any kind, crypto, \
-             TextEncoder/TextDecoder, Intl, Buffer, Blob, FormData, AbortController, and \
+             \n\nNot available, so do it by hand: setTimeout and timers of any kind, crypto, \
+             Intl, Buffer, Blob, FormData, AbortController, and \
              the Headers/Request/Response classes — `fetch` takes and returns plain \
              objects here.\
              \n\nAlso not available: import — nothing is resolved at runtime, so send \

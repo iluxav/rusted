@@ -1421,6 +1421,299 @@ fn install_codec<'js>(ctx: &Ctx<'js>) -> Result<(), String> {
     set("__rustedTimingSafeEqual", timing_safe)
 }
 
+/// The web-platform globals the npm ecosystem assumes exist — `URL`,
+/// `URLSearchParams`, `TextEncoder`, `TextDecoder` — natively backed so every
+/// function (and most pure-JS packages) gets them without a polyfill. Parsing
+/// and form encoding are the `url` crate, i.e. the WHATWG URL Standard; the
+/// classes themselves are the prelude below.
+fn install_web<'js>(ctx: &Ctx<'js>) -> Result<(), String> {
+    let set = |name: &str, f: Function<'js>| -> Result<(), String> {
+        ctx.globals()
+            .set(name, f)
+            .map_err(|e| exception_message(ctx, e))
+    };
+    let parse = Function::new(
+        ctx.clone(),
+        |input: String, base: rquickjs::function::Opt<String>| -> String {
+            let parsed = match base.0.as_deref() {
+                Some(base) => url::Url::parse(base).and_then(|base| base.join(&input)),
+                None => url::Url::parse(&input),
+            };
+            match parsed {
+                Ok(u) => serde_json::json!({
+                    "href": u.as_str(),
+                    "protocol": format!("{}:", u.scheme()),
+                    "username": u.username(),
+                    "password": u.password().unwrap_or(""),
+                    "hostname": u.host_str().unwrap_or(""),
+                    "port": u.port().map(|p| p.to_string()).unwrap_or_default(),
+                    "pathname": u.path(),
+                    "search": u.query().filter(|q| !q.is_empty())
+                        .map(|q| format!("?{q}")).unwrap_or_default(),
+                    "hash": u.fragment().filter(|f| !f.is_empty())
+                        .map(|f| format!("#{f}")).unwrap_or_default(),
+                    "origin": u.origin().ascii_serialization(),
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+            }
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedUrlParse", parse)?;
+
+    let form_decode = Function::new(ctx.clone(), |qs: String| -> String {
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(qs.as_bytes())
+            .into_owned()
+            .collect();
+        serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string())
+    })
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedFormDecode", form_decode)?;
+
+    let form_encode = Function::new(ctx.clone(), |pairs: String| -> String {
+        let pairs: Vec<(String, String)> = serde_json::from_str(&pairs).unwrap_or_default();
+        url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(pairs)
+            .finish()
+    })
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedFormEncode", form_encode)?;
+
+    let utf8_encode = Function::new(ctx.clone(), |s: String| -> Vec<u8> { s.into_bytes() })
+        .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedUtf8Encode", utf8_encode)?;
+
+    let utf8_decode = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, value: Value<'_>| -> rquickjs::Result<String> {
+            Ok(String::from_utf8_lossy(&value_bytes(&ctx, &value)?).into_owned())
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedUtf8Decode", utf8_decode)?;
+
+    let utf8_valid = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, value: Value<'_>| -> rquickjs::Result<bool> {
+            Ok(std::str::from_utf8(&value_bytes(&ctx, &value)?).is_ok())
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    set("__rustedUtf8Valid", utf8_valid)?;
+
+    ctx.eval::<(), _>(WEB_PRELUDE)
+        .map_err(|e| exception_message(ctx, e))
+}
+
+/// Spec-shaped rather than spec-complete: the constructors, properties, and
+/// methods real packages reach for. Underscored fields are private by
+/// convention; the sandbox has no caller to hide them from.
+const WEB_PRELUDE: &str = r##"(() => {
+  const parse = (input, base) => {
+    const raw = base === undefined || base === null
+      ? globalThis.__rustedUrlParse(String(input))
+      : globalThis.__rustedUrlParse(String(input), String(base));
+    const r = JSON.parse(raw);
+    if (r.error) throw new TypeError(`Invalid URL: ${String(input)}`);
+    return r;
+  };
+  const decodeForm = (qs) => {
+    qs = String(qs);
+    return JSON.parse(globalThis.__rustedFormDecode(qs.startsWith("?") ? qs.slice(1) : qs));
+  };
+  const encodeForm = (pairs) => globalThis.__rustedFormEncode(JSON.stringify(pairs));
+
+  class URLSearchParams {
+    constructor(init) {
+      this._pairs = [];
+      this._url = null;
+      if (init === undefined || init === null) return;
+      if (typeof init === "string") {
+        this._pairs = decodeForm(init);
+      } else if (init instanceof URLSearchParams) {
+        this._pairs = init._pairs.map((p) => [p[0], p[1]]);
+      } else if (typeof init[Symbol.iterator] === "function") {
+        for (const pair of init) {
+          const entry = [...pair];
+          if (entry.length !== 2) {
+            throw new TypeError("URLSearchParams: each init pair needs exactly two items");
+          }
+          this._pairs.push([String(entry[0]), String(entry[1])]);
+        }
+      } else {
+        for (const key of Object.keys(init)) this._pairs.push([String(key), String(init[key])]);
+      }
+    }
+    _sync() { if (this._url) this._url._setSearch(this.toString()); }
+    get size() { return this._pairs.length; }
+    get(name) {
+      name = String(name);
+      const hit = this._pairs.find((p) => p[0] === name);
+      return hit ? hit[1] : null;
+    }
+    getAll(name) {
+      name = String(name);
+      return this._pairs.filter((p) => p[0] === name).map((p) => p[1]);
+    }
+    has(name, value) {
+      name = String(name);
+      return this._pairs.some((p) => p[0] === name && (value === undefined || p[1] === String(value)));
+    }
+    set(name, value) {
+      name = String(name); value = String(value);
+      const first = this._pairs.findIndex((p) => p[0] === name);
+      this._pairs = this._pairs.filter((p, i) => p[0] !== name || i === first);
+      if (first === -1) this._pairs.push([name, value]);
+      else this._pairs[first] = [name, value];
+      this._sync();
+    }
+    append(name, value) { this._pairs.push([String(name), String(value)]); this._sync(); }
+    delete(name, value) {
+      name = String(name);
+      this._pairs = this._pairs.filter((p) => p[0] !== name || (value !== undefined && p[1] !== String(value)));
+      this._sync();
+    }
+    sort() { this._pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); this._sync(); }
+    forEach(fn, thisArg) { for (const [k, v] of this._pairs) fn.call(thisArg, v, k, this); }
+    *entries() { for (const p of this._pairs) yield [p[0], p[1]]; }
+    *keys() { for (const p of this._pairs) yield p[0]; }
+    *values() { for (const p of this._pairs) yield p[1]; }
+    [Symbol.iterator]() { return this.entries(); }
+    toString() { return encodeForm(this._pairs); }
+  }
+
+  class URL {
+    constructor(input, base) {
+      this._c = parse(input, base);
+      this._params = null;
+    }
+    // Rebuild from components and reparse, so every mutation is canonicalized
+    // by the same WHATWG parser that built the URL. Setter failures are
+    // silent, as the spec has them.
+    _rebuild(mut) {
+      const c = { ...this._c, ...mut };
+      const auth = c.username || c.password
+        ? `${c.username}${c.password ? ":" + c.password : ""}@` : "";
+      const host = c.hostname ? c.hostname + (c.port ? ":" + c.port : "") : "";
+      const slashes = host || auth ? "//" : "";
+      const candidate = `${c.protocol}${slashes}${auth}${host}${c.pathname}${c.search}${c.hash}`;
+      try { this._c = parse(candidate); } catch {}
+    }
+    _refreshParams() {
+      if (this._params) this._params._pairs = decodeForm(this._c.search);
+    }
+    _setSearch(serialized) { this._rebuild({ search: serialized ? "?" + serialized : "" }); }
+    get href() { return this._c.href; }
+    set href(v) { this._c = parse(v); this._refreshParams(); }
+    get origin() { return this._c.origin; }
+    get protocol() { return this._c.protocol; }
+    set protocol(v) {
+      v = String(v);
+      this._rebuild({ protocol: v.endsWith(":") ? v : v + ":" });
+    }
+    get username() { return this._c.username; }
+    set username(v) { this._rebuild({ username: String(v) }); }
+    get password() { return this._c.password; }
+    set password(v) { this._rebuild({ password: String(v) }); }
+    get hostname() { return this._c.hostname; }
+    set hostname(v) { this._rebuild({ hostname: String(v) }); }
+    get port() { return this._c.port; }
+    set port(v) { this._rebuild({ port: String(v) }); }
+    get host() { return this._c.hostname + (this._c.port ? ":" + this._c.port : ""); }
+    set host(v) {
+      const raw = String(v);
+      const at = raw.lastIndexOf(":");
+      if (at > -1 && /^\d+$/.test(raw.slice(at + 1))) {
+        this._rebuild({ hostname: raw.slice(0, at), port: raw.slice(at + 1) });
+      } else {
+        this._rebuild({ hostname: raw, port: "" });
+      }
+    }
+    get pathname() { return this._c.pathname; }
+    set pathname(v) { this._rebuild({ pathname: String(v) }); }
+    get search() { return this._c.search; }
+    set search(v) {
+      v = String(v);
+      if (v && !v.startsWith("?")) v = "?" + v;
+      this._rebuild({ search: v });
+      this._refreshParams();
+    }
+    get hash() { return this._c.hash; }
+    set hash(v) {
+      v = String(v);
+      if (v.startsWith("#")) v = v.slice(1);
+      this._rebuild({ hash: v ? "#" + v : "" });
+    }
+    get searchParams() {
+      if (!this._params) {
+        this._params = new URLSearchParams(this._c.search);
+        this._params._url = this;
+      }
+      return this._params;
+    }
+    toString() { return this._c.href; }
+    toJSON() { return this._c.href; }
+    static canParse(input, base) {
+      try { parse(input, base); return true; } catch { return false; }
+    }
+    static parse(input, base) {
+      try { return new URL(input, base); } catch { return null; }
+    }
+  }
+
+  class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(input = "") {
+      return new Uint8Array(globalThis.__rustedUtf8Encode(String(input)));
+    }
+    encodeInto(source, destination) {
+      const bytes = this.encode(source);
+      const written = Math.min(bytes.length, destination.length);
+      destination.set(bytes.subarray(0, written));
+      return { read: written === bytes.length ? String(source).length : undefined, written };
+    }
+  }
+
+  class TextDecoder {
+    constructor(label = "utf-8", options = {}) {
+      const l = String(label).trim().toLowerCase();
+      if (l !== "utf-8" && l !== "utf8" && l !== "unicode-1-1-utf-8") {
+        throw new RangeError(`TextDecoder: only utf-8 is supported, not "${label}"`);
+      }
+      this._fatal = !!(options && options.fatal);
+      this._ignoreBOM = !!(options && options.ignoreBOM);
+    }
+    get encoding() { return "utf-8"; }
+    get fatal() { return this._fatal; }
+    get ignoreBOM() { return this._ignoreBOM; }
+    decode(input) {
+      if (input === undefined) return "";
+      let bytes;
+      if (input instanceof Uint8Array) bytes = input;
+      else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
+      else if (ArrayBuffer.isView(input)) {
+        bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      } else {
+        throw new TypeError("TextDecoder.decode: expected an ArrayBuffer or ArrayBuffer view");
+      }
+      if (!this._ignoreBOM && bytes.length >= 3
+          && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+        bytes = bytes.subarray(3);
+      }
+      if (this._fatal && !globalThis.__rustedUtf8Valid(bytes)) {
+        throw new TypeError("TextDecoder.decode: invalid UTF-8 with { fatal: true }");
+      }
+      return globalThis.__rustedUtf8Decode(bytes);
+    }
+  }
+
+  globalThis.URL = URL;
+  globalThis.URLSearchParams = URLSearchParams;
+  globalThis.TextEncoder = TextEncoder;
+  globalThis.TextDecoder = TextDecoder;
+})();"##;
+
 fn restricted_runtime(limits: &Limits) -> (Runtime, Arc<AtomicBool>) {
     let rt = Runtime::new().expect("quickjs runtime");
     rt.set_memory_limit(limits.memory_bytes);
@@ -1477,6 +1770,7 @@ fn load_module_raw<'js>(
     // through, which is what keeps the capability universally present.
     install_random(ctx)?;
     install_codec(ctx)?;
+    install_web(ctx)?;
     let declared = match bytecode {
         // SAFETY: the bytes came from `compile` in this same process, so the
         // QuickJS build that reads them is the one that wrote them.

@@ -504,3 +504,73 @@ declare const console: {
   warn(...args: unknown[]): void;
   error(...args: unknown[]): void;
 };
+
+/**
+ * WHATWG URL, natively backed. Component setters re-serialize through the
+ * same parser, and `searchParams` is live-linked: mutating it updates the
+ * URL, and assigning `search` updates it back.
+ */
+declare class URL {
+  constructor(input: string, base?: string | URL);
+  href: string;
+  readonly origin: string;
+  protocol: string;
+  username: string;
+  password: string;
+  host: string;
+  hostname: string;
+  port: string;
+  pathname: string;
+  search: string;
+  hash: string;
+  readonly searchParams: URLSearchParams;
+  toString(): string;
+  toJSON(): string;
+  static canParse(input: string, base?: string | URL): boolean;
+  static parse(input: string, base?: string | URL): URL | null;
+}
+
+declare class URLSearchParams {
+  constructor(
+    init?: string | URLSearchParams | [string, string][] | Record<string, string>,
+  );
+  readonly size: number;
+  get(name: string): string | null;
+  getAll(name: string): string[];
+  has(name: string, value?: string): boolean;
+  set(name: string, value: string): void;
+  append(name: string, value: string): void;
+  delete(name: string, value?: string): void;
+  sort(): void;
+  forEach(
+    fn: (value: string, key: string, parent: URLSearchParams) => void,
+    thisArg?: unknown,
+  ): void;
+  entries(): IterableIterator<[string, string]>;
+  keys(): IterableIterator<string>;
+  values(): IterableIterator<string>;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
+  toString(): string;
+}
+
+/** UTF-8 only, like the platform. */
+declare class TextEncoder {
+  readonly encoding: "utf-8";
+  encode(input?: string): Uint8Array;
+  encodeInto(
+    source: string,
+    destination: Uint8Array,
+  ): { read: number | undefined; written: number };
+}
+
+/**
+ * UTF-8 only: any other label is a RangeError. Invalid bytes become U+FFFD
+ * unless constructed with `{ fatal: true }`, which throws instead.
+ */
+declare class TextDecoder {
+  constructor(label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean });
+  readonly encoding: "utf-8";
+  readonly fatal: boolean;
+  readonly ignoreBOM: boolean;
+  decode(input?: Uint8Array | ArrayBuffer | DataView): string;
+}
