@@ -25,6 +25,7 @@ pub struct WebInner {
     app: Arc<AppState>,
     http: reqwest::Client,
     oauth: Option<OauthConfig>,
+    google: Option<GoogleConfig>,
 }
 
 #[derive(Clone)]
@@ -58,12 +59,33 @@ impl OauthConfig {
     }
 }
 
+pub struct GoogleConfig {
+    client_id: String,
+    client_secret: String,
+    callback_url: String,
+}
+
+impl GoogleConfig {
+    /// Operator configuration, same namespacing rule as the GitHub pair —
+    /// platform sign-in is never a tenant concern. No bare-name fallback:
+    /// this feature is younger than the naming convention.
+    fn from_env() -> Option<GoogleConfig> {
+        Some(GoogleConfig {
+            client_id: std::env::var("RUSTED_CONSOLE_GOOGLE_CLIENT_ID").ok()?,
+            client_secret: std::env::var("RUSTED_CONSOLE_GOOGLE_CLIENT_SECRET").ok()?,
+            callback_url: std::env::var("RUSTED_CONSOLE_GOOGLE_CALLBACK_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:7412/auth/google/callback".to_string()),
+        })
+    }
+}
+
 impl WebState {
     pub fn new(app: Arc<AppState>) -> Self {
         WebState(Arc::new(WebInner {
             app,
             http: reqwest::Client::new(),
             oauth: OauthConfig::from_env(),
+            google: GoogleConfig::from_env(),
         }))
     }
 }
@@ -85,6 +107,8 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/auth/github", get(auth_github))
         .route("/auth/github/callback", get(auth_github_callback))
+        .route("/auth/google", get(auth_google))
+        .route("/auth/google/callback", get(auth_google_callback))
         .route("/logout", get(logout))
         .route("/device", get(device_page).post(device_decide))
         .route("/console", get(console_home))
@@ -170,6 +194,133 @@ struct GithubUser {
     /// Only set when the profile email is public; the real source is
     /// /user/emails, which the user:email scope unlocks.
     email: Option<String>,
+}
+
+async fn auth_google(State(state): State<WebState>) -> Response {
+    let Some(google) = &state.0.google else {
+        return Redirect::to("/login").into_response();
+    };
+    let csrf = auth::random_token(16);
+    let authorize = format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={csrf}",
+        google.client_id, google.callback_url,
+    );
+    (
+        [(
+            SET_COOKIE,
+            format!("rusted_oauth_state={csrf}; Path=/; HttpOnly; Max-Age=600; SameSite=Lax"),
+        )],
+        Redirect::to(&authorize),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct GoogleToken {
+    id_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GoogleClaims {
+    iss: String,
+    aud: String,
+    sub: String,
+    exp: u64,
+    email: Option<String>,
+    #[serde(default)]
+    email_verified: bool,
+    name: Option<String>,
+    picture: Option<String>,
+}
+
+/// Reads the claims out of an id_token that came to us directly from
+/// Google's token endpoint over TLS, authenticated by our client secret.
+/// In that flow the channel vouches for the token (OIDC core §3.1.3.7
+/// explicitly permits this), so no JWKS fetch — but issuer, audience, and
+/// expiry are still checked: a token for someone else's client id must not
+/// sign anyone in here.
+fn parse_google_claims(id_token: &str, client_id: &str, now: u64) -> Option<GoogleClaims> {
+    use base64::Engine;
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: GoogleClaims = serde_json::from_slice(&bytes).ok()?;
+    let issuer_ok =
+        claims.iss == "https://accounts.google.com" || claims.iss == "accounts.google.com";
+    (issuer_ok && claims.aud == client_id && claims.exp > now).then_some(claims)
+}
+
+async fn auth_google_callback(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<CallbackQuery>,
+) -> Response {
+    let Some(google) = &state.0.google else {
+        return Redirect::to("/login").into_response();
+    };
+    if cookie_value(&headers, "rusted_oauth_state") != Some(query.state.as_str()) {
+        return login_error("sign-in state mismatch — try again");
+    }
+    let token: GoogleToken = match state
+        .0
+        .http
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("code", query.code.as_str()),
+            ("client_id", google.client_id.as_str()),
+            ("client_secret", google.client_secret.as_str()),
+            ("redirect_uri", google.callback_url.as_str()),
+            ("grant_type", "authorization_code"),
+        ])
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(response) => match response.json().await {
+            Ok(token) => token,
+            Err(e) => return login_error(&format!("google token response unreadable: {e}")),
+        },
+        Err(e) => return login_error(&format!("google token exchange failed: {e}")),
+    };
+    let Some(id_token) = token.id_token else {
+        return login_error("google rejected the sign-in code — try again");
+    };
+    let Some(claims) = parse_google_claims(&id_token, &google.client_id, now_epoch()) else {
+        return login_error("google returned a token this server does not accept");
+    };
+    // Unverified addresses neither store nor link — see OauthProfile::email.
+    let email = claims.email.as_deref().filter(|_| claims.email_verified);
+    let login = email
+        .and_then(|e| e.split('@').next())
+        .or(claims.name.as_deref())
+        .unwrap_or("google-user");
+    let pool = &state.0.app.pool;
+    let user_id = match auth::resolve_oauth_user(
+        pool,
+        auth::OauthProfile {
+            provider: "google",
+            subject: claims.sub.clone(),
+            login,
+            name: claims.name.as_deref(),
+            avatar_url: claims.picture.as_deref(),
+            email,
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return login_error(&format!("saving your account failed: {e}")),
+    };
+    let session = match auth::create_session(pool, user_id).await {
+        Ok(token) => token,
+        Err(e) => return login_error(&format!("creating your session failed: {e}")),
+    };
+    let next = cookie_value(&headers, "rusted_after_login")
+        .filter(|n| n.starts_with('/') && !n.starts_with("//") && *n != "/login")
+        .unwrap_or("/console")
+        .to_string();
+    login_success_response(&session, &next)
 }
 
 #[derive(Deserialize)]
@@ -266,13 +417,16 @@ async fn auth_github_callback(
         }
     };
     let pool = &state.0.app.pool;
-    let user_id = match auth::upsert_github_user(
+    let user_id = match auth::resolve_oauth_user(
         pool,
-        gh_user.id,
-        &gh_user.login,
-        gh_user.name.as_deref(),
-        gh_user.avatar_url.as_deref(),
-        email.as_deref(),
+        auth::OauthProfile {
+            provider: "github",
+            subject: gh_user.id.to_string(),
+            login: &gh_user.login,
+            name: gh_user.name.as_deref(),
+            avatar_url: gh_user.avatar_url.as_deref(),
+            email: email.as_deref(),
+        },
     )
     .await
     {
@@ -673,6 +827,7 @@ async fn sitemap_xml(State(state): State<WebState>) -> Response {
 #[template(path = "login.html")]
 struct LoginT {
     configured: bool,
+    google_configured: bool,
     callback_url: String,
 }
 
@@ -925,6 +1080,7 @@ async fn login(
         Html(
             LoginT {
                 configured: state.0.oauth.is_some(),
+                google_configured: state.0.google.is_some(),
                 callback_url,
             }
             .render()
@@ -2042,6 +2198,43 @@ mod login_response_tests {
             "{cookies:?}"
         );
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+}
+
+#[cfg(test)]
+mod google_claims_tests {
+    use super::parse_google_claims;
+    use base64::Engine;
+
+    fn token(payload: serde_json::Value) -> String {
+        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("e30.{body}.unverified-signature")
+    }
+
+    #[test]
+    fn accepts_google_and_rejects_wrong_audience_issuer_or_expiry() {
+        let good = serde_json::json!({
+            "iss": "https://accounts.google.com", "aud": "client-1",
+            "sub": "g-123", "exp": 2_000,
+            "email": "a@x.io", "email_verified": true,
+        });
+        let claims = parse_google_claims(&token(good.clone()), "client-1", 1_000).unwrap();
+        assert_eq!(claims.sub, "g-123");
+        assert!(claims.email_verified);
+
+        let mut wrong_aud = good.clone();
+        wrong_aud["aud"] = "someone-else".into();
+        assert!(parse_google_claims(&token(wrong_aud), "client-1", 1_000).is_none());
+
+        let mut wrong_iss = good.clone();
+        wrong_iss["iss"] = "https://evil.example".into();
+        assert!(parse_google_claims(&token(wrong_iss), "client-1", 1_000).is_none());
+
+        assert!(
+            parse_google_claims(&token(good), "client-1", 3_000).is_none(),
+            "expired token accepted"
+        );
+        assert!(parse_google_claims("not-a-jwt", "client-1", 1_000).is_none());
     }
 }
 

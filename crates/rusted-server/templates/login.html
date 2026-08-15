@@ -18,7 +18,14 @@
         <svg viewBox="0 0 16 16" class="h-5 w-5" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
         Continue with GitHub
       </a>
-      <div class="mt-6 flex items-center justify-center gap-2 font-mono text-[9px] uppercase tracking-wider text-clay/70"><span class="h-1.5 w-1.5 rounded-full bg-sage"></span> github oauth</div>
+      {% if google_configured %}
+      <a href="/auth/google"
+         class="btn-secondary mt-3 flex w-full px-6 py-3 text-sm">
+        <svg viewBox="0 0 24 24" class="h-5 w-5" aria-hidden="true"><path fill="#EA4335" d="M12 5.04c1.62 0 3.06.56 4.2 1.64l3.12-3.12C17.46 1.8 14.96.75 12 .75 7.62.75 3.84 3.27 2 6.94l3.66 2.84C6.54 7.08 9.04 5.04 12 5.04z"/><path fill="#4285F4" d="M23.25 12.27c0-.86-.08-1.68-.21-2.48H12v4.71h6.33c-.28 1.45-1.1 2.68-2.33 3.51l3.57 2.77c2.09-1.93 3.68-4.79 3.68-8.51z"/><path fill="#FBBC05" d="M5.66 14.22a7.06 7.06 0 0 1 0-4.44L2 6.94a11.26 11.26 0 0 0 0 10.12l3.66-2.84z"/><path fill="#34A853" d="M12 23.25c3.04 0 5.6-1 7.46-2.72l-3.57-2.77c-.98.66-2.25 1.06-3.89 1.06-2.96 0-5.46-2.04-6.34-4.74L2 16.92c1.84 3.67 5.62 6.33 10 6.33z"/></svg>
+        Continue with Google
+      </a>
+      {% endif %}
+      <div class="mt-6 flex items-center justify-center gap-2 font-mono text-[9px] uppercase tracking-wider text-clay/70"><span class="h-1.5 w-1.5 rounded-full bg-sage"></span> oauth sign-in</div>
       {% else %}
       <div class="mt-8 rounded-xl border border-ember/25 bg-rust-950 p-5 font-mono text-xs leading-relaxed text-clay">
         <p class="mb-3 font-semibold uppercase tracking-wider text-ember">GitHub OAuth isn't configured</p>

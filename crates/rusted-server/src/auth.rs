@@ -273,32 +273,101 @@ pub async fn destroy_session(pool: &PgPool, caches: &AuthCaches, token: &str) {
         .await;
 }
 
-pub async fn upsert_github_user(
-    pool: &PgPool,
-    github_id: i64,
-    login: &str,
-    name: Option<&str>,
-    avatar_url: Option<&str>,
-    email: Option<&str>,
-) -> sqlx::Result<Uuid> {
-    // COALESCE: a login where the email fetch failed must not erase an
-    // address we already know.
-    let id: Uuid = sqlx::query(
-        "INSERT INTO users (github_id, login, name, avatar_url, email) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (github_id) DO UPDATE
-             SET login = $2, name = $3, avatar_url = $4,
-                 email = COALESCE($5, users.email)
-         RETURNING id",
-    )
-    .bind(github_id)
-    .bind(login)
-    .bind(name)
-    .bind(avatar_url)
-    .bind(email)
-    .fetch_one(pool)
-    .await?
-    .get("id");
-    Ok(id)
+/// What an OAuth provider told us about the person signing in.
+pub struct OauthProfile<'a> {
+    /// "github" or "google" — part of the identity key, never shown.
+    pub provider: &'a str,
+    /// The provider's stable account id (GitHub numeric id, Google `sub`).
+    pub subject: String,
+    /// Only used when this sign-in creates the account.
+    pub login: &'a str,
+    pub name: Option<&'a str>,
+    pub avatar_url: Option<&'a str>,
+    /// A VERIFIED address or nothing. This field both stores the email and
+    /// links providers: passing an unverified address here would let anyone
+    /// who can type an email into a provider take over the matching account.
+    pub email: Option<&'a str>,
+}
+
+/// Sign-in resolution, in strictly this order: the identity we've seen
+/// before, else an existing account with the same verified email (the
+/// GitHub-today-Google-tomorrow case), else a new account. Profile fields
+/// only ever fill gaps — a provider that omits a field cannot erase what
+/// another provider supplied.
+pub async fn resolve_oauth_user(pool: &PgPool, profile: OauthProfile<'_>) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+
+    let known: Option<Uuid> =
+        sqlx::query("SELECT user_id FROM identities WHERE provider = $1 AND subject = $2")
+            .bind(profile.provider)
+            .bind(&profile.subject)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|row| row.get("user_id"));
+
+    let linked: Option<Uuid> = match (known, profile.email) {
+        (Some(id), _) => Some(id),
+        (None, Some(email)) => {
+            let id =
+                sqlx::query("SELECT id FROM users WHERE email = $1 ORDER BY created_at LIMIT 1")
+                    .bind(email)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| row.get("id"));
+            if let Some(id) = id {
+                sqlx::query(
+                    "INSERT INTO identities (provider, subject, user_id) VALUES ($1, $2, $3)",
+                )
+                .bind(profile.provider)
+                .bind(&profile.subject)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            id
+        }
+        (None, None) => None,
+    };
+
+    let user_id = match linked {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE users SET name = COALESCE($2, name),
+                                  avatar_url = COALESCE($3, avatar_url),
+                                  email = COALESCE($4, email)
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(profile.name)
+            .bind(profile.avatar_url)
+            .bind(profile.email)
+            .execute(&mut *tx)
+            .await?;
+            id
+        }
+        None => {
+            let id: Uuid = sqlx::query(
+                "INSERT INTO users (login, name, avatar_url, email) VALUES ($1, $2, $3, $4)
+                 RETURNING id",
+            )
+            .bind(profile.login)
+            .bind(profile.name)
+            .bind(profile.avatar_url)
+            .bind(profile.email)
+            .fetch_one(&mut *tx)
+            .await?
+            .get("id");
+            sqlx::query("INSERT INTO identities (provider, subject, user_id) VALUES ($1, $2, $3)")
+                .bind(profile.provider)
+                .bind(&profile.subject)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            id
+        }
+    };
+    tx.commit().await?;
+    Ok(user_id)
 }
 
 // -------------------------------------------------------- invalidation feed

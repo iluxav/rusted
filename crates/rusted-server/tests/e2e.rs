@@ -4742,3 +4742,82 @@ async fn docs_are_public_complete_and_unauthenticated() {
         "html leaked"
     );
 }
+
+/// The whole point of the identities table: sign in with GitHub today,
+/// Google tomorrow, land in the same account — but only a verified email
+/// links, and a provider we've seen before never re-links.
+#[tokio::test]
+async fn oauth_identities_link_by_verified_email() {
+    let t = boot().await;
+    let github = rusted_server::auth::OauthProfile {
+        provider: "github",
+        subject: "9001".into(),
+        login: "ada",
+        name: Some("Ada"),
+        avatar_url: None,
+        email: Some("ada@example.com"),
+    };
+    let ada = rusted_server::auth::resolve_oauth_user(&t.pool, github)
+        .await
+        .unwrap();
+
+    // Same verified email over Google → the same account, now dual-identity.
+    let google = rusted_server::auth::OauthProfile {
+        provider: "google",
+        subject: "g-sub-1".into(),
+        login: "ada.g",
+        name: None,
+        avatar_url: Some("https://lh3.example/pic"),
+        email: Some("ada@example.com"),
+    };
+    let linked = rusted_server::auth::resolve_oauth_user(&t.pool, google)
+        .await
+        .unwrap();
+    assert_eq!(ada, linked, "verified email must join the accounts");
+
+    // A repeat Google sign-in resolves by identity even with no email at all.
+    let returning = rusted_server::auth::OauthProfile {
+        provider: "google",
+        subject: "g-sub-1".into(),
+        login: "ignored",
+        name: None,
+        avatar_url: None,
+        email: None,
+    };
+    let again = rusted_server::auth::resolve_oauth_user(&t.pool, returning)
+        .await
+        .unwrap();
+    assert_eq!(ada, again);
+
+    // No verified email → no linking, even if the human is the same.
+    let unverified = rusted_server::auth::OauthProfile {
+        provider: "google",
+        subject: "g-sub-2".into(),
+        login: "stranger",
+        name: None,
+        avatar_url: None,
+        email: None,
+    };
+    let stranger = rusted_server::auth::resolve_oauth_user(&t.pool, unverified)
+        .await
+        .unwrap();
+    assert_ne!(ada, stranger, "no email must never join accounts");
+
+    // Profile fields fill gaps and never erase: Ada's name survived Google
+    // omitting it, and Google's avatar filled the gap GitHub left.
+    let row = sqlx::query("SELECT name, avatar_url, email FROM users WHERE id = $1")
+        .bind(ada)
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    use sqlx::Row;
+    assert_eq!(row.get::<Option<String>, _>("name").as_deref(), Some("Ada"));
+    assert_eq!(
+        row.get::<Option<String>, _>("avatar_url").as_deref(),
+        Some("https://lh3.example/pic")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("email").as_deref(),
+        Some("ada@example.com")
+    );
+}
