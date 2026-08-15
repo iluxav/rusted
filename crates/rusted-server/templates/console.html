@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Console — rusted{% endblock %}
 {% block body %}
-<div class="console-shell flex h-full">
+<div class="console-shell rust-backdrop-host flex h-full">
+  <div class="rust-backdrop rust-backdrop--top" aria-hidden="true"></div>
+  <div class="rust-backdrop rust-backdrop--bottom" aria-hidden="true"></div>
+
   <!-- sidebar -->
-  <aside class="console-sidebar flex w-64 shrink-0 flex-col border-r border-copper/10 bg-rust-950/95 backdrop-blur-xl">
+  <aside class="console-sidebar flex w-64 shrink-0 flex-col border-r border-copper/10">
     <a href="/console" class="console-brand group flex items-center gap-2.5 px-5 pb-7 pt-6 font-display text-lg font-bold tracking-[-0.04em] text-cream">
       <img src="/assets/rusted-logo2.png" width="128" height="135" alt="" class="h-7 w-7 object-contain drop-shadow-[0_0_10px_rgba(255,107,36,0.18)] transition-transform duration-200 group-hover:scale-105">
       rusted <span class="ml-auto font-mono text-[9px] font-medium uppercase tracking-widest text-copper/60">console</span>

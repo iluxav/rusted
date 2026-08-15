@@ -55,6 +55,92 @@ body::before {
   background-size: 48px 48px;
   mask-image: linear-gradient(to bottom, black, transparent 72%);
 }
+/* Shared corroded-steel atmosphere for the landing, docs, and console shells. */
+.rust-backdrop-host {
+  position: relative;
+  isolation: isolate;
+  overflow: clip;
+}
+.rust-backdrop {
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+}
+.rust-backdrop--top {
+  left: 44%;
+  right: -8%;
+  top: -4rem;
+  height: 46rem;
+  background-image:
+    linear-gradient(108deg, rgba(11,9,8,.96) 0%, rgba(11,9,8,.74) 22%, rgba(50,23,12,.10) 58%, rgba(11,9,8,.30) 100%),
+    url("/assets/rusted-metal.jpg");
+  background-blend-mode: multiply;
+  background-size: auto, cover;
+  background-position: center, 100% 24%;
+  mix-blend-mode: screen;
+  filter: saturate(1.55) contrast(1.28) brightness(.82);
+  opacity: .72;
+  transform: rotate(-1.5deg) scale(1.035);
+  transform-origin: 100% 0;
+  -webkit-mask-image:
+    radial-gradient(ellipse 68% 72% at 96% 0%, black 0 30%, rgba(0,0,0,.76) 52%, transparent 82%),
+    radial-gradient(ellipse 38% 44% at 68% 31%, rgba(0,0,0,.48) 0 18%, transparent 76%);
+  mask-image:
+    radial-gradient(ellipse 68% 72% at 96% 0%, black 0 30%, rgba(0,0,0,.76) 52%, transparent 82%),
+    radial-gradient(ellipse 38% 44% at 68% 31%, rgba(0,0,0,.48) 0 18%, transparent 76%);
+}
+.rust-backdrop--bottom {
+  left: -8%;
+  right: 42%;
+  bottom: -1rem;
+  height: 44rem;
+  background-image:
+    linear-gradient(252deg, rgba(11,9,8,.90) 0%, rgba(11,9,8,.64) 28%, rgba(46,21,12,.06) 64%, rgba(11,9,8,.14) 100%),
+    url("/assets/rusted-metal.jpg");
+  background-blend-mode: multiply;
+  background-size: auto, 64rem auto;
+  background-position: center, 0% 72%;
+  mix-blend-mode: screen;
+  filter: saturate(1.45) contrast(1.32) brightness(.9);
+  opacity: .52;
+  transform: rotate(4deg) scale(1.04);
+  transform-origin: 0 100%;
+  -webkit-mask-image:
+    radial-gradient(ellipse 76% 72% at 0% 100%, black 0 28%, rgba(0,0,0,.78) 55%, transparent 88%),
+    radial-gradient(ellipse 40% 42% at 36% 72%, rgba(0,0,0,.5) 0 18%, transparent 80%);
+  mask-image:
+    radial-gradient(ellipse 76% 72% at 0% 100%, black 0 28%, rgba(0,0,0,.78) 55%, transparent 88%),
+    radial-gradient(ellipse 40% 42% at 36% 72%, rgba(0,0,0,.5) 0 18%, transparent 80%);
+}
+@media (max-width: 640px) {
+  .rust-backdrop--top {
+    left: 22%;
+    right: -28%;
+    top: -2rem;
+    height: 31rem;
+    background-position: center, 72% 10%;
+    filter: saturate(1.4) contrast(1.24) brightness(.76);
+    opacity: .46;
+    transform: rotate(-2deg) scale(1.02);
+    -webkit-mask-image: radial-gradient(ellipse 82% 72% at 100% 0%, black 0 24%, rgba(0,0,0,.62) 52%, transparent 84%);
+    mask-image: radial-gradient(ellipse 82% 72% at 100% 0%, black 0 24%, rgba(0,0,0,.62) 52%, transparent 84%);
+  }
+  .rust-backdrop--bottom {
+    left: -20%;
+    right: 18%;
+    bottom: -1rem;
+    height: 24rem;
+    background-image: url("/assets/rusted-metal.jpg");
+    background-blend-mode: normal;
+    background-size: 32rem auto;
+    background-position: 100% 74%;
+    filter: saturate(1.35) contrast(1.25) brightness(.82);
+    opacity: .45;
+    transform: rotate(3deg) scale(1.02);
+    -webkit-mask-image: radial-gradient(ellipse 90% 80% at 0% 100%, black 0 26%, rgba(0,0,0,.7) 54%, transparent 90%);
+    mask-image: radial-gradient(ellipse 90% 80% at 0% 100%, black 0 26%, rgba(0,0,0,.7) 54%, transparent 90%);
+  }
+}
 a, button, input, select, textarea, summary { -webkit-tap-highlight-color: transparent; }
 button, a, summary { outline: none; }
 :is(a, button, input, select, textarea, summary):focus-visible {

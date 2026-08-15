@@ -12,9 +12,10 @@
 <meta name="twitter:card" content="summary">
 {% endblock %}
 {% block body %}
-<div class="landing-page relative isolate min-h-full overflow-hidden">
+<div class="landing-page rust-backdrop-host relative isolate min-h-full overflow-hidden">
   <div class="landing-glow pointer-events-none absolute left-[58%] top-[-12rem] -z-10 h-[42rem] w-[42rem] rounded-full bg-ember/[0.07] blur-[120px]"></div>
-  <div class="landing-rust pointer-events-none absolute -z-10" aria-hidden="true"></div>
+  <div class="rust-backdrop rust-backdrop--top" aria-hidden="true"></div>
+  <div class="rust-backdrop rust-backdrop--bottom" aria-hidden="true"></div>
 
   <div class="mx-auto flex min-h-full max-w-6xl flex-col px-5 sm:px-8">
     <header class="flex items-center justify-between border-b border-copper/10 py-5">
@@ -260,27 +261,6 @@
 </div>
 
 <style>
-  /* Real corroded steel over the top-right flare: the photo is screen-
-     blended so only its luminous rust survives against the dark ground,
-     warmed slightly, and masked so it dissolves like oxide spreading from
-     the corner. */
-  .landing-rust {
-    left: 40%;
-    right: 0;
-    top: 0;
-    height: 44rem;
-    background-image: url("/assets/rusted-metal.jpg");
-    background-size: cover;
-    background-position: 100% 30%;
-    mix-blend-mode: screen;
-    filter: saturate(1.35) contrast(1.08);
-    opacity: .8;
-    -webkit-mask-image: radial-gradient(ellipse 85% 80% at 100% 0%, black, rgba(0,0,0,.5) 55%, transparent 80%);
-    mask-image: radial-gradient(ellipse 85% 80% at 100% 0%, black, rgba(0,0,0,.5) 55%, transparent 80%);
-  }
-  @media (max-width: 640px) {
-    .landing-rust { left: 12%; height: 30rem; }
-  }
   .landing-page::before {
     content: '';
     position: absolute;
