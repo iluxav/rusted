@@ -48,12 +48,14 @@ tempfile = "3"
 [profile.release]
 debug = true
 
-# Release artifacts: no debug info, one codegen unit, LTO. Slower to build,
-# much smaller to download.
+# Release artifacts: no debug info, one codegen unit, LTO. Thin rather than
+# fat: within a few percent of the same size, but the final optimization
+# stage runs in parallel instead of single-threaded — it halved the release
+# build (fat LTO measured ~7min, thin ~4min on the v0.25.0 tree).
 [profile.dist]
 inherits = "release"
 debug = false
 strip = "symbols"
-lto = true
+lto = "thin"
 codegen-units = 1
 panic = "abort"

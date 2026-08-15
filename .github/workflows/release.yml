@@ -40,8 +40,22 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # GitHub scopes caches to the ref that saved them, so the rust-cache
+      # entries saved on tag vN are invisible to tag vN+1 and every release
+      # used to compile all dependencies cold. sccache keys on content
+      # instead, and its cache saved from the default branch is readable by
+      # every tag — releases only recompile crates that actually changed.
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Build
         run: cargo build --profile dist --target ${{ matrix.target }} -p rusted-cli
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: "0"
+
+      - name: Cache effectiveness
+        run: sccache --show-stats
 
       - name: Package
         run: |
