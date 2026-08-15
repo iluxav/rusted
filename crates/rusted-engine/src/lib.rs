@@ -117,11 +117,14 @@ pub struct HttpConfig {
     pub methods: Option<Vec<String>>,
     #[serde(default)]
     pub path: Option<String>,
-    /// Callable without an API key even when the server requires auth —
-    /// what an OAuth callback or webhook target needs, since the third
-    /// party calling it cannot present a key.
+    /// Tri-state caller authentication. Undeclared (`None`) follows the
+    /// server: open unless it runs `--require-auth`. `Some(true)` is callable
+    /// without a key even under `--require-auth` — what an OAuth callback or
+    /// webhook target needs, since the third party calling it cannot present
+    /// a key. `Some(false)` requires one of the owner's API keys on every
+    /// call, even on an open server.
     #[serde(default)]
-    pub public: bool,
+    pub public: Option<bool>,
 }
 
 /// One tool's deploy-time metadata. At inspect time the handler function is
