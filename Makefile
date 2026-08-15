@@ -1,7 +1,7 @@
 CARGO ?= cargo
 BIN   := target/release/rusted
 
-.PHONY: all build test lint fmt fmt-check check serve install i clean help db db-clean css release
+.PHONY: all build test lint fmt fmt-check check serve install uninstall i clean help db db-clean css release
 
 all: check build
 
@@ -39,6 +39,9 @@ serve: build ## Run the server (functions on :7411, admin API on :7412)
 # combination known to build.
 install: ## Install `rusted` into ~/.cargo/bin
 	$(CARGO) install --locked --path crates/rusted-cli
+
+uninstall: ## Remove `rusted` from ~/.cargo/bin
+	$(CARGO) uninstall rusted-cli
 
 i: build install ## Shorthand: build and install
 
