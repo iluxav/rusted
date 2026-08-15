@@ -1,7 +1,7 @@
 CARGO ?= cargo
 BIN   := target/release/rusted
 
-.PHONY: all build test lint fmt fmt-check check serve install i clean help db db-clean css
+.PHONY: all build test lint fmt fmt-check check serve install i clean help db db-clean css release
 
 all: check build
 
@@ -41,6 +41,33 @@ install: ## Install `rusted` into ~/.cargo/bin
 	$(CARGO) install --locked --path crates/rusted-cli
 
 i: build install ## Shorthand: build and install
+
+# Patch releases only — vX.Y.Z becomes vX.Y.Z+1 from the last tag reachable on
+# main. Major and minor bumps are a human decision: edit the crate versions,
+# commit "vX.Y.0", tag, and push by hand. The tag push is what triggers the
+# release workflow, so a mistake here means deleting a published release —
+# hence the branch/sync/cleanliness guards.
+release: ## Cut a patch release: bump crate versions, commit, tag, push
+	@set -eu; \
+	git diff --quiet && git diff --cached --quiet \
+	  || { echo "error: working tree not clean"; exit 1; }; \
+	branch=$$(git rev-parse --abbrev-ref HEAD); \
+	[ "$$branch" = main ] || { echo "error: release from main (on $$branch)"; exit 1; }; \
+	git fetch -q origin main; \
+	[ "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" ] \
+	  || { echo "error: main is not in sync with origin/main"; exit 1; }; \
+	last=$$(git describe --tags --abbrev=0 --match 'v*'); \
+	old=$${last#v}; \
+	new=$$(echo "$$old" | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}'); \
+	echo "releasing v$$old -> v$$new"; \
+	perl -pi -e "s/^version = \"\Q$$old\E\"/version = \"$$new\"/" \
+	  crates/rusted-cli/Cargo.toml crates/rusted-engine/Cargo.toml crates/rusted-server/Cargo.toml; \
+	$(CARGO) update -q -p rusted-cli -p rusted-engine -p rusted-server; \
+	git add Cargo.lock crates/rusted-cli/Cargo.toml crates/rusted-engine/Cargo.toml crates/rusted-server/Cargo.toml; \
+	git commit -q -m "v$$new"; \
+	git tag "v$$new"; \
+	git push origin main "v$$new"; \
+	echo "pushed v$$new — the release workflow is building; deploy with .do/deploy.sh once it publishes"
 
 css: ## Recompile the Tailwind sheet inlined into every page (run after template edits)
 	cd crates/rusted-server/tailwind && npx -y tailwindcss@3.4.17 -c tailwind.config.js -i input.css -o ../templates/app.css --minify

@@ -12,7 +12,7 @@ tiny-quickjs-lambda-platform.md
 
 # Secrets and local configuration
 .env
-
+/.do
 # Server configuration: holds the database password and origin cert, and is
 # specific to one machine rather than to the project.
 /deploy
