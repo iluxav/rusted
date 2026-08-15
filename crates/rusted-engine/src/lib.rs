@@ -2564,3 +2564,17 @@ mod type_declarations {
         }
     }
 }
+
+/// Measurement-only visibility: the prelude sources, so `setup_cost.rs` can
+/// time what per-context eval actually costs. Not API — the preludes install
+/// themselves through the executor paths.
+#[doc(hidden)]
+pub mod preludes {
+    pub const ALL: &[(&str, &str)] = &[
+        ("console", super::CONSOLE_PRELUDE),
+        ("caps", super::CAPS_PRELUDE),
+        ("fetch", super::FETCH_PRELUDE),
+        ("inbox", super::INBOX_PRELUDE),
+        ("web", super::WEB_PRELUDE),
+    ];
+}
