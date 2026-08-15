@@ -1,0 +1,63 @@
+<h1>Module reference</h1>
+<p class="lede">Everything a function declares, it declares in its own file, read at deploy time. Three exports: <code>http</code> or <code>mcp</code> picks the surface (never both), and <code>config</code> asks for runtime capabilities.</p>
+
+<h2><code>export const http</code></h2>
+<p>Deploys the default export as an HTTP endpoint at <code>/f/&lt;name&gt;</code>. The whole export is optional — a bare default handler deploys with the defaults below.</p>
+<table>
+  <tr><th>field</th><th>type</th><th>meaning</th></tr>
+  <tr><td><code>name</code></td><td>string</td><td>Function name, 1–64 of <code>a-z 0-9 - _</code>; becomes part of the URL. Default: the filename, or <code>--name</code> at push.</td></tr>
+  <tr><td><code>methods</code></td><td>string[]</td><td>HTTP methods it answers, e.g. <code>["GET","POST"]</code>. Anything else gets 405. Default: <code>["POST"]</code>.</td></tr>
+  <tr><td><code>path</code></td><td>string</td><td>Route pattern nested under the function, e.g. <code>"/users/{id}"</code>; captures arrive in <code>request.params</code>. Default: none — the function serves exactly <code>/f/&lt;name&gt;</code>.</td></tr>
+  <tr><td><code>access</code></td><td><code>"public"</code> | <code>"private"</code></td><td>Who may call the URL. <code>"private"</code>: every call needs one of your API keys, on any server. <code>"public"</code>: keyless even under <code>--require-auth</code> — what webhook targets and OAuth callbacks need. Undeclared: follows the server (open on rusted.sh). See <a href="/docs/security">security</a>.</td></tr>
+  <tr><td><code>public</code></td><td>boolean</td><td>Legacy alias for <code>access: "public"</code>. Contradicting an explicit <code>access</code> is a deploy-time error.</td></tr>
+</table>
+<pre><code>export const http = { name: "hook", methods: ["POST"], path: "/repos/{repo}", access: "public" };
+
+export default async function handler(request, context) {
+  const payload = await request.json().catch(() => ({}));
+  return context.json({ repo: request.params.repo, ok: true });
+}</code></pre>
+
+<h2><code>export const mcp</code></h2>
+<p>Deploys the module as an MCP server at <code>/f/&lt;name&gt;</code> — tools are the interface, so an <code>mcp</code> module must not have a default export. Arguments are validated against each tool's schema before its handler runs. See <a href="/docs/mcp">MCP</a>.</p>
+<table>
+  <tr><th>field</th><th>type</th><th>meaning</th></tr>
+  <tr><td><code>name</code></td><td>string</td><td>Same rules and default as <code>http.name</code>.</td></tr>
+  <tr><td><code>tools</code></td><td>object</td><td>Tool name → <code>{ description, inputSchema, handler }</code>. <code>inputSchema</code> is JSON Schema; <code>handler(args)</code> is an async function whose return value becomes the tool result.</td></tr>
+  <tr><td><code>public</code></td><td>boolean</td><td>Serve without any key. Default: connecting requires one of your API keys (<code>Authorization: Bearer</code>) — MCP is private by default, the opposite of http. Mutually exclusive with <code>auth</code>.</td></tr>
+  <tr><td><code>auth</code></td><td>object</td><td>Host-validated OAuth instead of a rusted key: <code>{ type: "oauth", issuer, audience, scopes?, introspectionClientIdSecret?, introspectionClientSecretSecret? }</code>. <code>issuer</code> is an https origin, <code>audience</code> an absolute https URL; the introspection pair are vault secret <em>names</em>, both or neither.</td></tr>
+</table>
+<pre><code>export const mcp = {
+  name: "calculator",
+  tools: {
+    add: {
+      description: "Add two numbers",
+      inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+      async handler({ a, b }) { return a + b; },
+    },
+  },
+};</code></pre>
+
+<h2><code>export const config</code></h2>
+<p>Runtime capabilities. Nothing is on by default — a function gets exactly what it declares, and the console shows what each function asked for.</p>
+<table>
+  <tr><th>field</th><th>type</th><th>meaning</th></tr>
+  <tr><td><code>secrets</code></td><td>string[]</td><td>Names from your <a href="/console/secrets">secret vault</a>, decrypted into <code>context.env.&lt;NAME&gt;</code> per invocation — from the environment the call selects (<code>/f/@stage/&lt;name&gt;</code>). A declared secret missing from the vault refuses the invocation up front.</td></tr>
+  <tr><td><code>state</code></td><td><code>true</code></td><td>Durable JSON state at <code>context.state</code> (get/set/compare-and-swap), scoped per function <em>and</em> per environment. Survives redeploys and even deletion — <code>rusted state purge</code> is the one way it goes away. Must be exactly <code>true</code> when present.</td></tr>
+  <tr><td><code>objects</code></td><td>object</td><td>S3-compatible bindings at <code>context.objects.&lt;BINDING&gt;</code>, binding name → <code>{ endpoint, bucket, region?, maxObjectBytes, accessKeyIdSecret, secretAccessKeySecret }</code>. <code>endpoint</code> is a bare https origin (allowlisted by the operator), <code>region</code> defaults to <code>"auto"</code>, and the two <code>…Secret</code> fields are vault secret <em>names</em> — credentials are resolved host-side and never reach JavaScript.</td></tr>
+</table>
+<pre><code>export const config = {
+  secrets: ["GITHUB_TOKEN"],
+  state: true,
+  objects: {
+    UPLOADS: {
+      endpoint: "https://&lt;account&gt;.r2.cloudflarestorage.com",
+      bucket: "uploads",
+      maxObjectBytes: 5_000_000,
+      accessKeyIdSecret: "R2_KEY_ID",
+      secretAccessKeySecret: "R2_KEY_SECRET",
+    },
+  },
+};</code></pre>
+
+<div class="callout"><p>Every field is checked at deploy time — unknown fields, a module exporting both surfaces, <code>state: false</code>, or an <code>access</code> value outside the enum are refused with the reason, not deployed and left to fail later. <code>rusted verify file.js</code> runs the same checks without deploying, and <code>rusted types</code> writes <code>rusted.d.ts</code> so your editor knows all of this too.</p></div>

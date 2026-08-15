@@ -616,7 +616,7 @@ struct DocsPage {
 }
 
 /// Sidebar order.
-const DOCS_PAGES: [DocsPage; 6] = [
+const DOCS_PAGES: [DocsPage; 7] = [
     DocsPage {
         slug: "getting-started",
         label: "Getting started",
@@ -630,6 +630,13 @@ const DOCS_PAGES: [DocsPage; 6] = [
         title: "CLI reference",
         description: "Every rusted CLI command — create, run, push, logs, types, inbox — the full local development loop for deployed JavaScript functions.",
         content: include_str!("../templates/docs/cli.html"),
+    },
+    DocsPage {
+        slug: "module",
+        label: "Module reference",
+        title: "Module reference",
+        description: "Every field a rusted function can declare: the http and mcp surface exports (name, methods, path, access, tools, auth) and the config export (secrets, state, object storage).",
+        content: include_str!("../templates/docs/module.html"),
     },
     DocsPage {
         slug: "mcp",
