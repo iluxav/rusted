@@ -42,6 +42,7 @@ fn request_method_headers_query_are_exposed() {
         headers: BTreeMap::from([("x-test".into(), "yes".into())]),
         query: BTreeMap::from([("id".into(), "42".into())]),
         params: BTreeMap::new(),
+        path: "/".to_string(),
         body: String::new(),
     };
     let r = exec().execute(src, &req, &Limits::default());
@@ -252,6 +253,7 @@ fn path_params_are_exposed_to_the_handler() {
         headers: BTreeMap::new(),
         query: BTreeMap::new(),
         params: BTreeMap::from([("id".into(), "42".into())]),
+        path: "/".to_string(),
         body: String::new(),
     };
     let r = exec().execute(src, &req, &Limits::default());

@@ -615,3 +615,31 @@ declare class TextDecoder {
   readonly ignoreBOM: boolean;
   decode(input?: Uint8Array | ArrayBuffer | DataView): string;
 }
+
+/**
+ * The Express-style app builder: `export const app = rusted.app({...})
+ * .use(mw).get("/", handler)…` — routes and middleware become deploy-time
+ * data; handlers run per matched request with `request.params` filled from
+ * `{param}` segments.
+ */
+declare const rusted: {
+  app(meta?: { name?: string; access?: "public" | "private" }): Rusted.AppBuilder;
+};
+
+declare namespace Rusted {
+  type AppHandler = (request: Request, context: Context) => unknown;
+  type AppMiddleware = (
+    request: Request,
+    context: Context,
+    next: () => Promise<unknown>,
+  ) => unknown;
+  interface AppBuilder {
+    get(path: string, handler: AppHandler): AppBuilder;
+    post(path: string, handler: AppHandler): AppBuilder;
+    put(path: string, handler: AppHandler): AppBuilder;
+    patch(path: string, handler: AppHandler): AppBuilder;
+    delete(path: string, handler: AppHandler): AppBuilder;
+    /** Runs before every matched route; return without calling next() to short-circuit. */
+    use(middleware: AppMiddleware): AppBuilder;
+  }
+}

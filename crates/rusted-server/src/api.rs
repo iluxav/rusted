@@ -151,7 +151,13 @@ pub fn match_path(pattern: &str, actual: &str) -> Option<BTreeMap<String, String
 /// concurrency, analytics — so limits mean the same thing on either surface.
 pub(crate) enum Job {
     Http(HttpRequest),
-    Tool { name: String, args: Value },
+    /// An `app` module invocation: the engine's dispatcher routes on
+    /// request.path and composes the middleware chain.
+    App(HttpRequest),
+    Tool {
+        name: String,
+        args: Value,
+    },
 }
 
 impl Job {
@@ -159,7 +165,7 @@ impl Job {
     /// detail so `rusted logs` says which tool ran.
     fn tool(&self) -> Option<&str> {
         match self {
-            Job::Http(_) => None,
+            Job::Http(_) | Job::App(_) => None,
             Job::Tool { name, .. } => Some(name),
         }
     }
@@ -258,6 +264,11 @@ async fn execute_raw(
                 Job::Http(request) => {
                     executor
                         .execute_with_services(&source, &request, &limits, services, env, caps)
+                        .await
+                }
+                Job::App(request) => {
+                    executor
+                        .execute_app_with_services(&source, &request, &limits, services, env, caps)
                         .await
                 }
                 Job::Tool { name, args } => {
@@ -647,6 +658,7 @@ fn to_engine_request(
     headers: &HeaderMap,
     query: HashMap<String, String>,
     params: BTreeMap<String, String>,
+    path: String,
     body: Bytes,
 ) -> Result<HttpRequest, Box<Response>> {
     let body = String::from_utf8(body.to_vec()).map_err(|e| {
@@ -674,6 +686,7 @@ fn to_engine_request(
             .collect(),
         query: query.into_iter().collect::<BTreeMap<_, _>>(),
         params,
+        path,
         body,
     })
 }
@@ -870,44 +883,50 @@ async fn serve_function(
             format!("allowed: {}", trigger.methods.join(", ")),
         );
     }
-    let params = match (&trigger.path, rest.as_deref()) {
-        (None, None) => BTreeMap::new(),
-        (None, Some(rest)) => {
-            record_refusal(
-                &state,
-                &name,
-                owner,
-                "refused",
-                404,
-                format!("{tag}refused: /{rest} — this function has no sub-path"),
-            );
-            return err(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "function has no sub-path",
-            );
-        }
-        (Some(pattern), rest) => match match_path(pattern, rest.unwrap_or("")) {
-            Some(params) => params,
-            None => {
+    // App functions accept any subpath — their dispatcher owns routing and
+    // answers its own 404s, with the method-union gate above still applying.
+    let params = if fetched.kind == "app" {
+        BTreeMap::new()
+    } else {
+        match (&trigger.path, rest.as_deref()) {
+            (None, None) => BTreeMap::new(),
+            (None, Some(rest)) => {
                 record_refusal(
                     &state,
                     &name,
                     owner,
                     "refused",
                     404,
-                    format!(
-                        "{tag}refused: /{} does not match the declared route {pattern}",
-                        rest.unwrap_or("")
-                    ),
+                    format!("{tag}refused: /{rest} — this function has no sub-path"),
                 );
                 return err(
                     StatusCode::NOT_FOUND,
                     "not_found",
-                    format!("this function serves /f/{name}{pattern}"),
+                    "function has no sub-path",
                 );
             }
-        },
+            (Some(pattern), rest) => match match_path(pattern, rest.unwrap_or("")) {
+                Some(params) => params,
+                None => {
+                    record_refusal(
+                        &state,
+                        &name,
+                        owner,
+                        "refused",
+                        404,
+                        format!(
+                            "{tag}refused: /{} does not match the declared route {pattern}",
+                            rest.unwrap_or("")
+                        ),
+                    );
+                    return err(
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        format!("this function serves /f/{name}{pattern}"),
+                    );
+                }
+            },
+        }
     };
     let (plan, limits) = plan_for_owner(&state, owner).await;
     if let Err(retry_after) = state.rate_limiter.check(&name, plan.limits.rate_per_min) {
@@ -932,20 +951,22 @@ async fn serve_function(
         )
             .into_response();
     }
-    let request = match to_engine_request(method.as_str(), &headers, query, params, body) {
-        Ok(request) => request,
-        Err(response) => {
-            record_refusal(
-                &state,
-                &name,
-                owner,
-                "refused",
-                400,
-                format!("{tag}refused: request body is not valid UTF-8"),
-            );
-            return *response;
-        }
-    };
+    let request_path = format!("/{}", rest.as_deref().unwrap_or(""));
+    let request =
+        match to_engine_request(method.as_str(), &headers, query, params, request_path, body) {
+            Ok(request) => request,
+            Err(response) => {
+                record_refusal(
+                    &state,
+                    &name,
+                    owner,
+                    "refused",
+                    400,
+                    format!("{tag}refused: request body is not valid UTF-8"),
+                );
+                return *response;
+            }
+        };
     // Resolved before spending an execution slot: a function whose secrets or
     // capabilities cannot be supplied would only fail inside the handler,
     // less clearly.
@@ -961,11 +982,16 @@ async fn serve_function(
             );
         }
     };
+    let job = if fetched.kind == "app" {
+        Job::App(request)
+    } else {
+        Job::Http(request)
+    };
     match execute_serialized(
         &state,
         &name,
         source,
-        Job::Http(request),
+        job,
         limits,
         owner,
         plan.limits.concurrency,
@@ -1019,7 +1045,14 @@ async fn call_run(
             None => return err(StatusCode::NOT_FOUND, "not_found", "no such run"),
         }
     };
-    let request = match to_engine_request("POST", &headers, query, BTreeMap::new(), body) {
+    let request = match to_engine_request(
+        "POST",
+        &headers,
+        query,
+        BTreeMap::new(),
+        "/".to_string(),
+        body,
+    ) {
         Ok(request) => request,
         Err(response) => return *response,
     };
@@ -1263,6 +1296,7 @@ pub async fn deploy_function(
     let declared_name = match &surface {
         rusted_engine::Surface::Http(config) => config.name.clone(),
         rusted_engine::Surface::Mcp(config) => config.name.clone(),
+        rusted_engine::Surface::App(config) => config.name.clone(),
     };
     let Some(name) = name.or(declared_name) else {
         return Err(DeployRefused::new(
@@ -1303,6 +1337,70 @@ pub async fn deploy_function(
 
     let http_config = match surface {
         rusted_engine::Surface::Http(config) => config,
+        rusted_engine::Surface::App(app_config) => {
+            if methods.is_some() || path.is_some() {
+                return Err(DeployRefused::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsupported_trigger",
+                    "an app function's routes come from the module; --method and --path do not apply",
+                ));
+            }
+            // The method gate serves the union; the dispatcher owns paths.
+            let mut methods: Vec<String> =
+                app_config.routes.iter().map(|r| r.method.clone()).collect();
+            methods.sort();
+            methods.dedup();
+            let access = match app_config.access.as_deref() {
+                Some("private") => Some(false),
+                Some("public") => Some(true),
+                _ => None,
+            };
+            let declared = crate::store::Declared::from_config(&config, access);
+            let routes = json!(app_config.routes);
+            let previous_via = previous_via(state, &name).await;
+            let trigger = crate::store::HttpTrigger {
+                methods: methods.clone(),
+                path: None,
+            };
+            let revision = state
+                .store
+                .push_full(
+                    &name,
+                    &source,
+                    Some(&trigger),
+                    "app",
+                    None,
+                    Some(&routes),
+                    Some(user_id),
+                    &declared,
+                    via,
+                )
+                .await
+                .map_err(|e| {
+                    DeployRefused::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store_error",
+                        e.to_string(),
+                    )
+                })?;
+            return Ok(json!({
+                "name": name,
+                "revision": revision.rev,
+                "hash": revision.hash,
+                "size_bytes": source.len(),
+                "kind": "app",
+                "routes": app_config.routes,
+                "methods": methods,
+                "secrets": declared.secrets,
+                "public": access,
+                "state": declared.state,
+                "db": declared.db,
+                "via": via,
+                "previous_via": previous_via,
+                "limits": limits_json(state, &plan),
+                "url": state.data_url(&format!("/f/{name}")),
+            }));
+        }
         rusted_engine::Surface::Mcp(mcp_config) => {
             if methods.is_some() || path.is_some() {
                 return Err(DeployRefused::new(
@@ -1326,6 +1424,7 @@ pub async fn deploy_function(
                     None,
                     "mcp",
                     Some(&meta),
+                    None,
                     Some(user_id),
                     &declared,
                     via,
@@ -1738,6 +1837,17 @@ async fn invoke(
                 // handler, so refuse the mismatch up front — pointing at the
                 // endpoint an MCP client should connect to — rather than
                 // letting it surface as a script error.
+                Ok(Some(hit)) if hit.kind == "app" => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": {
+                            "code": "kind_mismatch",
+                            "message": "an app function is invoked through its routes, not as a bare handler",
+                            "url": state.data_url(&format!("/f/{name}")),
+                        }})),
+                    )
+                        .into_response()
+                }
                 Ok(Some(hit)) if hit.kind == "mcp" => {
                     return (
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -2059,6 +2169,7 @@ async fn verify(
             let (kind, config) = match &inspection.surface {
                 rusted_engine::Surface::Http(c) => ("http", json!(c)),
                 rusted_engine::Surface::Mcp(c) => ("mcp", json!(c)),
+                rusted_engine::Surface::App(c) => ("app", json!(c)),
             };
             Json(json!({
                 "valid": true,

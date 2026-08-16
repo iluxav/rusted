@@ -2547,6 +2547,15 @@ async fn editor_verify(
                     "kind": "mcp",
                     "tools": c.tools.keys().collect::<Vec<_>>(),
                 }),
+                rusted_engine::Surface::App(c) => serde_json::json!({
+                    "ok": true,
+                    "kind": "app",
+                    "routes": c
+                        .routes
+                        .iter()
+                        .map(|r| format!("{} {}", r.method, r.path))
+                        .collect::<Vec<_>>(),
+                }),
             };
             axum::Json(value).into_response()
         }

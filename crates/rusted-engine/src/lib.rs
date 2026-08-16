@@ -48,7 +48,15 @@ pub struct HttpRequest {
     /// Captures from the function's declared route path, e.g. `{id}`.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// The subpath under the function's root ("/" at the root) — what an
+    /// `app` module's dispatcher routes on.
+    #[serde(default = "default_path")]
+    pub path: String,
     pub body: String,
+}
+
+fn default_path() -> String {
+    "/".to_string()
 }
 
 impl HttpRequest {
@@ -59,6 +67,7 @@ impl HttpRequest {
             headers: BTreeMap::new(),
             query: BTreeMap::new(),
             params: BTreeMap::new(),
+            path: "/".to_string(),
             body: body.into(),
         }
     }
@@ -185,6 +194,28 @@ pub enum McpAuthConfig {
 pub enum Surface {
     Http(HttpConfig),
     Mcp(McpConfig),
+    App(AppConfig),
+}
+
+/// One declared route of an `app` module: method + pattern; the handler
+/// stays in the live module and is looked up by the dispatcher at call time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppRoute {
+    pub method: String,
+    pub path: String,
+}
+
+/// `export const app = rusted.app({...}).get(...)` — the Express-style
+/// surface. The builder executes into this plain record at inspect time,
+/// exactly like mcp tools: ergonomics on the way in, data underneath.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub access: Option<String>,
+    #[serde(default)]
+    pub routes: Vec<AppRoute>,
 }
 
 /// Runtime needs a module declares via `export const config`, independent of
@@ -586,6 +617,81 @@ const CAPS_PRELUDE: &str = r#"(() => {
   };
 })()"#;
 
+/// The Express-style builder. Installed before module evaluation so
+/// `export const app = rusted.app(...)` executes into a plain routes record —
+/// inspectable at deploy time, dispatchable at run time.
+const RUSTED_BUILDER_PRELUDE: &str = r#"(() => {
+  const make = (meta) => {
+    const app = { __rustedApp: true, meta: meta || {}, routes: [], middleware: [] };
+    const add = (method) => (path, handler) => {
+      app.routes.push({ method, path: String(path), handler });
+      return app;
+    };
+    app.get = add("GET");
+    app.post = add("POST");
+    app.put = add("PUT");
+    app.patch = add("PATCH");
+    app.delete = add("DELETE");
+    app.use = (fn) => { app.middleware.push(fn); return app; };
+    return app;
+  };
+  globalThis.rusted = { app: make };
+})()"#;
+
+/// Adapts an `app` module to the standard invocation envelope by wrapping
+/// [`GLUE`]: match the route, fill `request.params`, compose the middleware
+/// chain around the handler, then delegate — so request/context/envelope
+/// semantics cannot drift between plain handlers and apps. An unmatched path
+/// is a 404 (405 when only the method missed), served by a synthetic handler
+/// through the same machinery.
+const APP_GLUE: &str = r#"(ns, requestJson, envJson, capsJson) => {
+  const req = JSON.parse(requestJson);
+  const appDef = ns.app;
+  const fail = (message) => globalThis.__rustedGlue(
+    async () => { throw new Error(message); }, requestJson, envJson, capsJson);
+  if (!appDef || appDef.__rustedApp !== true) {
+    return fail("module has no app export");
+  }
+  const path = req.path || "/";
+  const actual = path.split("/").filter((s) => s.length);
+  const match = (pattern) => {
+    const want = pattern.split("/").filter((s) => s.length);
+    if (want.length !== actual.length) return null;
+    const params = {};
+    for (let i = 0; i < want.length; i++) {
+      const seg = want[i];
+      if (seg.startsWith("{") && seg.endsWith("}")) params[seg.slice(1, -1)] = decodeURIComponent(actual[i]);
+      else if (seg !== actual[i]) return null;
+    }
+    return params;
+  };
+  let found = null, params = null, methodMiss = false;
+  for (const route of appDef.routes) {
+    const p = match(route.path);
+    if (!p) continue;
+    if (route.method === req.method) { found = route; params = p; break; }
+    methodMiss = true;
+  }
+  let handler;
+  if (found) {
+    req.params = params;
+    const chain = appDef.middleware;
+    handler = (request, context) => {
+      let i = 0;
+      const next = () => {
+        if (i < chain.length) return chain[i++](request, context, next);
+        return found.handler(request, context);
+      };
+      return next();
+    };
+  } else {
+    const status = methodMiss ? 405 : 404;
+    const message = methodMiss ? "method not allowed" : "not found";
+    handler = (request, context) => context.json({ error: message }, { status });
+  }
+  return globalThis.__rustedGlue(handler, JSON.stringify(req), envJson, capsJson);
+}"#;
+
 const CONSOLE_PRELUDE: &str = r#"(() => {
   const logs = [];
   const fmt = (a) => { try { return typeof a === "string" ? a : JSON.stringify(a); } catch (_) { return String(a); } };
@@ -615,6 +721,7 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
     headers: req.headers,
     query: req.query,
     params: req.params || {},
+    path: req.path || "/",
     body: req.body,
     json: async () => JSON.parse(req.body),
     cookies: (() => {
@@ -873,6 +980,8 @@ struct PreludeBytecode {
     /// function value can ride the module-bytecode path too.
     glue: Vec<u8>,
     tool_glue: Vec<u8>,
+    app_glue: Vec<u8>,
+    builder: Vec<u8>,
 }
 
 fn prelude_bytecode() -> &'static PreludeBytecode {
@@ -896,22 +1005,43 @@ fn prelude_bytecode() -> &'static PreludeBytecode {
             compile_named("prelude:tool-glue", &wrapped)
                 .expect("preludes are compiled in-tree and always parse")
         },
+        app_glue: {
+            let wrapped = format!("globalThis.__rustedAppGlue = {APP_GLUE};");
+            compile_named("prelude:app-glue", &wrapped)
+                .expect("preludes are compiled in-tree and always parse")
+        },
+        builder: compiled("prelude:builder", RUSTED_BUILDER_PRELUDE),
     })
 }
 
-/// The invocation glue as a callable, from bytecode — parsing 4.5KB of glue
-/// per invocation was the largest cost the prelude pass missed.
-fn glue_fn<'js>(ctx: &Ctx<'js>, tool: bool) -> Result<Function<'js>, String> {
+#[derive(Clone, Copy)]
+enum GlueKind {
+    Http,
+    Tool,
+    App,
+}
+
+/// The invocation glue as a callable, from bytecode — parsing kilobytes of
+/// glue per invocation was the largest cost the prelude pass missed. The app
+/// glue wraps the http glue, so both are installed for it.
+fn glue_kind_fn<'js>(ctx: &Ctx<'js>, kind: GlueKind) -> Result<Function<'js>, String> {
     let compiled = prelude_bytecode();
-    let (bytecode, name) = if tool {
-        (&compiled.tool_glue, "__rustedToolGlue")
-    } else {
-        (&compiled.glue, "__rustedGlue")
+    let (bytecode, name) = match kind {
+        GlueKind::Http => (&compiled.glue, "__rustedGlue"),
+        GlueKind::Tool => (&compiled.tool_glue, "__rustedToolGlue"),
+        GlueKind::App => {
+            eval_prelude(ctx, &compiled.glue)?;
+            (&compiled.app_glue, "__rustedAppGlue")
+        }
     };
     eval_prelude(ctx, bytecode)?;
     ctx.globals()
         .get(name)
         .map_err(|e| exception_message(ctx, e))
+}
+
+fn glue_fn<'js>(ctx: &Ctx<'js>, tool: bool) -> Result<Function<'js>, String> {
+    glue_kind_fn(ctx, if tool { GlueKind::Tool } else { GlueKind::Http })
 }
 
 /// Evaluates one precompiled prelude in this context.
@@ -1891,6 +2021,7 @@ fn load_module_raw<'js>(
     install_random(ctx)?;
     install_codec(ctx)?;
     install_web(ctx)?;
+    eval_prelude(ctx, &prelude_bytecode().builder)?;
     let declared = match bytecode {
         // SAFETY: the bytes came from `compile` in this same process, so the
         // QuickJS build that reads them is the one that wrote them.
@@ -2023,6 +2154,109 @@ impl QuickJsExecutor {
             let exec0 = Instant::now();
             let promise: Promise = match glue.call((
                 handler,
+                request_json.as_str(),
+                env_json.as_str(),
+                caps_json.as_str(),
+            )) {
+                Ok(promise) => promise,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        exec0.elapsed(),
+                    )
+                }
+            };
+            let (outcome, response, logs, stack) =
+                settle_with_deadline(&c, promise, deadline, &expired, limits).await;
+            (outcome, response, logs, stack, exec0.elapsed())
+        });
+
+        let (parts, cpu) = cpu_metered(body).await;
+        assemble_result(parts, cpu, wall0, limits, &budget)
+    }
+
+    /// Runs one mcp tool as a one-shot invocation: same runtime, limits, and
+    /// envelope machinery as [`Self::execute_with_services`], but the module is
+    /// loaded without demanding a default export and [`TOOL_GLUE`] resolves the
+    /// named tool's handler in the live namespace instead.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_app_with_services(
+        &self,
+        source: &str,
+        request: &HttpRequest,
+        limits: &Limits,
+        services: Option<Arc<dyn HostServices>>,
+        env: Option<&BTreeMap<String, String>>,
+        caps: &Capabilities,
+    ) -> InvocationResult {
+        let env_json = env
+            .map(|env| serde_json::to_string(env).expect("serialize env"))
+            .unwrap_or_default();
+        let caps_json = caps.to_glue_json();
+        let wall0 = Instant::now();
+        let (rt, expired) = restricted_async_runtime(limits).await;
+        let ctx = AsyncContext::full(&rt).await.expect("quickjs context");
+        let request_json = serde_json::to_string(request).expect("serialize request");
+        let bytecode = self.bytecode_for(source).ok();
+        // Fetches share the invocation's budget, so exec_ms bounds total wall
+        // time and not merely the JavaScript.
+        let deadline = wall0 + Duration::from_millis(limits.wall_ms);
+        let budget = Arc::new(outbound::OutboundBudget::with_deadline(
+            limits.outbound.clone(),
+            deadline,
+        ));
+
+        let body = ctx.async_with(async |c| {
+            let zero = Duration::ZERO;
+            if let Err(msg) = install_fetch_async(&c, budget.clone()) {
+                return (
+                    Outcome::Error(msg),
+                    Response::default(),
+                    Vec::new(),
+                    None,
+                    zero,
+                );
+            }
+            if let Some(services) = services.clone() {
+                if let Err(msg) = install_services(&c, services) {
+                    return (
+                        Outcome::Error(msg),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    );
+                }
+            }
+            let module =
+                match load_module_raw(&c, source, bytecode.as_deref().map(|b| b.as_slice())) {
+                    Ok(module) => module,
+                    Err(msg) => {
+                        return (classify(msg), Response::default(), Vec::new(), None, zero)
+                    }
+                };
+            let ns = match module.namespace() {
+                Ok(ns) => ns,
+                Err(e) => {
+                    return (
+                        classify(exception_message(&c, e)),
+                        Response::default(),
+                        Vec::new(),
+                        None,
+                        zero,
+                    )
+                }
+            };
+            let glue: Function = match glue_kind_fn(&c, GlueKind::App) {
+                Ok(glue) => glue,
+                Err(e) => return (classify(e), Response::default(), Vec::new(), None, zero),
+            };
+            let exec0 = Instant::now();
+            let promise: Promise = match glue.call((
+                ns,
                 request_json.as_str(),
                 env_json.as_str(),
                 caps_json.as_str(),
@@ -2357,6 +2591,7 @@ impl Executor for QuickJsExecutor {
             };
             let mcp = export("mcp");
             let http = export("http");
+            let app = export("app");
             let has_default = export("default").is_some();
 
             // Surface-independent: an http handler and an mcp tool ask for
@@ -2375,6 +2610,109 @@ impl Executor for QuickJsExecutor {
                 surface,
                 config: runtime_config.clone(),
             };
+
+            if let Some(app) = app {
+                if mcp.is_some() || http.is_some() {
+                    return Err(
+                        "declare one surface per module: found app alongside http or mcp"
+                            .to_string(),
+                    );
+                }
+                if has_default {
+                    return Err(
+                        "an app module must not have a default export; routes are the interface"
+                            .to_string(),
+                    );
+                }
+                // Snapshot the builder's record: JSON.stringify drops the
+                // handler functions, so a probe checks their presence on the
+                // same evaluated value first — the mcp pattern exactly.
+                let probe: Function = c
+                    .eval(
+                        r#"(app) => {
+                        if (!app || app.__rustedApp !== true) {
+                            return JSON.stringify({ notApp: true });
+                        }
+                        const missing = [];
+                        for (const r of app.routes || []) {
+                            if (typeof r.handler !== "function") missing.push(`${r.method} ${r.path}`);
+                        }
+                        for (const m of app.middleware || []) {
+                            if (typeof m !== "function") missing.push("middleware");
+                        }
+                        return JSON.stringify({
+                            missing,
+                            meta: app.meta || {},
+                            routes: (app.routes || []).map((r) => ({ method: r.method, path: r.path })),
+                        });
+                    }"#,
+                    )
+                    .map_err(|e| exception_message(&c, e))?;
+                let raw: String = probe
+                    .call((app.clone(),))
+                    .map_err(|e| exception_message(&c, e))?;
+
+                #[derive(Deserialize)]
+                struct ProbedApp {
+                    #[serde(default, rename = "notApp")]
+                    not_app: bool,
+                    #[serde(default)]
+                    missing: Vec<String>,
+                    #[serde(default)]
+                    meta: serde_json::Value,
+                    #[serde(default)]
+                    routes: Vec<AppRoute>,
+                }
+                let probed: ProbedApp = serde_json::from_str(&raw)
+                    .map_err(|e| format!("invalid app export: {e}"))?;
+                if probed.not_app {
+                    return Err(
+                        "the app export must be built with rusted.app(...) — see the docs"
+                            .to_string(),
+                    );
+                }
+                if let Some(route) = probed.missing.first() {
+                    return Err(format!("app route {route} has no handler function"));
+                }
+                if probed.routes.is_empty() {
+                    return Err("an app module must declare at least one route".to_string());
+                }
+                if probed.routes.len() > 64 {
+                    return Err(format!(
+                        "too many routes: {} (max 64)",
+                        probed.routes.len()
+                    ));
+                }
+                for route in &probed.routes {
+                    if !matches!(
+                        route.method.as_str(),
+                        "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+                    ) {
+                        return Err(format!("unsupported route method: {}", route.method));
+                    }
+                    if !route.path.starts_with('/') || route.path.len() > 256 {
+                        return Err(format!(
+                            "route paths start with / and stay under 256 chars: {}",
+                            route.path
+                        ));
+                    }
+                }
+                let name = probed.meta.get("name").and_then(|v| v.as_str()).map(String::from);
+                let access = probed.meta.get("access").and_then(|v| v.as_str()).map(String::from);
+                match access.as_deref() {
+                    None | Some("public") | Some("private") => {}
+                    Some(other) => {
+                        return Err(format!(
+                            "app access must be \"public\" or \"private\", not \"{other}\""
+                        ));
+                    }
+                }
+                return Ok(inspected(Surface::App(AppConfig {
+                    name,
+                    access,
+                    routes: probed.routes,
+                })));
+            }
 
             let Some(mcp) = mcp else {
                 // http (or nothing declared): the default handler is the surface.

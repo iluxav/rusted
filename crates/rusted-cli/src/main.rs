@@ -1193,6 +1193,11 @@ fn build_bundle(file: PathBuf, out: Option<PathBuf>, sourcemap: bool) -> Result<
             "  mcp tools: {}",
             config.tools.keys().cloned().collect::<Vec<_>>().join(", ")
         ),
+        rusted_engine::Surface::App(config) => {
+            for route in &config.routes {
+                println!("  {} {}", route.method, route.path);
+            }
+        }
     }
     if !inspection.config.secrets.is_empty() {
         println!("  secrets: {}", inspection.config.secrets.join(", "));

@@ -2315,6 +2315,119 @@ export default async function handler(request, context) {
     assert_eq!(v["pragma"], "blocked");
 }
 
+const APP_FN: &str = r#"
+export const app = rusted
+  .app({ name: "todo-app" })
+  .use(async (request, context, next) => {
+    request.stamped = "mw";
+    if (request.query.block === "1") return context.json({ blocked: true }, { status: 403 });
+    return next();
+  })
+  .get("/", async (request, context) => context.json({ home: true, mw: request.stamped }))
+  .get("/todos/{id}", async (request, context) => context.json({ id: request.params.id }))
+  .post("/todos", async (request, context) => {
+    const { title } = await request.json().catch(() => ({}));
+    return context.json({ created: title }, { status: 201 });
+  });
+"#;
+
+#[tokio::test]
+async fn app_surface_routes_and_dispatches() {
+    let t = boot().await;
+    let r = push(&t, "todo-app", APP_FN).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["kind"], "app", "{v}");
+    assert_eq!(v["routes"].as_array().unwrap().len(), 3);
+
+    // Root route, with middleware having stamped the request.
+    let r = t.client.get(t.data("/f/todo-app")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["home"], true);
+    assert_eq!(v["mw"], "mw");
+
+    // A parameterized route.
+    let v: Value = t
+        .client
+        .get(t.data("/f/todo-app/todos/42"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["id"], "42");
+
+    // POST route with a status override.
+    let r = t
+        .client
+        .post(t.data("/f/todo-app/todos"))
+        .body(r#"{"title":"ship it"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["created"], "ship it");
+
+    // Unmatched path → the dispatcher's 404.
+    let r = t
+        .client
+        .get(t.data("/f/todo-app/nope"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+
+    // Matched path, wrong method → the dispatcher's 405.
+    let r = t
+        .client
+        .post(t.data("/f/todo-app"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 405);
+
+    // Middleware short-circuit: returns without calling next().
+    let r = t
+        .client
+        .get(t.data("/f/todo-app?block=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["blocked"], true);
+
+    // /api/invoke refuses app functions like it refuses mcp.
+    let r = t
+        .admin_post("/api/invoke", json!({ "name": "todo-app" }))
+        .await;
+    assert_eq!(r.status(), 422);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "kind_mismatch");
+}
+
+#[tokio::test]
+async fn app_surface_is_validated_at_deploy() {
+    let t = boot().await;
+    // No routes.
+    let r = push(
+        &t,
+        "empty-app",
+        "export const app = rusted.app({ name: \"empty-app\" });",
+    )
+    .await;
+    assert_eq!(r.status(), 422);
+    // A default export alongside app.
+    let source = r#"export const app = rusted.app({}).get("/", async () => "x");
+export default async function handler() { return 1; }"#;
+    let r = push(&t, "mixed-app", source).await;
+    assert_eq!(r.status(), 422);
+}
+
 /// The security property of the admin section: to a signed-in account without
 /// the flag, every admin surface — pages and the toggle endpoint — is a 404,
 /// indistinguishable from not existing.

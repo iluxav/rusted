@@ -209,6 +209,10 @@ fn load(
             config.name.clone().unwrap_or(stem),
             Served::Mcp(json!({ "public": config.public, "tools": config.tools })),
         ),
+        rusted_engine::Surface::App(_) => return Err(
+            "rusted run does not serve app modules yet; develop them against a local rusted serve"
+                .to_string(),
+        ),
     };
     if inspection.config.wants_state() {
         println!(
@@ -611,6 +615,7 @@ async fn dispatch(
             .collect(),
         query: query.into_iter().collect(),
         params,
+        path: "/".to_string(),
         body,
     };
 

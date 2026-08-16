@@ -54,6 +54,9 @@ pub struct FunctionRecord {
     /// Deploy-time MCP tool metadata (handlers stripped); NULL for http.
     #[serde(default)]
     pub mcp: Option<serde_json::Value>,
+    /// Deploy-time app route table (`kind = "app"`); NULL otherwise.
+    #[serde(default)]
+    pub routes: Option<serde_json::Value>,
     /// Secret names the module requested via `export const config`, captured
     /// at deploy time so invocation needs no re-inspection.
     #[serde(default)]
@@ -129,6 +132,8 @@ pub struct Fetched {
     pub owner: Option<Uuid>,
     pub kind: String,
     pub mcp: Option<serde_json::Value>,
+    /// Route table for `kind = "app"` functions.
+    pub routes: Option<serde_json::Value>,
     /// Secret names to decrypt into `context.env` for every invocation.
     pub secrets: Vec<String>,
     /// Tri-state caller authentication — see [`FunctionRecord::public`].
@@ -245,6 +250,7 @@ impl Store {
             Some(&trigger),
             "http",
             None,
+            None,
             user_id,
             declared,
             via,
@@ -263,6 +269,7 @@ impl Store {
         trigger: Option<&HttpTrigger>,
         kind: &str,
         mcp: Option<&serde_json::Value>,
+        routes: Option<&serde_json::Value>,
         user_id: Option<Uuid>,
         declared: &Declared,
         via: &str,
@@ -294,13 +301,14 @@ impl Store {
         };
         sqlx::query(
             "INSERT INTO functions
-                 (name, current_rev, methods, path, user_id, kind, mcp, secrets, public,
-                  state, db, objects)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 (name, current_rev, methods, path, user_id, kind, mcp, routes, secrets,
+                  public, state, db, objects)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT (name) DO UPDATE
                  SET current_rev = $2, methods = $3, path = $4, updated_at = now(),
                      user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7,
-                     secrets = $8, public = $9, state = $10, db = $11, objects = $12",
+                     routes = $8, secrets = $9, public = $10, state = $11, db = $12,
+                     objects = $13",
         )
         .bind(name)
         .bind(rev)
@@ -309,6 +317,7 @@ impl Store {
         .bind(user_id)
         .bind(kind)
         .bind(mcp)
+        .bind(routes)
         .bind(declared.secrets.to_vec())
         .bind(declared.public)
         .bind(declared.state)
@@ -350,7 +359,7 @@ impl Store {
 
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
-            "SELECT current_rev, methods, path, user_id, kind, mcp, secrets, public,
+            "SELECT current_rev, methods, path, user_id, kind, mcp, routes, secrets, public,
                     state, db, objects, published
              FROM functions WHERE name = $1",
         )
@@ -384,6 +393,7 @@ impl Store {
             user_id: function.get("user_id"),
             kind: function.get("kind"),
             mcp: function.get("mcp"),
+            routes: function.get("routes"),
             secrets: function.get("secrets"),
             public: function.get("public"),
             state: function.get("state"),
@@ -423,6 +433,7 @@ impl Store {
             owner: record.user_id,
             kind: record.kind,
             mcp: record.mcp,
+            routes: record.routes,
             secrets: record.secrets,
             public: record.public,
             state: record.state,
