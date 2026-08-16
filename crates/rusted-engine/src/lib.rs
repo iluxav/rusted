@@ -842,6 +842,10 @@ struct PreludeBytecode {
     fetch: Vec<u8>,
     inbox: Vec<u8>,
     web: Vec<u8>,
+    /// The invocation glues, wrapped as `globalThis.__rustedGlue = <fn>` so a
+    /// function value can ride the module-bytecode path too.
+    glue: Vec<u8>,
+    tool_glue: Vec<u8>,
 }
 
 fn prelude_bytecode() -> &'static PreludeBytecode {
@@ -855,7 +859,32 @@ fn prelude_bytecode() -> &'static PreludeBytecode {
         fetch: compiled("prelude:fetch", FETCH_PRELUDE),
         inbox: compiled("prelude:inbox", INBOX_PRELUDE),
         web: compiled("prelude:web", WEB_PRELUDE),
+        glue: {
+            let wrapped = format!("globalThis.__rustedGlue = {GLUE};");
+            compile_named("prelude:glue", &wrapped)
+                .expect("preludes are compiled in-tree and always parse")
+        },
+        tool_glue: {
+            let wrapped = format!("globalThis.__rustedToolGlue = {TOOL_GLUE};");
+            compile_named("prelude:tool-glue", &wrapped)
+                .expect("preludes are compiled in-tree and always parse")
+        },
     })
+}
+
+/// The invocation glue as a callable, from bytecode — parsing 4.5KB of glue
+/// per invocation was the largest cost the prelude pass missed.
+fn glue_fn<'js>(ctx: &Ctx<'js>, tool: bool) -> Result<Function<'js>, String> {
+    let compiled = prelude_bytecode();
+    let (bytecode, name) = if tool {
+        (&compiled.tool_glue, "__rustedToolGlue")
+    } else {
+        (&compiled.glue, "__rustedGlue")
+    };
+    eval_prelude(ctx, bytecode)?;
+    ctx.globals()
+        .get(name)
+        .map_err(|e| exception_message(ctx, e))
 }
 
 /// Evaluates one precompiled prelude in this context.
@@ -1931,17 +1960,9 @@ impl QuickJsExecutor {
                 Ok(handler) => handler,
                 Err(msg) => return (classify(msg), Response::default(), Vec::new(), None, zero),
             };
-            let glue: Function = match c.eval(GLUE) {
+            let glue: Function = match glue_fn(&c, false) {
                 Ok(glue) => glue,
-                Err(e) => {
-                    return (
-                        classify(exception_message(&c, e)),
-                        Response::default(),
-                        Vec::new(),
-                        None,
-                        zero,
-                    )
-                }
+                Err(e) => return (classify(e), Response::default(), Vec::new(), None, zero),
             };
             let exec0 = Instant::now();
             let promise: Promise = match glue.call((
@@ -2043,17 +2064,9 @@ impl QuickJsExecutor {
                     )
                 }
             };
-            let glue: Function = match c.eval(TOOL_GLUE) {
+            let glue: Function = match glue_fn(&c, true) {
                 Ok(glue) => glue,
-                Err(e) => {
-                    return (
-                        classify(exception_message(&c, e)),
-                        Response::default(),
-                        Vec::new(),
-                        None,
-                        zero,
-                    )
-                }
+                Err(e) => return (classify(e), Response::default(), Vec::new(), None, zero),
             };
             let exec0 = Instant::now();
             let promise: Promise = match glue.call((
@@ -2202,17 +2215,9 @@ impl Executor for QuickJsExecutor {
                 Ok(h) => h,
                 Err(msg) => return (classify(msg), Response::default(), Vec::new(), None, zero),
             };
-            let glue: Function = match c.eval(GLUE) {
+            let glue: Function = match glue_fn(&c, false) {
                 Ok(g) => g,
-                Err(e) => {
-                    return (
-                        classify(exception_message(&c, e)),
-                        Response::default(),
-                        Vec::new(),
-                        None,
-                        zero,
-                    )
-                }
+                Err(e) => return (classify(e), Response::default(), Vec::new(), None, zero),
             };
             let exec0 = Instant::now();
             let promise: Promise = match glue.call((handler, request_json.as_str())) {
