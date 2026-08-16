@@ -1,0 +1,46 @@
+<h1>Web apps</h1>
+<p class="lede">The third surface a module can export: <code>app</code> — Express-style routes, middleware, and path parameters, all under one function's URL. With the <a href="/docs/database">database</a> and HTML fragments, one pushed file is a complete interactive web app.</p>
+
+<h2>The builder</h2>
+<pre><code>export const app = rusted
+  .app({ name: "todo-app", access: "public" })
+  .use(async (request, context, next) => {     // runs before every matched route
+    request.user = await authenticate(context, request);
+    return next();                              // or return a response to short-circuit
+  })
+  .get("/", homeHandler)
+  .get("/todos/{id}", showHandler)              // captures → request.params.id
+  .post("/todos", createHandler)
+  .delete("/todos/{id}", removeHandler);</code></pre>
+<p>The chain reads like Express but executes into plain data at deploy time — the route table is inspected, validated, and stored exactly like <a href="/docs/mcp">mcp tools</a>, so <code>rusted verify</code> lists every route and a missing handler cannot deploy. Handlers are ordinary <code>(request, context)</code> functions with the whole <a href="/docs/runtime">runtime</a> available; an app module exports no default — routes are the interface.</p>
+
+<table>
+  <tr><th>piece</th><th>behavior</th></tr>
+  <tr><td><code>rusted.app(meta)</code></td><td>Starts the chain. <code>name</code> and <code>access</code> (<code>"public"</code> | <code>"private"</code>) mean what they mean on the <a href="/docs/module">http export</a>.</td></tr>
+  <tr><td><code>.get/.post/.put/.patch/.delete(path, handler)</code></td><td>One route each; up to 64. <code>{param}</code> segments capture into <code>request.params</code>, URL-decoded. Requests also carry <code>request.path</code>, the subpath under the function root.</td></tr>
+  <tr><td><code>.use(middleware)</code></td><td><code>(request, context, next)</code>, in registration order, before every <em>matched</em> route. Return without calling <code>next()</code> to short-circuit (auth checks, redirects). Mutating <code>request</code> is how middleware hands data to handlers.</td></tr>
+  <tr><td>no match</td><td>The dispatcher answers: unknown path → 404, known path with the wrong method → 405. Methods not declared by any route are refused before a sandbox boots.</td></tr>
+</table>
+
+<h2>Serving HTML</h2>
+<p>A fragment is just a string with the right content type:</p>
+<pre><code>const html = (context, body, init) =>
+  context.text(body, { ...init, headers: { "content-type": "text/html", ...(init &amp;&amp; init.headers) } });
+
+.get("/", async (request, context) => {
+  const todos = await context.db.query("SELECT * FROM todos ORDER BY id");
+  return html(context, `&lt;ul&gt;${todos.map(todoLi).join("")}&lt;/ul&gt;`);
+})</code></pre>
+<p>That composes naturally with <a href="https://htmx.org">htmx</a>: elements request fragments, the server renders them, htmx swaps them in. The pattern that keeps it honest — write one renderer per thing (<code>todoLi</code>) and return it from the full page <em>and</em> from every mutation, so the DOM is always a reflection of server truth. Form posts arrive url-encoded: <code>new URLSearchParams(request.body).get("title")</code>.</p>
+<p>One URL subtlety: the page lives at <code>/f/todo-app</code> with no trailing slash, so <em>relative</em> asset and hx- URLs resolve from <code>/f/</code> — write them as <code>todo-app/todos</code>, or absolute.</p>
+
+<h2>The complete example</h2>
+<p><a href="https://github.com/iluxav/rusted/tree/main/examples/todo-app">examples/todo-app</a> is the whole idea in one commented file: routes + middleware + <code>context.db</code> + htmx fragments — push it and the URL is a working todo app.</p>
+
+<h2>Notes</h2>
+<ul>
+  <li>Escape user input interpolated into HTML (the example ships a five-line <code>escapeHtml</code>). A native auto-escaping <code>context.html</code> is on the roadmap.</li>
+  <li><code>--method</code>/<code>--path</code> push flags don't apply — routes come from the module.</li>
+  <li><code>/api/invoke</code> refuses app functions (they're invoked through their routes); <code>rusted run</code> doesn't serve them yet — use a local <code>rusted serve</code> or the console editor.</li>
+  <li>Sessions without a database: <code>request.cookies</code> + <code>context.setCookie</code> + <code>context.seal</code>/<code>open</code> — see <a href="/docs/security">security</a>.</li>
+</ul>

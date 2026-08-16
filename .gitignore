@@ -25,6 +25,8 @@ tiny-quickjs-lambda-platform.md
 # Git worktrees
 .worktrees/
 
+rusted-dbs/
+
 issues.md
 
 renote-requirments.md

@@ -1,5 +1,5 @@
 <h1>Module reference</h1>
-<p class="lede">Everything a function declares, it declares in its own file, read at deploy time. Three exports: <code>http</code> or <code>mcp</code> picks the surface (never both), and <code>config</code> asks for runtime capabilities.</p>
+<p class="lede">Everything a function declares, it declares in its own file, read at deploy time. One surface export — <code>http</code>, <code>mcp</code>, or <code>app</code> (never more than one) — plus <code>config</code> for runtime capabilities.</p>
 
 <h2><code>export const http</code></h2>
 <p>Deploys the default export as an HTTP endpoint at <code>/f/&lt;name&gt;</code>. The whole export is optional — a bare default handler deploys with the defaults below.</p>
@@ -37,6 +37,14 @@ export default async function handler(request, context) {
     },
   },
 };</code></pre>
+
+<h2><code>export const app</code></h2>
+<p>The third surface: Express-style routes, middleware, and path parameters under one function's URL, built with the <code>rusted.app()</code> chain. Routes are the interface — an <code>app</code> module has no default export, and the route table is inspected and validated at deploy time like mcp tools. See <a href="/docs/apps">Web apps</a>.</p>
+<pre><code>export const app = rusted
+  .app({ name: "todo-app", access: "public" })
+  .use(loggingMiddleware)
+  .get("/", homeHandler)
+  .post("/todos/{id}/toggle", toggleHandler);</code></pre>
 
 <h2><code>export const config</code></h2>
 <p>Runtime capabilities. Nothing is on by default — a function gets exactly what it declares, and the console shows what each function asked for.</p>

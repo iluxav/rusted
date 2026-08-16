@@ -623,7 +623,7 @@ struct DocsPage {
 }
 
 /// Sidebar order.
-const DOCS_PAGES: [DocsPage; 9] = [
+const DOCS_PAGES: [DocsPage; 10] = [
     DocsPage {
         slug: "getting-started",
         label: "Getting started",
@@ -642,7 +642,7 @@ const DOCS_PAGES: [DocsPage; 9] = [
         slug: "module",
         label: "Module reference",
         title: "Module reference",
-        description: "Every field a rusted function can declare: the http and mcp surface exports (name, methods, path, access, tools, auth) and the config export (secrets, state, object storage).",
+        description: "Every field a rusted function can declare: the http, mcp, and app surface exports (name, methods, path, access, tools, routes, auth) and the config export (secrets, state, object storage).",
         content: include_str!("../templates/docs/module.html"),
     },
     DocsPage {
@@ -658,6 +658,13 @@ const DOCS_PAGES: [DocsPage; 9] = [
         title: "MCP",
         description: "Serve Model Context Protocol tools from a deployed function: schema-validated tools, optional OAuth protection, and per-environment audiences.",
         content: include_str!("../templates/docs/mcp.html"),
+    },
+    DocsPage {
+        slug: "apps",
+        label: "Web apps",
+        title: "Web apps",
+        description: "Express-style routes, middleware, and path parameters under one function's URL — with the database and HTML fragments, one pushed file is a complete interactive web app.",
+        content: include_str!("../templates/docs/apps.html"),
     },
     DocsPage {
         slug: "database",

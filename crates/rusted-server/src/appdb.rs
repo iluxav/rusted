@@ -74,9 +74,25 @@ enum DbOp {
 
 impl DbHost {
     pub fn new(dir: PathBuf, pool: PgPool) -> DbHost {
+        // The instance id persists in the data directory: a restarted server
+        // on the same machine IS the same lease-holder, so deploys don't
+        // brown out tenant databases waiting for their own stale lease. A
+        // genuinely different node has a different file and correctly waits
+        // out the stale window.
+        let _ = std::fs::create_dir_all(&dir);
+        let id_path = dir.join("instance-id");
+        let instance = std::fs::read_to_string(&id_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let fresh = uuid::Uuid::new_v4().to_string();
+                let _ = std::fs::write(&id_path, &fresh);
+                fresh
+            });
         DbHost {
             dir,
-            instance: uuid::Uuid::new_v4().to_string(),
+            instance,
             pool,
             handles: Mutex::new(HashMap::new()),
         }
