@@ -1,0 +1,58 @@
+<h1>Runtime reference</h1>
+<p class="lede">What a function finds when it runs: the ECMAScript standard library plus a small set of natively-backed globals and <code>context</code> helpers. Everything here is implemented in Rust behind the scenes — not interpreted polyfills — and present on every path: deployed functions, <code>execute</code>, MCP tools, and <code>rusted run</code>.</p>
+
+<h2>Globals</h2>
+<table>
+  <tr><th>global</th><th>what you get</th></tr>
+  <tr><td>ES2020 standard library</td><td><code>JSON</code>, <code>RegExp</code>, <code>Date</code>, <code>Math</code>, <code>Map</code>/<code>Set</code>, <code>Promise</code>, <code>BigInt</code>, <code>Proxy</code>/<code>Reflect</code>, typed arrays — the language itself, complete.</td></tr>
+  <tr><td><code>fetch(url, init?)</code></td><td>Outbound HTTP/HTTPS, SSRF-guarded (no private networks) and capped per plan. Reduced on purpose: plain objects in and out — no body streams, <code>blob</code>, <code>formData</code>, <code>statusText</code>, redirect control, or <code>Headers</code>/<code>Request</code>/<code>Response</code> classes. The response offers <code>status</code>, <code>headers</code>, <code>text()</code>, and <code>json()</code>.</td></tr>
+  <tr><td><code>console</code></td><td><code>log</code>, <code>info</code>, <code>warn</code>, <code>error</code> — captured per invocation and returned with it (see <code>rusted logs</code>), not written to stdout. Capped at 100 entries of 1024 characters. No <code>debug</code>, <code>table</code>, <code>trace</code>, or <code>time</code>.</td></tr>
+  <tr><td><code>URL</code> / <code>URLSearchParams</code></td><td>WHATWG URL parsing, relative resolution against a base, component setters that re-serialize through the real parser, and a live-linked <code>searchParams</code>. Backed by the same URL implementation browsers follow.</td></tr>
+  <tr><td><code>TextEncoder</code> / <code>TextDecoder</code></td><td>UTF-8 only — any other label is a <code>RangeError</code>. Invalid bytes become U+FFFD unless constructed with <code>{ fatal: true }</code>, which throws. Accepts <code>Uint8Array</code>, <code>ArrayBuffer</code>, and views.</td></tr>
+  <tr><td><code>btoa</code> / <code>atob</code></td><td>Standard base64 of binary strings.</td></tr>
+</table>
+
+<h2>Building responses — <code>context</code></h2>
+<table>
+  <tr><th>helper</th><th>what it does</th></tr>
+  <tr><td><code>context.json(body, init?)</code></td><td>An <code>application/json</code> response; <code>init</code> sets status and extra headers.</td></tr>
+  <tr><td><code>context.text(body, init?)</code></td><td><code>text/plain; charset=utf-8</code>.</td></tr>
+  <tr><td><code>context.redirect(url, init?)</code></td><td>A redirect; status defaults to 302.</td></tr>
+  <tr><td><code>context.setCookie(name, value, options?)</code></td><td>A <code>set-cookie</code> header value with safe defaults: <code>Path=/</code>, <code>HttpOnly</code>, <code>SameSite=Lax</code>, <code>Secure</code>.</td></tr>
+  <tr><td><code>context.formEncode(values)</code></td><td><code>application/x-www-form-urlencoded</code> — for query strings and form bodies.</td></tr>
+</table>
+
+<h2>Crypto and codecs — native, not interpreted</h2>
+<p>The primitives every credential-handling function otherwise imports an npm package (and pays interpreter time) for:</p>
+<table>
+  <tr><th>helper</th><th>what it does</th></tr>
+  <tr><td><code>context.randomBytes(n)</code></td><td>1–1024 bytes from the OS cryptographic source — for state, nonces, and keys, where <code>Math.random()</code> must never be used.</td></tr>
+  <tr><td><code>context.randomBase64Url(n)</code></td><td>The same, as unpadded base64url — URL- and cookie-safe. 32 bytes encodes to 43 characters.</td></tr>
+  <tr><td><code>context.sha256(data)</code></td><td>SHA-256 of a string or bytes.</td></tr>
+  <tr><td><code>context.toBase64Url</code> / <code>fromBase64Url</code></td><td>Unpadded base64url, both directions.</td></tr>
+  <tr><td><code>context.toHex</code> / <code>fromHex</code></td><td>Hex, both directions.</td></tr>
+  <tr><td><code>context.timingSafeEqual(a, b)</code></td><td>Equality without leaking where inputs differ through timing — compare tokens and signatures with this, never <code>===</code>.</td></tr>
+  <tr><td><code>context.seal</code> / <code>context.open</code></td><td>Authenticated encryption (AES-256-GCM) of a JSON payload, keyed by one of your vault secrets — the key never enters JavaScript. Compact base64url output, fit for a cookie. See <a href="/docs/security">security</a>.</td></tr>
+</table>
+
+<h2>Declared capabilities</h2>
+<p>Present only when the module asks (see the <a href="/docs/module">module reference</a>) and the host supplies them:</p>
+<table>
+  <tr><th>helper</th><th>appears when</th></tr>
+  <tr><td><code>context.env</code></td><td><code>config.secrets</code> is declared — each name decrypted per invocation, per environment.</td></tr>
+  <tr><td><code>context.state</code></td><td><code>config.state: true</code> — durable JSON state with compare-and-set.</td></tr>
+  <tr><td><code>context.objects.&lt;NAME&gt;</code></td><td><code>config.objects</code> declares the binding — presigned S3 puts and gets.</td></tr>
+  <tr><td><code>context.inbox</code></td><td>Deployed functions — read your <a href="/docs/inbox">inboxes</a>.</td></tr>
+  <tr><td><code>context.currentEnv</code></td><td>Deployed and local runs — <code>"prod"</code>, the <code>@env</code> the URL selected, or <code>"local"</code>.</td></tr>
+</table>
+
+<h2>Deliberately absent</h2>
+<p>The sandbox is smaller than Node or a browser, on purpose:</p>
+<ul>
+  <li><strong>Timers</strong> — no <code>setTimeout</code>, <code>setInterval</code>, or any scheduling: the uncatchable wall-clock deadline owns time.</li>
+  <li><strong>Node built-ins</strong> — no <code>fs</code>, <code>process</code>, <code>net</code>, <code>child_process</code>, <code>Buffer</code>, or <code>require</code>. There is no filesystem to find.</li>
+  <li><strong>Web APIs beyond the list above</strong> — no <code>crypto.subtle</code>, <code>Intl</code>, <code>Blob</code>, <code>FormData</code>, <code>AbortController</code>, or <code>Headers</code>/<code>Request</code>/<code>Response</code> classes.</li>
+  <li><strong>Runtime <code>import</code></strong> — nothing resolves at run time. npm packages work by being bundled in: <code>rusted push</code> bundles imports automatically, so pure-JS packages (<code>zod</code>, <code>date-fns</code>, <code>@noble/hashes</code>, …) just work, while packages needing node built-ins or timers do not.</li>
+</ul>
+
+<div class="callout"><p><code>rusted types</code> writes <code>rusted.d.ts</code> — this whole surface as TypeScript declarations, so your editor promises exactly what the runtime keeps.</p></div>

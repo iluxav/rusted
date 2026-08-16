@@ -616,7 +616,7 @@ struct DocsPage {
 }
 
 /// Sidebar order.
-const DOCS_PAGES: [DocsPage; 7] = [
+const DOCS_PAGES: [DocsPage; 8] = [
     DocsPage {
         slug: "getting-started",
         label: "Getting started",
@@ -637,6 +637,13 @@ const DOCS_PAGES: [DocsPage; 7] = [
         title: "Module reference",
         description: "Every field a rusted function can declare: the http and mcp surface exports (name, methods, path, access, tools, auth) and the config export (secrets, state, object storage).",
         content: include_str!("../templates/docs/module.html"),
+    },
+    DocsPage {
+        slug: "runtime",
+        label: "Runtime reference",
+        title: "Runtime reference",
+        description: "Every global and context helper inside the rusted sandbox — fetch, URL, TextEncoder, native crypto and codecs, declared capabilities — and what is deliberately absent.",
+        content: include_str!("../templates/docs/runtime.html"),
     },
     DocsPage {
         slug: "mcp",
