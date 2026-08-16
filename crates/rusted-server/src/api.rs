@@ -2035,29 +2035,28 @@ pub(crate) async fn run_adhoc(
 ) -> Response {
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     let limits = limits_for_plan(state, &plan.limits);
-    let request = HttpRequest::post_json(body);
     // The editor's Run is ad-hoc, but the caller is authenticated — and the
     // account database is account-scoped, not function-scoped, so a buffer
     // declaring config.db gets the real thing (prod). State and objects stay
     // absent: they scope by function name, which an ad-hoc run doesn't have.
     let mut grant = HostGrant::default();
+    let mut job = Job::Http(HttpRequest::post_json(body.clone()));
     if let Ok(inspection) = inspect_source(state, source.clone()).await {
         if inspection.config.wants_db() {
             grant.caps.db = true;
             grant.caps.env_name = Some(crate::secrets::PROD_ENV.to_string());
             grant.env_name = crate::secrets::PROD_ENV.to_string();
         }
+        // An app module has no default export to POST at; Run means "show me
+        // the front page" — a GET / through the app dispatcher, which answers
+        // 404 itself if the module declares no root route.
+        if matches!(inspection.surface, rusted_engine::Surface::App(_)) {
+            let mut request = HttpRequest::post_json(body);
+            request.method = "GET".to_string();
+            job = Job::App(request);
+        }
     }
-    match execute_raw(
-        state,
-        source,
-        Job::Http(request),
-        limits,
-        Some(user_id),
-        grant,
-    )
-    .await
-    {
+    match execute_raw(state, source, job, limits, Some(user_id), grant).await {
         Ok(result) => {
             debug_print(state, "editor", &result);
             Json(invocation_envelope(result)).into_response()

@@ -4,12 +4,11 @@ interface Input {
   name?: string;
 }
 
-export const http: Rusted.Http = { name: "test", methods: ["POST"] };
+export const app = rusted
+  .app({ name: "test" })
+  .post("/", greet);
 
-const handler: Rusted.Handler = async (request, context) => {
-  const { name } = await request.json<Input>();
-
+async function greet(request: Rusted.Request, context: Rusted.Context) {
+  const { name } = await request.json<Input>().catch((): Input => ({}));
   return context.json({ message: `Hello, ${name ?? "world"}` });
-};
-
-export default handler;
+}

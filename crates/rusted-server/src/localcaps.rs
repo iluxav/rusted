@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -65,6 +66,12 @@ pub struct LocalServices {
     /// Per-process salt for `context.seal`: local seals work across hot
     /// reloads and expire with the dev server, like local state.
     seal_salt: String,
+    /// Whether the current load declares `config.db` — the same gate the
+    /// deployed grant enforces.
+    db_declared: std::sync::atomic::AtomicBool,
+    /// The scratch database, opened on first use; like local state and
+    /// objects it lives and dies with the dev server.
+    db: Mutex<Option<Arc<crate::appdb::LocalDb>>>,
 }
 
 impl LocalServices {
@@ -82,6 +89,8 @@ impl LocalServices {
             transfers: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
             seal_salt: crate::auth::random_token(32),
+            db_declared: std::sync::atomic::AtomicBool::new(false),
+            db: Mutex::new(None),
         }
     }
 
@@ -93,6 +102,24 @@ impl LocalServices {
     pub fn reload(&self, function_name: &str, config: &rusted_engine::RuntimeConfig) {
         *self.function_name.write().unwrap() = function_name.to_string();
         *self.bindings.write().unwrap() = config.objects.clone();
+        self.db_declared
+            .store(config.wants_db(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The scratch database, opened next to the local object store on first
+    /// use so a run that never touches `context.db` writes no file.
+    fn local_db(&self) -> Result<Arc<crate::appdb::LocalDb>, String> {
+        let mut slot = self.db.lock().unwrap();
+        if let Some(db) = &*slot {
+            return Ok(db.clone());
+        }
+        std::fs::create_dir_all(&self.objects_root)
+            .map_err(|e| format!("cannot create local db directory: {e}"))?;
+        let db = Arc::new(crate::appdb::LocalDb::open(
+            &self.objects_root.join("local.sqlite"),
+        )?);
+        *slot = Some(db.clone());
+        Ok(db)
     }
 
     fn namespace_dir(&self) -> PathBuf {
@@ -513,6 +540,22 @@ impl rusted_engine::HostServices for LocalServices {
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
         Box::pin(self.object_op(binding, op_json))
     }
+
+    fn db_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.db_declared.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("this function does not declare config.db".to_string());
+            }
+            let db = self.local_db()?;
+            // No invocation deadline is plumbed through locally; bound a
+            // hostile query by the longest wall any plan allows.
+            db.run(op_json, Instant::now() + Duration::from_secs(30))
+                .await
+        })
+    }
 }
 
 #[cfg(test)]
@@ -545,6 +588,45 @@ mod tests {
         s.object_op("FILES".into(), op.to_string())
             .await
             .map(|raw| serde_json::from_str(&raw).unwrap())
+    }
+
+    /// `config.db` locally: real SQLite with the production op protocol, in a
+    /// scratch file that lives and dies with the dev server.
+    #[tokio::test]
+    async fn local_db_runs_real_sql() {
+        let s = LocalServices::new("my-fn".into());
+        let config: rusted_engine::RuntimeConfig =
+            serde_json::from_value(json!({ "db": true })).unwrap();
+        s.reload("my-fn", &config);
+
+        let db = |op: Value| {
+            let s = &s;
+            async move {
+                rusted_engine::HostServices::db_op(s, op.to_string())
+                    .await
+                    .map(|raw| serde_json::from_str::<Value>(&raw).unwrap())
+            }
+        };
+        db(json!({"op":"exec","sql":"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"}))
+            .await
+            .unwrap();
+        let wrote = db(json!({"op":"exec","sql":"INSERT INTO t (name) VALUES (?)","params":["a"]}))
+            .await
+            .unwrap();
+        assert_eq!(wrote["changes"], json!(1));
+        let rows = db(json!({"op":"query","sql":"SELECT id, name FROM t"}))
+            .await
+            .unwrap();
+        assert_eq!(rows["rows"], json!([{"id": 1, "name": "a"}]));
+
+        // Undeclared → the capability is absent, same refusal as deployed.
+        let s2 = LocalServices::new("other".into());
+        let refused = rusted_engine::HostServices::db_op(
+            &s2,
+            json!({"op":"query","sql":"SELECT 1"}).to_string(),
+        )
+        .await;
+        assert!(refused.is_err(), "db without config.db should refuse");
     }
 
     /// The exact sequence Renote needs: CAS create → conflict → update, then

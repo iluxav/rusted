@@ -2369,6 +2369,32 @@ export const config = {
 };
 "#;
 
+const EDITOR_SCAFFOLD_APP: &str = r#"export const app = rusted
+  .app({
+    name: "my-app",           // becomes /f/my-app
+    // access: "private",     // "public" | "private"; unset follows the server
+  })
+  .use(async (request, context, next) => {
+    // runs before every matched route; return a response to short-circuit
+    return next();
+  })
+  .get("/", home)
+  .get("/hello/{who}", hello); // captures land in request.params
+
+async function home(request: Rusted.Request, context: Rusted.Context) {
+  return context.json({ routes: ["/", "/hello/{who}"] });
+}
+
+async function hello(request: Rusted.Request, context: Rusted.Context) {
+  return context.json({ message: `Hello, ${request.params.who}` });
+}
+
+export const config = {
+  // db: true,                   // shared SQL database on context.db
+  // secrets: ["GITHUB_TOKEN"],  // vault names, decrypted into context.env
+};
+"#;
+
 #[derive(Template)]
 #[template(path = "editor.html")]
 struct EditorT {
@@ -2388,8 +2414,9 @@ struct EditorT {
 struct EditorPageQuery {
     #[serde(default)]
     name: Option<String>,
-    /// "http" or "mcp": open a fresh scaffold of that surface, replacing any
-    /// scratch draft — the explicit choice made in the new-function dialog.
+    /// "http", "mcp" or "app": open a fresh scaffold of that surface,
+    /// replacing any scratch draft — the explicit choice made in the
+    /// new-function dialog.
     #[serde(default)]
     kind: Option<String>,
 }
@@ -2406,11 +2433,12 @@ async fn page_editor(
     // ?name= loads a function you own; anything else opens a blank buffer —
     // the editor is not a way to read other people's source.
     let scaffold = || {
-        if query.kind.as_deref() == Some("mcp") {
-            EDITOR_SCAFFOLD_MCP.to_string()
-        } else {
-            EDITOR_SCAFFOLD_HTTP.to_string()
+        match query.kind.as_deref() {
+            Some("mcp") => EDITOR_SCAFFOLD_MCP,
+            Some("app") => EDITOR_SCAFFOLD_APP,
+            _ => EDITOR_SCAFFOLD_HTTP,
         }
+        .to_string()
     };
     let (name, source) = match &query.name {
         Some(wanted) => match state.0.app.store.fetch(wanted).await {

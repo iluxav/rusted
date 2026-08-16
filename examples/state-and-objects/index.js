@@ -21,19 +21,23 @@ export const config = {
   },
 };
 
-export const http = { name: "file-index", methods: ["POST", "GET"] };
+// One route per verb instead of branching on request.method by hand.
+export const app = rusted
+  .app({ name: "file-index" })
+  .get("/", list)
+  .post("/", reserve);
 
-export default async function handler(request, context) {
+// What the index knows, plus what the store actually holds.
+async function list(request, context) {
   const files = context.objects.FILES;
+  const entry = await context.state.get("index");
+  const stored = await files.list({ limit: 100 });
+  return context.json({ index: entry?.value ?? [], stored: stored.keys });
+}
 
-  if (request.method === "GET") {
-    // What the index knows, plus what the store actually holds.
-    const entry = await context.state.get("index");
-    const stored = await files.list({ limit: 100 });
-    return context.json({ index: entry?.value ?? [], stored: stored.keys });
-  }
-
-  // POST { name, size, sha256 } → an upload slot plus an index entry.
+// POST { name, size, sha256 } → an upload slot plus an index entry.
+async function reserve(request, context) {
+  const files = context.objects.FILES;
   const { name, size, sha256 } = await request.json();
 
   // Reserve the name in the index with compare-and-set: two concurrent

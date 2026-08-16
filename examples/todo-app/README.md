@@ -25,5 +25,10 @@ What it demonstrates:
 - **The database**: plain parameterized SQL, shared with the console's
   Database tab where you can watch the rows change.
 
-`rusted run` does not serve app modules yet — develop against a local
-`rusted serve` or the console editor.
+Develop it locally with hot reload — `context.db` is a scratch SQLite
+database there, same SQL and semantics, reset when the dev server exits:
+
+```bash
+rusted run index.js
+# open http://127.0.0.1:7400/f/todo-app
+```

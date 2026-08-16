@@ -1792,6 +1792,7 @@ async fn every_console_page_renders() {
         "/console/editor?name=greet",
         "/console/editor?name=does-not-exist",
         "/console/editor?kind=mcp",
+        "/console/editor?kind=app",
         "/console/database",
         "/console/billing",
         "/console/checkout/pro",
@@ -1853,6 +1854,25 @@ async fn editor_runs_verifies_and_pushes_with_a_session() {
     assert_eq!(v["outcome"], "success");
     assert_eq!(v["response"], r#"{"ran":true}"#);
     assert_eq!(v["logs"][0]["message"], "from the editor");
+
+    // An app buffer has no default export to POST at: Run shows the front
+    // page — a GET / dispatched through the app's own router.
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/run",
+        json!({
+            "source": r#"export const app = rusted
+                .app({ name: "editor-app" })
+                .get("/", async (request, context) => context.json({ front: request.method }));"#,
+            "body": "",
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "success");
+    assert_eq!(v["response"], r#"{"front":"GET"}"#);
 
     // A thrown error carries the stack — the editor is owner-facing.
     let r = editor_post(

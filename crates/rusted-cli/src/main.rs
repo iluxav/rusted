@@ -196,8 +196,11 @@ enum Cmd {
         #[arg(long)]
         js: bool,
         /// An MCP server (`export const mcp` with tools) instead of an HTTP handler
-        #[arg(long)]
+        #[arg(long, conflicts_with = "app")]
         mcp: bool,
+        /// A web app (`export const app` with Express-style routes) instead of an HTTP handler
+        #[arg(long)]
+        app: bool,
     },
 }
 
@@ -270,7 +273,7 @@ const DECLARATIONS: &str = include_str!("../../rusted-engine/rusted.d.ts");
 
 /// Everything needed to run one function, and nothing else. No install step:
 /// `rusted run` bundles in-process, so this is ready the moment it is written.
-fn scaffold(name: &str, js: bool, mcp: bool) -> Result<(), String> {
+fn scaffold(name: &str, js: bool, mcp: bool, app: bool) -> Result<(), String> {
     if name.is_empty() || name.contains(['/', '\\', '.']) {
         return Err(format!(
             "'{name}' is not a usable directory name — letters, digits and dashes work best"
@@ -285,7 +288,33 @@ fn scaffold(name: &str, js: bool, mcp: bool) -> Result<(), String> {
 
     let ext = if js { "js" } else { "ts" };
     let entry = format!("index.{ext}");
-    let handler = if mcp {
+    let handler = if app {
+        // Routes are the interface — no default export. The `rusted` builder
+        // is an engine global, typed in rusted.d.ts for the TypeScript case.
+        let (reference, request_type, context_type) = if js {
+            ("", String::new(), String::new())
+        } else {
+            (
+                "/// <reference path=\"./rusted.d.ts\" />\n\n",
+                ": Rusted.Request".to_string(),
+                ": Rusted.Context".to_string(),
+            )
+        };
+        format!(
+            "{reference}export const app = rusted\n\
+             \x20 .app({{ name: \"{name}\" }})\n\
+             \x20 .get(\"/\", home)\n\
+             \x20 .get(\"/hello/{{who}}\", hello);\n\
+             \n\
+             async function home(request{request_type}, context{context_type}) {{\n\
+             \x20 return context.json({{ routes: [\"/\", \"/hello/{{who}}\"] }});\n\
+             }}\n\
+             \n\
+             async function hello(request{request_type}, context{context_type}) {{\n\
+             \x20 return context.json({{ message: `Hello, ${{request.params.who}}` }});\n\
+             }}\n"
+        )
+    } else if mcp {
         // Tool handlers, not a request handler — the file *is* an MCP server.
         let (reference, annotation) = if js {
             ("", "")
@@ -677,6 +706,25 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                         .unwrap_or_default();
                     format!("ok — mcp function, tools: {tools}")
                 }
+                Some("app") => {
+                    let routes = v["config"]["routes"]
+                        .as_array()
+                        .map(|routes| {
+                            routes
+                                .iter()
+                                .map(|r| {
+                                    format!(
+                                        "{} {}",
+                                        r["method"].as_str().unwrap_or("?"),
+                                        r["path"].as_str().unwrap_or("?")
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    format!("ok — app function, routes: {routes}")
+                }
                 Some(kind) => format!("ok — {kind} function"),
                 None => "ok".to_string(),
             })
@@ -770,7 +818,12 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                 )
             })
         }
-        Cmd::New { ref name, js, mcp } => scaffold(name, js, mcp),
+        Cmd::New {
+            ref name,
+            js,
+            mcp,
+            app,
+        } => scaffold(name, js, mcp, app),
         Cmd::Types { ref out } => {
             let path = out.clone().unwrap_or_else(|| PathBuf::from("rusted.d.ts"));
             std::fs::write(&path, DECLARATIONS)

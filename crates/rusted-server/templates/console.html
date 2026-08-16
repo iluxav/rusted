@@ -223,6 +223,7 @@
         message: 'What should it serve?',
         choices: [
           { label: 'HTTP endpoint', hint: 'A handler behind a URL — webhooks, APIs, callbacks.', value: 'http' },
+          { label: 'Web app', hint: 'Express-style routes and middleware — pages, forms, fragments.', value: 'app' },
           { label: 'MCP server', hint: 'Tools an AI agent connects to with your key.', value: 'mcp' },
         ],
       }).then((kind) => { if (kind) window.location.href = '/console/editor?kind=' + kind; });

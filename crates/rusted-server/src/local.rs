@@ -110,6 +110,9 @@ enum Served {
     /// (`{"public": ..., "tools": {...}}`), so `mcp_host` reads it
     /// identically. `public` is carried but not enforced: local is trusted.
     Mcp(serde_json::Value),
+    /// Route matching happens inside the sandbox (the app glue answers 404
+    /// and 405 itself), so the config here is only for the banner.
+    App(rusted_engine::AppConfig),
 }
 
 struct Loaded {
@@ -209,11 +212,16 @@ fn load(
             config.name.clone().unwrap_or(stem),
             Served::Mcp(json!({ "public": config.public, "tools": config.tools })),
         ),
-        rusted_engine::Surface::App(_) => return Err(
-            "rusted run does not serve app modules yet; develop them against a local rusted serve"
-                .to_string(),
-        ),
+        rusted_engine::Surface::App(config) => {
+            (config.name.clone().unwrap_or(stem), Served::App(config))
+        }
     };
+    if inspection.config.wants_db() {
+        println!(
+            "\x1b[38;5;180m▸ this module declares config.db; local mode keeps a scratch SQLite \
+             database that resets when this process exits\x1b[0m"
+        );
+    }
     if inspection.config.wants_state() {
         println!(
             "\x1b[38;5;180m▸ this module declares state; local state is in-memory — it survives \
@@ -366,6 +374,12 @@ pub async fn serve(config: LocalConfig) -> Result<(), String> {
                 println!("  after `rusted push`: same block plus your API key in an Authorization header");
             }
         }
+        Served::App(config) => {
+            println!("  \x1b[38;5;209mapp\x1b[0m http://{addr}/f/{name}");
+            for route in &config.routes {
+                println!("    {} {}", route.method, route.path);
+            }
+        }
     }
     println!(
         "  limits: {} wall · {} outbound — the most any plan allows; yours may allow less",
@@ -460,6 +474,15 @@ async fn watch_loop(state: Arc<LocalState>, entry: PathBuf, pipeline: Pipeline) 
                             .unwrap_or_default();
                         format!("mcp, tools: {tools}")
                     }
+                    Served::App(config) => {
+                        let routes = config
+                            .routes
+                            .iter()
+                            .map(|r| format!("{} {}", r.method, r.path))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("app, routes: {routes}")
+                    }
                 };
                 println!(
                     "\x1b[38;5;150m✓ reloaded {} ({bytes} bytes, {surface})\x1b[0m\n",
@@ -526,7 +549,10 @@ async fn dispatch(
         );
     }
     let trigger = match surface {
-        Served::Http(trigger) => trigger,
+        Served::Http(trigger) => Some(trigger),
+        // Route and method matching live in the app glue, exactly like the
+        // deployed data plane — everything is forwarded to the sandbox.
+        Served::App(_) => None,
         // Every POST to the root is protocol; the messages inside decide what
         // happens — the same split the deployed data plane makes.
         Served::Mcp(meta) => {
@@ -557,32 +583,37 @@ async fn dispatch(
             .await;
         }
     };
-    if !trigger.methods.iter().any(|m| m == method.as_str()) {
-        return problem(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "method_not_allowed",
-            format!("allowed: {}", trigger.methods.join(", ")),
-        );
-    }
-    let params = match (&trigger.path, rest.as_deref()) {
-        (None, None) => Default::default(),
-        (None, Some(_)) => {
-            return problem(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "this function has no sub-path".to_string(),
-            )
-        }
-        (Some(pattern), rest) => match match_path(pattern, rest.unwrap_or("")) {
-            Some(params) => params,
-            None => {
+    let params = match &trigger {
+        None => Default::default(),
+        Some(trigger) => {
+            if !trigger.methods.iter().any(|m| m == method.as_str()) {
                 return problem(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    format!("this function serves /f/{expected_name}{pattern}"),
-                )
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    format!("allowed: {}", trigger.methods.join(", ")),
+                );
             }
-        },
+            match (&trigger.path, rest.as_deref()) {
+                (None, None) => Default::default(),
+                (None, Some(_)) => {
+                    return problem(
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "this function has no sub-path".to_string(),
+                    )
+                }
+                (Some(pattern), rest) => match match_path(pattern, rest.unwrap_or("")) {
+                    Some(params) => params,
+                    None => {
+                        return problem(
+                            StatusCode::NOT_FOUND,
+                            "not_found",
+                            format!("this function serves /f/{expected_name}{pattern}"),
+                        )
+                    }
+                },
+            }
+        }
     };
     // Same refusal as the deployed server: a body that is not UTF-8 is rejected
     // rather than coerced, so `rusted run` cannot accept locally what the server
@@ -615,7 +646,12 @@ async fn dispatch(
             .collect(),
         query: query.into_iter().collect(),
         params,
-        path: "/".to_string(),
+        // Same shape the deployed server passes: the subpath under the
+        // function root, "/" at the root. The app glue routes on it.
+        path: match rest.as_deref() {
+            Some(rest) => format!("/{rest}"),
+            None => "/".to_string(),
+        },
         body,
     };
 
@@ -626,9 +662,15 @@ async fn dispatch(
     // what happens in production — including fetches overlapping rather than
     // holding the thread. Declared capabilities ride on the local adapters.
     let services: Arc<dyn rusted_engine::HostServices> = state.services.clone();
-    let result = executor
-        .execute_with_services(&source, &request, &limits, Some(services), None, &caps)
-        .await;
+    let result = if trigger.is_none() {
+        executor
+            .execute_app_with_services(&source, &request, &limits, Some(services), None, &caps)
+            .await
+    } else {
+        executor
+            .execute_with_services(&source, &request, &limits, Some(services), None, &caps)
+            .await
+    };
 
     let stack = result
         .stack

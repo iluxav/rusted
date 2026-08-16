@@ -41,6 +41,6 @@
 <ul>
   <li>Escape user input interpolated into HTML (the example ships a five-line <code>escapeHtml</code>). A native auto-escaping <code>context.html</code> is on the roadmap.</li>
   <li><code>--method</code>/<code>--path</code> push flags don't apply — routes come from the module.</li>
-  <li><code>/api/invoke</code> refuses app functions (they're invoked through their routes); <code>rusted run</code> doesn't serve them yet — use a local <code>rusted serve</code> or the console editor.</li>
+  <li><code>/api/invoke</code> refuses app functions — they're invoked through their routes. <code>rusted run</code> serves them locally with hot reload, and <code>rusted new &lt;name&gt; --app</code> scaffolds one.</li>
   <li>Sessions without a database: <code>request.cookies</code> + <code>context.setCookie</code> + <code>context.seal</code>/<code>open</code> — see <a href="/docs/security">security</a>.</li>
 </ul>

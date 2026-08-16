@@ -666,6 +666,57 @@ fn new_mcp_scaffolds_a_working_server() {
 }
 
 #[test]
+fn new_app_scaffolds_a_working_module() {
+    let h = boot();
+    h.rusted()
+        .args(["new", "my-app", "--app"])
+        .current_dir(h.dir_path())
+        .assert()
+        .success();
+    let root = h.dir_path().join("my-app");
+    for f in ["index.ts", "rusted.d.ts", "tsconfig.json", "package.json"] {
+        assert!(root.join(f).is_file(), "{f} was not created");
+    }
+    let source = std::fs::read_to_string(root.join("index.ts")).unwrap();
+    assert!(source.contains("export const app"), "{source}");
+    assert!(source.contains("rusted"), "{source}");
+    assert!(
+        source.contains("my-app"),
+        "config does not name the project"
+    );
+
+    // The scaffold is the first thing a new user deploys; it has to verify.
+    let entry = root.join("index.ts");
+    h.rusted()
+        .args(["verify", entry.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("app"));
+
+    // And the same in plain JavaScript.
+    h.rusted()
+        .args(["new", "my-app-js", "--app", "--js"])
+        .current_dir(h.dir_path())
+        .assert()
+        .success();
+    let entry = h.dir_path().join("my-app-js").join("index.js");
+    let source = std::fs::read_to_string(&entry).unwrap();
+    assert!(source.contains("export const app"), "{source}");
+    h.rusted()
+        .args(["verify", entry.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("app"));
+
+    // One surface per scaffold: the two flags together are refused.
+    h.rusted()
+        .args(["new", "confused", "--app", "--mcp"])
+        .current_dir(h.dir_path())
+        .assert()
+        .failure();
+}
+
+#[test]
 fn run_serves_a_function_locally_without_a_server() {
     use std::io::BufRead;
     use std::time::{Duration, Instant};
@@ -1248,6 +1299,123 @@ fn run_serves_an_mcp_function_locally() {
             .unwrap_or_default();
         if names != ["shout", "slugify"] {
             return Err(format!("reloaded tool list is wrong: {v}"));
+        }
+        Ok(())
+    })();
+    child.kill().ok();
+    child.wait().ok();
+    checks.unwrap();
+}
+
+#[test]
+fn run_serves_an_app_module_locally() {
+    use std::io::BufRead;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("shop.js");
+    std::fs::write(
+        &script,
+        r#"export const app = rusted
+  .app({ name: "shop" })
+  .use(async (request, context, next) => {
+    request.stamp = "mw";
+    return next();
+  })
+  .get("/", async (request, context) => context.json({ home: true, stamp: request.stamp }))
+  .get("/items/{id}", async (request, context) => context.json({ id: request.params.id }))
+  .post("/items", async (request, context) =>
+    context.json({ made: request.body }, { status: 201 }));
+"#,
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rusted"))
+        .args(["run", script.to_str().unwrap(), "--port", "7442"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = tx.send(line);
+        }
+    });
+
+    let mut banner = String::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            banner.push_str(&line);
+            banner.push('\n');
+            if line.contains("ctrl-c") {
+                break;
+            }
+        }
+    }
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let checks = (|| -> Result<(), String> {
+        // The banner lists every route, like `rusted push` does for apps.
+        if !banner.contains("/f/shop") {
+            return Err(format!("no app banner:\n{banner}"));
+        }
+        if !banner.contains("GET /") || !banner.contains("POST /items") {
+            return Err(format!("banner should list the routes:\n{banner}"));
+        }
+
+        let client = reqwest::blocking::Client::new();
+        // Root route, with the middleware's mark on the request.
+        let r = client
+            .get("http://127.0.0.1:7442/f/shop")
+            .send()
+            .map_err(|e| e.to_string())?;
+        if r.status().as_u16() != 200 {
+            return Err(format!("GET / should be 200, got {}", r.status()));
+        }
+        let v: serde_json::Value = r.json().map_err(|e| e.to_string())?;
+        if v["home"] != serde_json::json!(true) || v["stamp"] != "mw" {
+            return Err(format!("bad root response: {v}"));
+        }
+        // A {param} capture on a subpath.
+        let v: serde_json::Value = client
+            .get("http://127.0.0.1:7442/f/shop/items/42")
+            .send()
+            .map_err(|e| e.to_string())?
+            .json()
+            .map_err(|e| e.to_string())?;
+        if v["id"] != "42" {
+            return Err(format!("param should capture: {v}"));
+        }
+        // A handler-chosen status rides through.
+        let r = client
+            .post("http://127.0.0.1:7442/f/shop/items")
+            .body("widget")
+            .send()
+            .map_err(|e| e.to_string())?;
+        if r.status().as_u16() != 201 {
+            return Err(format!("POST /items should be 201, got {}", r.status()));
+        }
+        // The dispatcher answers for unknown paths and undeclared methods.
+        let r = client
+            .get("http://127.0.0.1:7442/f/shop/nope")
+            .send()
+            .map_err(|e| e.to_string())?;
+        if r.status().as_u16() != 404 {
+            return Err(format!("unknown path should be 404, got {}", r.status()));
+        }
+        let r = client
+            .delete("http://127.0.0.1:7442/f/shop")
+            .send()
+            .map_err(|e| e.to_string())?;
+        if r.status().as_u16() != 405 {
+            return Err(format!(
+                "undeclared method should be 405, got {}",
+                r.status()
+            ));
         }
         Ok(())
     })();

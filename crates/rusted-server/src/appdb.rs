@@ -41,6 +41,41 @@ const LEASE_STALE: &str = "30 seconds";
 /// One open database: the connection behind its per-db lock.
 type DbHandle = Arc<Mutex<Connection>>;
 
+/// The `rusted run` database: one connection over one scratch file, with the
+/// same SQLite configuration and op protocol as the hosted path. No lease and
+/// no Postgres — a dev server is the only process that knows the file exists.
+pub struct LocalDb {
+    conn: DbHandle,
+}
+
+impl LocalDb {
+    pub fn open(path: &std::path::Path) -> Result<LocalDb, String> {
+        Ok(LocalDb {
+            conn: Arc::new(Mutex::new(open_configured(path)?)),
+        })
+    }
+
+    /// Executes one glue op, bounded by `deadline` — `DbHost::run` minus the
+    /// lease check and handle cache.
+    pub async fn run(&self, op_json: String, deadline: Instant) -> Result<String, String> {
+        let op: DbOp = serde_json::from_str(&op_json).map_err(|e| format!("bad db op: {e}"))?;
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.progress_handler(PROGRESS_OPS, Some(move || Instant::now() >= deadline));
+            let result = match op {
+                DbOp::Query { sql, params } => run_query(&conn, &sql, &params),
+                DbOp::Exec { sql, params } => run_exec(&conn, &sql, &params),
+                DbOp::Transaction { statements } => run_transaction(&conn, &statements),
+            };
+            conn.progress_handler(PROGRESS_OPS, None::<fn() -> bool>);
+            result
+        })
+        .await
+        .map_err(|e| format!("db task failed: {e}"))?
+    }
+}
+
 pub struct DbHost {
     dir: PathBuf,
     /// This process's identity in the lease table.
