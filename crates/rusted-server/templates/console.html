@@ -91,6 +91,8 @@
 </div>
 
 <style>
+  /* The flex class would beat the hidden attribute's display:none. */
+  #rusted-dialog[hidden] { display: none !important; }
   .nav-active {
     border-radius: 50px;
     background: #18120f;
@@ -102,6 +104,24 @@
     .nav-active { box-shadow: inset 0 -2px 0 #ff6b24; }
   }
 </style>
+<!-- The console's own dialogs, replacing native confirm()/prompt(): the same
+     surface, type, and ember accents as everything else. window.rustedDialog
+     exposes confirm/prompt returning promises; the htmx:confirm listener
+     routes every hx-confirm through it. -->
+<div id="rusted-dialog" hidden class="fixed inset-0 z-50 flex items-center justify-center p-6">
+  <div id="rusted-dialog-backdrop" class="absolute inset-0 bg-rust-950/70 backdrop-blur-[2px]"></div>
+  <div class="surface relative w-full max-w-sm rounded-xl border border-copper/20 px-6 py-5 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.8)]">
+    <p id="rusted-dialog-title" class="font-display text-base font-semibold text-cream"></p>
+    <p id="rusted-dialog-message" class="mt-2 text-sm leading-6 text-clay"></p>
+    <input id="rusted-dialog-input" hidden spellcheck="false" autocomplete="off"
+           class="field mt-3 w-full px-3 py-2 font-mono text-[12px] text-cream">
+    <div class="mt-5 flex justify-end gap-2">
+      <button id="rusted-dialog-cancel" class="btn-secondary px-4 py-2 text-sm">Cancel</button>
+      <button id="rusted-dialog-ok" class="btn-primary px-4 py-2 text-sm">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // keep the sidebar highlight in sync with htmx navigation
   document.addEventListener('htmx:afterRequest', (e) => {
@@ -110,5 +130,70 @@
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('nav-active'));
     link.classList.add('nav-active');
   });
+
+  (() => {
+    const root = document.getElementById('rusted-dialog');
+    const title = document.getElementById('rusted-dialog-title');
+    const message = document.getElementById('rusted-dialog-message');
+    const input = document.getElementById('rusted-dialog-input');
+    const ok = document.getElementById('rusted-dialog-ok');
+    const cancel = document.getElementById('rusted-dialog-cancel');
+    const backdrop = document.getElementById('rusted-dialog-backdrop');
+    let settle = null;
+    let previousFocus = null;
+
+    const close = (value) => {
+      root.hidden = true;
+      const resolve = settle;
+      settle = null;
+      if (previousFocus && previousFocus.isConnected) previousFocus.focus();
+      if (resolve) resolve(value);
+    };
+
+    const open = (options) => new Promise((resolve) => {
+      if (settle) settle(options.withInput ? null : false);
+      settle = resolve;
+      previousFocus = document.activeElement;
+      title.textContent = options.title || (options.withInput ? 'Input' : 'Are you sure?');
+      message.textContent = options.message || '';
+      message.hidden = !options.message;
+      input.hidden = !options.withInput;
+      input.value = options.value || '';
+      input.placeholder = options.placeholder || '';
+      ok.textContent = options.confirmLabel || (options.withInput ? 'Create' : 'Confirm');
+      ok.className = options.danger
+        ? 'rounded-full bg-blood px-4 py-2 text-sm font-semibold text-rust-950 transition-colors hover:bg-blood/80'
+        : 'btn-primary px-4 py-2 text-sm';
+      root.hidden = false;
+      (options.withInput ? input : ok).focus();
+    });
+
+    ok.addEventListener('click', () => close(input.hidden ? true : input.value.trim() || null));
+    cancel.addEventListener('click', () => close(input.hidden ? false : null));
+    backdrop.addEventListener('click', () => close(input.hidden ? false : null));
+    document.addEventListener('keydown', (e) => {
+      if (root.hidden) return;
+      if (e.key === 'Escape') close(input.hidden ? false : null);
+      if (e.key === 'Enter' && !ok.disabled) {
+        e.preventDefault();
+        close(input.hidden ? true : input.value.trim() || null);
+      }
+    });
+
+    window.rustedDialog = {
+      confirm: (options) => open({ ...options, withInput: false }),
+      prompt: (options) => open({ ...options, withInput: true }),
+    };
+
+    // Every hx-confirm in the console renders through this dialog instead of
+    // the browser's native one.
+    document.body.addEventListener('htmx:confirm', (e) => {
+      if (!e.detail.question) return;
+      e.preventDefault();
+      window.rustedDialog
+        .confirm({ message: e.detail.question, danger: true, confirmLabel: 'Yes, do it' })
+        .then((yes) => { if (yes) e.detail.issueRequest(true); });
+    });
+  })();
 </script>
 {% endblock %}

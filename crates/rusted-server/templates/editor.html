@@ -125,22 +125,28 @@
     const close = e.target.closest("[data-close]");
     if (close) {
       const name = close.dataset.close;
-      if (confirm(`Delete ${name}?`)) {
-        delete project.files[name];
-        if (project.current === name) project.current = ENTRY;
-        openFile(project.current);
-        save();
-      }
       e.stopPropagation();
+      window.rustedDialog
+        .confirm({ title: `Delete ${name}?`, message: "The file is removed from this project. There is no undo.", danger: true, confirmLabel: "Delete" })
+        .then((yes) => {
+          if (!yes) return;
+          delete project.files[name];
+          if (project.current === name) project.current = ENTRY;
+          openFile(project.current);
+          save();
+        });
       return;
     }
     if (e.target.closest("#ed-add")) {
-      const name = prompt("File name (e.g. lib.js — import it as ./lib.js):");
-      if (!name) return;
-      const clean = name.trim().replace(/^\.\//, "");
-      if (project.files[clean] === undefined) project.files[clean] = "";
-      openFile(clean);
-      save();
+      window.rustedDialog
+        .prompt({ title: "New file", message: "Import it from index.js with its relative path, e.g. ./lib.js", placeholder: "lib.js" })
+        .then((name) => {
+          if (!name) return;
+          const clean = name.trim().replace(/^\.\//, "");
+          if (project.files[clean] === undefined) project.files[clean] = "";
+          openFile(clean);
+          save();
+        });
       return;
     }
     const tab = e.target.closest("[data-file]");
@@ -352,9 +358,13 @@
   async function push() {
     if ((ORIGIN === "cli" || ORIGIN === "agent") && !forkConfirmed) {
       const surface = ORIGIN === "cli" ? "the CLI" : "an agent";
-      if (!confirm(`${initialName} was last pushed from ${surface}. Pushing from the editor replaces that revision and forks it from its original source. Continue?`)) {
-        return;
-      }
+      const yes = await window.rustedDialog.confirm({
+        title: `Fork ${initialName}?`,
+        message: `The last revision was pushed from ${surface}. Pushing from the editor replaces it and forks the function from its original source.`,
+        danger: true,
+        confirmLabel: "Push anyway",
+      });
+      if (!yes) return;
       forkConfirmed = true;
     }
     statusReset();
