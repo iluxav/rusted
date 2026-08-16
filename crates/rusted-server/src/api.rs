@@ -1926,13 +1926,25 @@ pub(crate) async fn run_adhoc(
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     let limits = limits_for_plan(state, &plan.limits);
     let request = HttpRequest::post_json(body);
+    // The editor's Run is ad-hoc, but the caller is authenticated — and the
+    // account database is account-scoped, not function-scoped, so a buffer
+    // declaring config.db gets the real thing (prod). State and objects stay
+    // absent: they scope by function name, which an ad-hoc run doesn't have.
+    let mut grant = HostGrant::default();
+    if let Ok(inspection) = inspect_source(state, source.clone()).await {
+        if inspection.config.wants_db() {
+            grant.caps.db = true;
+            grant.caps.env_name = Some(crate::secrets::PROD_ENV.to_string());
+            grant.env_name = crate::secrets::PROD_ENV.to_string();
+        }
+    }
     match execute_raw(
         state,
         source,
         Job::Http(request),
         limits,
         Some(user_id),
-        HostGrant::default(),
+        grant,
     )
     .await
     {

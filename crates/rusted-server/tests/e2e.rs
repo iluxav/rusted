@@ -2068,6 +2068,44 @@ async fn sidebar_fragment_reflects_a_fresh_editor_push() {
     );
 }
 
+/// The editor's Run button executes ad-hoc, but a buffer declaring config.db
+/// gets the real account database — same rows the deployed functions see.
+#[tokio::test]
+async fn editor_run_grants_the_account_database() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    let source = r#"export const config = { db: true };
+export default async function handler(request, context) {
+  await context.db.exec("CREATE TABLE IF NOT EXISTS scratch (id INTEGER PRIMARY KEY, v TEXT)");
+  await context.db.exec("INSERT INTO scratch (v) VALUES ('from editor run')");
+  const rows = await context.db.query("SELECT count(*) AS n FROM scratch");
+  return context.json({ n: rows[0].n });
+}"#;
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/run",
+        json!({ "source": source, "body": "{}" }),
+    )
+    .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "success", "{v}");
+    assert_eq!(v["response"], r#"{"n":1}"#);
+
+    // Deployed functions share it.
+    let reader = r#"export const config = { db: true };
+export default async function handler(request, context) {
+  const rows = await context.db.query("SELECT v FROM scratch");
+  return context.json({ v: rows[0].v });
+}"#;
+    push(&t, "scratch-reader", reader).await;
+    let v = call_fn(&t, "/f/scratch-reader", "{}").await;
+    assert_eq!(v["v"], "from editor run");
+}
+
 #[tokio::test]
 async fn console_database_runs_sql_with_a_session() {
     let t = boot().await;
