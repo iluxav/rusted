@@ -1,5 +1,10 @@
 # rusted
 
+[![CI](https://github.com/iluxav/rusted/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iluxav/rusted/actions/workflows/ci.yml)
+[![Release](https://github.com/iluxav/rusted/actions/workflows/release.yml/badge.svg)](https://github.com/iluxav/rusted/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/iluxav/rusted?color=ff6b24&label=release)](https://github.com/iluxav/rusted/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-c47b45)](LICENSE.md)
+
 A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint — or a live MCP server — in seconds, executed by QuickJS inside a restricted Rust runtime.
 
 `rusted becomes the MCP server that lets agents write their own tools`
