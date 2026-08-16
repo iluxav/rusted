@@ -348,4 +348,17 @@
   #ed-mount .cm-editor { height: 100%; font-size: 13px; }
   #ed-mount .cm-editor.cm-focused { outline: none; }
   #ed-mount .cm-scroller { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  /* oneDark's syntax colors on the console's warm ground instead of its
+     cold blue-gray chrome. */
+  #ed-mount .cm-editor { background: #100d0b; }
+  #ed-mount .cm-gutters { background: #0b0908; border-right: 1px solid rgba(196, 123, 69, 0.13); color: #6b5748; }
+  #ed-mount .cm-activeLine { background: rgba(196, 123, 69, 0.07); }
+  #ed-mount .cm-activeLineGutter { background: rgba(196, 123, 69, 0.1); color: #c47b45; }
+  #ed-mount .cm-editor .cm-selectionBackground,
+  #ed-mount .cm-editor.cm-focused .cm-selectionBackground,
+  #ed-mount .cm-content ::selection { background: rgba(255, 107, 36, 0.18) !important; }
+  #ed-mount .cm-cursor { border-left-color: #ff6b24; }
+  #ed-mount .cm-tooltip { background: #1b1511; border: 1px solid #33261d; }
+  #ed-mount .cm-tooltip-autocomplete ul li[aria-selected] { background: rgba(255, 107, 36, 0.15); color: #f2eae3; }
+  #ed-mount .cm-panels { background: #15110e; color: #a99282; }
 </style>
