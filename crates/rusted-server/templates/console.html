@@ -60,15 +60,11 @@
           Functions
           <svg class="h-3 w-3 transition-transform [details[open]_&]:rotate-90" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m9 5 7 7-7 7"/></svg>
         </summary>
-        {% if lambdas.is_empty() %}
-        <p class="px-3 py-2 font-mono text-xs text-clay/60">none yet — try<br><span class="text-clay">rusted push fn.js</span></p>
-        {% endif %}
-        {% for name in lambdas %}
-        <a hx-get="/console/function/{{ name }}" href="/console/function/{{ name }}"
-           class="nav-item {% if active == name.as_str() %}nav-active{% endif %} flex items-center gap-2 truncate rounded-full px-3 py-2 font-mono text-[12px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
-          <span class="text-copper">ƒ</span> {{ name }}
+        <a href="/console/editor"
+           class="nav-item flex items-center gap-2 truncate rounded-full px-3 py-2 font-mono text-[12px] text-copper hover:bg-rust-900 hover:text-ember transition-colors cursor-pointer">
+          <span>+</span> new function
         </a>
-        {% endfor %}
+        <div id="sidebar-functions">{% include "nav_functions.html" %}</div>
       </details>
     </nav>
 

@@ -2021,6 +2021,50 @@ async fn revisions_carry_their_origin_and_handoffs_warn() {
 }
 
 #[tokio::test]
+async fn sidebar_fragment_reflects_a_fresh_editor_push() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    let fragment_url = format!("http://{}/console/nav/functions", t.handle.admin_addr);
+
+    let before = t
+        .client
+        .get(&fragment_url)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(before.contains("none yet"), "empty state expected");
+
+    editor_post(
+        &t,
+        &cookie,
+        "/console/editor/push",
+        json!({ "source": GREET, "name": "fresh-fn" }),
+    )
+    .await;
+    let after = t
+        .client
+        .get(&fragment_url)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        after.contains("fresh-fn"),
+        "fragment must list the new function"
+    );
+}
+
+#[tokio::test]
 async fn editor_endpoints_answer_json_401_without_a_session() {
     let t = boot().await;
     let r = editor_post(

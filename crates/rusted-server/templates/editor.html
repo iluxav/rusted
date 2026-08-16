@@ -382,11 +382,24 @@
         return;
       }
       document.getElementById("ed-name").value = v.name;
+      refreshSidebar();
       out.innerHTML = built.note +
         `<div class="mb-1 text-sage">✓ deployed ${esc(v.name)} — revision ${v.revision}</div>` +
         `<div class="mb-2"><a class="text-ember-soft underline decoration-ember/30 underline-offset-4" href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a></div>` +
         `<div class="text-clay/60">function page: <a class="text-ember-soft underline decoration-ember/30 underline-offset-4" href="/console/function/${esc(v.name)}">ƒ ${esc(v.name)}</a></div>`;
     } catch (e) { out.innerHTML = `<div class="text-blood">${esc(e.message)}</div>`; }
+  }
+
+  // A fresh function should appear in the sidebar without a reload.
+  async function refreshSidebar() {
+    const el = document.getElementById("sidebar-functions");
+    if (!el) return;
+    try {
+      const r = await fetch("/console/nav/functions");
+      if (!r.ok) return;
+      el.innerHTML = await r.text();
+      if (window.htmx) window.htmx.process(el);
+    } catch {}
   }
 
   document.getElementById("ed-run").addEventListener("click", run);

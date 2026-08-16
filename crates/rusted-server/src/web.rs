@@ -131,6 +131,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route("/console/function/{name}/published", post(function_publish))
         .route("/console/editor", get(page_editor))
+        .route("/console/nav/functions", get(nav_functions))
         .route("/console/editor/run", post(editor_run))
         .route("/console/editor/verify", post(editor_verify))
         .route("/console/editor/push", post(editor_push))
@@ -2292,6 +2293,38 @@ async fn page_editor(
     .render()
     .expect("editor renders");
     console_page(&state, &headers, &user, "editor", inner).await
+}
+
+#[derive(Template)]
+#[template(path = "nav_functions.html")]
+struct NavFunctionsT {
+    lambdas: Vec<String>,
+    active: String,
+}
+
+/// The sidebar's function list as a fragment, so the editor can refresh it
+/// after a push without reloading the page (and losing the buffer).
+async fn nav_functions(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let lambdas = state
+        .0
+        .app
+        .store
+        .names_for_user(user.id)
+        .await
+        .unwrap_or_default();
+    Html(
+        NavFunctionsT {
+            lambdas,
+            active: String::new(),
+        }
+        .render()
+        .expect("nav renders"),
+    )
+    .into_response()
 }
 
 /// The editor endpoints answer fetch() calls: a missing session is a JSON 401
