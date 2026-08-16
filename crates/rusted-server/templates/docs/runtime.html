@@ -40,6 +40,7 @@
 <table>
   <tr><th>helper</th><th>appears when</th></tr>
   <tr><td><code>context.env</code></td><td><code>config.secrets</code> is declared — each name decrypted per invocation, per environment.</td></tr>
+  <tr><td><code>context.db</code></td><td><code>config.db: true</code> — parameterized SQL against the account's per-environment <a href="/docs/database">SQLite database</a>: <code>query</code>, <code>exec</code>, atomic <code>transaction</code> batches.</td></tr>
   <tr><td><code>context.state</code></td><td><code>config.state: true</code> — durable JSON state with compare-and-set.</td></tr>
   <tr><td><code>context.objects.&lt;NAME&gt;</code></td><td><code>config.objects</code> declares the binding — presigned S3 puts and gets.</td></tr>
   <tr><td><code>context.inbox</code></td><td>Deployed functions — read your <a href="/docs/inbox">inboxes</a>.</td></tr>

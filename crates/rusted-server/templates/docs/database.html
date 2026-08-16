@@ -1,0 +1,53 @@
+<h1>Database</h1>
+<p class="lede">Every account gets a real SQL database per environment — SQLite, opened inside the server process, shared by every function that declares it. Queries are plain parameterized SQL and cost microseconds, not round-trips.</p>
+
+<h2>Declaring it</h2>
+<pre><code>export const config = { db: true };
+
+export default async function handler(request, context) {
+  await context.db.exec(
+    "CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, title TEXT)");
+  const { title } = await request.json().catch(() => ({}));
+  if (title) await context.db.exec("INSERT INTO todos (title) VALUES (?)", [title]);
+  return context.json({ todos: await context.db.query("SELECT * FROM todos") });
+}</code></pre>
+<p>Like every capability, undeclared means absent: without <code>config.db</code>, <code>context.db</code> is <code>undefined</code>. The database is scoped per <strong>account and environment</strong> — all of your functions share one database, <code>/f/@stage/…</code> invocations see stage's own, and another account's functions can never reach yours. The editor's Run button gets the same prod database as your deployed functions, so what you try is what runs.</p>
+
+<h2>The API</h2>
+<table>
+  <tr><th>call</th><th>returns</th></tr>
+  <tr><td><code>context.db.query(sql, params?)</code></td><td>Rows as objects keyed by column name. At most 10,000 rows — add a <code>LIMIT</code>.</td></tr>
+  <tr><td><code>context.db.exec(sql, params?)</code></td><td><code>{ changes, lastInsertRowid }</code> — for statements that don't return rows.</td></tr>
+  <tr><td><code>context.db.transaction([[sql, params], …])</code></td><td><code>{ changes }</code>. An atomic batch: every statement applies or none. Deliberately not a callback — nothing may hold the database lock across an <code>await</code>.</td></tr>
+</table>
+<p>Params bind positionally to <code>?</code> placeholders and may be strings, numbers, booleans, or <code>null</code> — objects and arrays are refused rather than silently stringified, so JSON in a column is a deliberate <code>JSON.stringify</code>. Blob columns come back as base64 text.</p>
+
+<h2>The console</h2>
+<p>The <a href="/console/database">Database</a> section of the console browses and manages the same database: tables with rowcounts and their <code>CREATE</code> statements, click-to-browse, and a create-table wizard that is a <em>visible SQL generator</em> — the statement renders live as you build and Create runs exactly what's shown. The primary key is choosable: <code>INTEGER</code> (auto-incrementing) or <code>UUID</code>, which emits <code>id TEXT PRIMARY KEY DEFAULT (uuid())</code>. Column defaults read predictably: parenthesized input is an expression (<code>(datetime('now'))</code>, <code>(uuid())</code>), numbers are literals, anything else becomes a quoted string. A raw SQL box covers everything the wizard doesn't — renames and type changes are table rebuilds in SQLite, so they're raw-SQL territory on purpose.</p>
+<p><code>uuid()</code> is a platform-registered SQL function (SQLite has none of its own), available in every query and default. External tools can read your database file freely; an insert relying on a <code>uuid()</code> default needs the platform's connection.</p>
+
+<h2>Guardrails</h2>
+<p>Tenant SQL is the point, so enforcement is structural — the worst a hostile query can do is spoil its own database:</p>
+<ul>
+  <li><strong>64 MB per database</strong>, enforced by SQLite itself (<code>max_page_count</code>): overflow fails your write, never the platform.</li>
+  <li><strong>The invocation's deadline bounds SQL</strong> exactly as it bounds JavaScript — a runaway query dies with the sandbox.</li>
+  <li><code>ATTACH</code>, <code>DETACH</code>, and <code>PRAGMA</code> are refused; extensions cannot load.</li>
+  <li>Console queries run through the same guarded connection with the same rules — the console can do nothing a function couldn't.</li>
+</ul>
+
+<h2>Which data tool when</h2>
+<table>
+  <tr><th>capability</th><th>shaped for</th></tr>
+  <tr><td><code>context.db</code></td><td>Relational app data — rows, queries, joins — shared across your functions.</td></tr>
+  <tr><td><code>context.state</code></td><td>Coordination: per-function key-value with compare-and-set versioning.</td></tr>
+  <tr><td><code>context.objects</code></td><td>Big binaries and user uploads, in your own S3-compatible bucket.</td></tr>
+</table>
+
+<h2>Semantics worth knowing</h2>
+<ul>
+  <li>Writes serialize per database (SQLite's single-writer model); reads are cheap. At function scale this is a feature — no connection pools, no lock tuning.</li>
+  <li><code>INTEGER PRIMARY KEY</code> auto-increments — it's SQLite's rowid alias.</li>
+  <li>Types are affinities: <code>BOOLEAN</code> stores as integer, <code>TIMESTAMP</code> as text. <code>datetime('now')</code> is the idiomatic timestamp.</li>
+  <li>Data lives on the server, durable across restarts and redeploys. Off-server snapshot backups and export are on the roadmap; until then, treat irreplaceable data accordingly.</li>
+  <li><code>rusted run</code> (the local no-server loop) does not supply <code>context.db</code> yet — develop database functions against a local <code>rusted serve</code> or the console editor.</li>
+</ul>

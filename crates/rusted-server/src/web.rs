@@ -623,7 +623,7 @@ struct DocsPage {
 }
 
 /// Sidebar order.
-const DOCS_PAGES: [DocsPage; 8] = [
+const DOCS_PAGES: [DocsPage; 9] = [
     DocsPage {
         slug: "getting-started",
         label: "Getting started",
@@ -658,6 +658,13 @@ const DOCS_PAGES: [DocsPage; 8] = [
         title: "MCP",
         description: "Serve Model Context Protocol tools from a deployed function: schema-validated tools, optional OAuth protection, and per-environment audiences.",
         content: include_str!("../templates/docs/mcp.html"),
+    },
+    DocsPage {
+        slug: "database",
+        label: "Database",
+        title: "Database",
+        description: "A real SQL database per account and environment — SQLite in-process, shared across your functions, with parameterized queries, atomic transactions, and a console table browser.",
+        content: include_str!("../templates/docs/database.html"),
     },
     DocsPage {
         slug: "security",
