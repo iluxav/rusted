@@ -1,7 +1,7 @@
 CARGO ?= cargo
 BIN   := target/release/rusted
 
-.PHONY: all build test lint fmt fmt-check check serve install uninstall i clean help db db-clean css release
+.PHONY: all build test lint fmt fmt-check check serve install uninstall i clean help db db-clean css editor-js release
 
 all: check build
 
@@ -76,6 +76,9 @@ release: ## Cut a patch release: bump crate versions, commit, tag, push
 	[ -n "$$run_id" ] || { echo "error: no workflow run found for v$$new — check GitHub Actions"; exit 1; }; \
 	gh run watch "$$run_id" --exit-status; \
 	echo "v$$new published — deploy with .do/deploy.sh"
+
+editor-js: ## Rebuild the vendored CodeMirror bundle for the console editor
+	cd crates/rusted-server/editor && npm install --no-fund --no-audit && npx esbuild entry.js --bundle --minify --format=iife --outfile=../assets/editor.js
 
 css: ## Recompile the Tailwind sheet inlined into every page (run after template edits)
 	cd crates/rusted-server/tailwind && npx -y tailwindcss@3.4.17 -c tailwind.config.js -i input.css -o ../templates/app.css --minify

@@ -1,0 +1,137 @@
+<div class="flex h-full min-h-[540px] flex-col px-6 py-5" id="editor-page">
+  <div class="mb-4 flex flex-wrap items-center gap-3">
+    <div>
+      <p class="eyebrow mb-1">Console</p>
+      <h1 class="page-title text-xl">Editor</h1>
+    </div>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <input id="ed-name" value="{{ name }}" spellcheck="false" autocomplete="off" placeholder="function name (or declare it in the file)"
+             class="field w-64 px-3 py-2 font-mono text-[12px] text-cream">
+      <button id="ed-run" class="btn-primary px-4 py-2 text-sm" title="Run in a fresh sandbox (⌘⏎)">Run</button>
+      <button id="ed-verify" class="btn-secondary px-4 py-2 text-sm" title="Compile-check and read the declared surface">Verify</button>
+      <button id="ed-push" class="btn-secondary px-4 py-2 text-sm" title="Deploy — the URL goes live immediately">Push</button>
+    </div>
+  </div>
+
+  <div class="flex min-h-0 flex-1 gap-4">
+    <div class="min-w-0 flex-1 overflow-hidden rounded-xl border border-copper/15" id="ed-mount"></div>
+
+    <div class="flex w-[380px] shrink-0 flex-col gap-3 overflow-y-auto">
+      <div>
+        <label class="mb-1.5 block font-mono text-[10px] uppercase tracking-wider text-clay">Request body</label>
+        <textarea id="ed-body" rows="3" spellcheck="false"
+                  class="field w-full px-3 py-2 font-mono text-[12px] text-cream">{"name":"Ada"}</textarea>
+      </div>
+      <div id="ed-out" class="surface flex-1 overflow-y-auto rounded-xl px-4 py-3 font-mono text-[12px] leading-relaxed text-clay">
+        <p class="text-clay/60">Run executes this buffer in a fresh sandbox on the server — nothing is saved. Push deploys it.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/assets/editor.js"></script>
+<script>
+(() => {
+  const initial = {{ source_json|safe }};
+  const { EditorView, basicSetup, keymap, indentWithTab, javascript, oneDark } = window.RustedEditor;
+
+  const out = document.getElementById("ed-out");
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const pretty = (text) => {
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+  };
+  const busy = (label) => { out.innerHTML = `<p class="text-clay/60">${esc(label)}…</p>`; };
+
+  const view = new EditorView({
+    doc: initial,
+    parent: document.getElementById("ed-mount"),
+    extensions: [
+      basicSetup,
+      oneDark,
+      javascript(),
+      keymap.of([
+        { key: "Mod-Enter", run: () => { run(); return true; } },
+        indentWithTab,
+      ]),
+    ],
+  });
+
+  const call = async (path, payload) => {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (r.status === 401) throw new Error("session expired — sign in again");
+    return r.json();
+  };
+
+  const logsHtml = (logs) => (logs || []).map((l) =>
+    `<div class="text-clay/80"><span class="mr-1 text-copper">[${esc(l.level)}]</span>${esc(l.message)}</div>`
+  ).join("");
+
+  async function run() {
+    busy("running");
+    try {
+      const v = await call("/console/editor/run", {
+        source: view.state.doc.toString(),
+        body: document.getElementById("ed-body").value,
+      });
+      if (v.outcome === "success") {
+        out.innerHTML =
+          `<div class="mb-1"><span class="text-sage">● ${v.status}</span>` +
+          ` <span class="text-clay/50">${esc(v.content_type)} / ${v.wall_ms.toFixed(2)}ms wall · ${v.cpu_ms.toFixed(2)}ms cpu</span></div>` +
+          `<pre class="mb-2 overflow-x-auto whitespace-pre-wrap text-cream">${esc(pretty(v.response))}</pre>` +
+          logsHtml(v.logs);
+      } else if (v.outcome === "terminated") {
+        out.innerHTML =
+          `<div class="mb-1 text-blood">● terminated: ${esc(v.reason)}</div>` + logsHtml(v.logs);
+      } else {
+        out.innerHTML =
+          `<div class="mb-1 text-blood">● ${esc(v.message || (v.error && v.error.message) || "error")}</div>` +
+          (v.stack ? `<pre class="mb-2 overflow-x-auto whitespace-pre-wrap text-blood/80">${esc(v.stack)}</pre>` : "") +
+          logsHtml(v.logs);
+      }
+    } catch (e) { out.innerHTML = `<div class="text-blood">${esc(e.message)}</div>`; }
+  }
+
+  async function verify() {
+    busy("verifying");
+    try {
+      const v = await call("/console/editor/verify", { source: view.state.doc.toString() });
+      out.innerHTML = v.ok
+        ? `<div class="text-sage">✓ ok — ${esc(v.kind)} function${v.tools ? `, tools: ${esc(v.tools.join(", "))}` : ""}</div>`
+        : `<div class="text-blood">✗ ${esc(v.message)}</div>`;
+    } catch (e) { out.innerHTML = `<div class="text-blood">${esc(e.message)}</div>`; }
+  }
+
+  async function push() {
+    busy("deploying");
+    try {
+      const name = document.getElementById("ed-name").value.trim();
+      const payload = { source: view.state.doc.toString() };
+      if (name) payload.name = name;
+      const v = await call("/console/editor/push", payload);
+      if (v.error) {
+        out.innerHTML = `<div class="text-blood">✗ ${esc(v.error.message)}</div>`;
+        return;
+      }
+      document.getElementById("ed-name").value = v.name;
+      out.innerHTML =
+        `<div class="mb-1 text-sage">✓ deployed ${esc(v.name)} — revision ${v.revision}</div>` +
+        `<div class="mb-2"><a class="text-ember-soft underline decoration-ember/30 underline-offset-4" href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a></div>` +
+        `<div class="text-clay/60">function page: <a class="text-ember-soft underline decoration-ember/30 underline-offset-4" href="/console/function/${esc(v.name)}">ƒ ${esc(v.name)}</a></div>`;
+    } catch (e) { out.innerHTML = `<div class="text-blood">${esc(e.message)}</div>`; }
+  }
+
+  document.getElementById("ed-run").addEventListener("click", run);
+  document.getElementById("ed-verify").addEventListener("click", verify);
+  document.getElementById("ed-push").addEventListener("click", push);
+})();
+</script>
+
+<style>
+  #ed-mount .cm-editor { height: 100%; font-size: 13px; }
+  #ed-mount .cm-editor.cm-focused { outline: none; }
+  #ed-mount .cm-scroller { font-family: "JetBrains Mono", ui-monospace, monospace; }
+</style>

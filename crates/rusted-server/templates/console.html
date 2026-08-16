@@ -19,6 +19,11 @@
         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" d="M3 13h6V3H3v10Zm12 8h6v-8h-6v8ZM3 21h6v-4H3v4Zm12-10h6V3h-6v8Z"/></svg>
         Dashboard
       </a>
+      <a href="/console/editor"
+         class="nav-item {% if active == "editor" %}nav-active{% endif %} flex rounded-full items-center gap-2.5 px-3 py-2.5 text-[13px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5"/></svg>
+        Editor
+      </a>
       <a hx-get="/console/keys" href="/console/keys"
          class="nav-item {% if active == "keys" %}nav-active{% endif %} flex rounded-full items-center gap-2.5 px-3 py-2.5 text-[13px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.03 5.91l-2.27 2.27H10.5v1.94H8.56v1.94H5.25v-3.31l6.34-6.34A6 6 0 1 1 21.75 8.25Z"/></svg>

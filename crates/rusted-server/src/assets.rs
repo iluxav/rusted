@@ -68,6 +68,15 @@ const ASSETS: &[Asset] = &[
         content_type: "text/javascript; charset=utf-8",
         immutable: true,
     },
+    Asset {
+        // CodeMirror for the console editor, built by `make editor-js` from
+        // crates/rusted-server/editor/. Mutable: the name stays put across
+        // rebuilds, so the ETag does the versioning.
+        name: "editor.js",
+        bytes: include_bytes!("../assets/editor.js"),
+        content_type: "text/javascript; charset=utf-8",
+        immutable: false,
+    },
 ];
 
 /// Content hashes, in the same order as `ASSETS`. Hashing at first use rather

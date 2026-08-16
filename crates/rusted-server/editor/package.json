@@ -1,0 +1,11 @@
+{
+  "name": "rusted-editor-bundle",
+  "private": true,
+  "description": "Builds the vendored CodeMirror bundle at ../assets/editor.js — see Makefile `editor-js`.",
+  "dependencies": {
+    "codemirror": "^6.0.1",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "esbuild": "^0.24.0"
+  }
+}

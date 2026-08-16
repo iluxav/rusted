@@ -130,6 +130,10 @@ pub fn router(state: WebState) -> Router {
             get(page_function).delete(function_delete),
         )
         .route("/console/function/{name}/published", post(function_publish))
+        .route("/console/editor", get(page_editor))
+        .route("/console/editor/run", post(editor_run))
+        .route("/console/editor/verify", post(editor_verify))
+        .route("/console/editor/push", post(editor_push))
         .route("/console/admin", get(page_admin))
         .route("/console/admin/users", get(page_admin_users))
         .route("/console/admin/users/{id}/admin", post(admin_toggle_admin))
@@ -2201,6 +2205,157 @@ async fn run_test(
         .expect("result renders"),
     )
     .into_response()
+}
+
+// ------------------------------------------------------------------ editor
+
+/// What a blank editor buffer holds: the same tolerant hello the CLI
+/// scaffolds, minus the name so pushing asks for one.
+const EDITOR_SCAFFOLD: &str = r#"export default async function handler(request, context) {
+  // .catch: a bare POST has no body, and that should greet, not throw.
+  const { name } = await request.json().catch(() => ({}));
+  return context.json({ message: `Hello, ${name ?? "world"}` });
+}
+"#;
+
+#[derive(Template)]
+#[template(path = "editor.html")]
+struct EditorT {
+    /// The initial buffer as a JSON string literal, safe inside <script>.
+    source_json: String,
+    name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct EditorPageQuery {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn page_editor(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<EditorPageQuery>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    // ?name= loads a function you own; anything else opens a blank buffer —
+    // the editor is not a way to read other people's source.
+    let (name, source) = match &query.name {
+        Some(wanted) => match state.0.app.store.fetch(wanted).await {
+            Ok(Some(hit)) if hit.owner == Some(user.id) => (wanted.clone(), hit.source.clone()),
+            _ => (String::new(), EDITOR_SCAFFOLD.to_string()),
+        },
+        None => (String::new(), EDITOR_SCAFFOLD.to_string()),
+    };
+    let inner = EditorT {
+        source_json: serde_json::to_string(&source)
+            .expect("strings serialize")
+            .replace("</", "<\\/"),
+        name,
+    }
+    .render()
+    .expect("editor renders");
+    console_page(&state, &headers, &user, "editor", inner).await
+}
+
+/// The editor endpoints answer fetch() calls: a missing session is a JSON 401
+/// the page surfaces, not a redirect the fetch would silently follow.
+async fn editor_user(state: &WebState, headers: &HeaderMap) -> Result<User, Response> {
+    match current_user(state, headers).await {
+        Some(user) => Ok(user),
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            axum::Json(
+                serde_json::json!({ "error": { "code": "unauthorized", "message": "signed out" } }),
+            ),
+        )
+            .into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+struct EditorRunBody {
+    source: String,
+    #[serde(default)]
+    body: String,
+}
+
+async fn editor_run(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<EditorRunBody>,
+) -> Response {
+    let user = match editor_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    crate::api::run_adhoc(&state.0.app, user.id, req.source, req.body).await
+}
+
+#[derive(Deserialize)]
+struct EditorSourceBody {
+    source: String,
+}
+
+async fn editor_verify(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<EditorSourceBody>,
+) -> Response {
+    if let Err(response) = editor_user(&state, &headers).await {
+        return response;
+    }
+    match crate::api::inspect_source(&state.0.app, req.source).await {
+        Ok(inspection) => {
+            let value = match &inspection.surface {
+                rusted_engine::Surface::Http(_) => {
+                    serde_json::json!({ "ok": true, "kind": "http" })
+                }
+                rusted_engine::Surface::Mcp(c) => serde_json::json!({
+                    "ok": true,
+                    "kind": "mcp",
+                    "tools": c.tools.keys().collect::<Vec<_>>(),
+                }),
+            };
+            axum::Json(value).into_response()
+        }
+        Err(message) => {
+            axum::Json(serde_json::json!({ "ok": false, "message": message })).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct EditorPushBody {
+    source: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn editor_push(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<EditorPushBody>,
+) -> Response {
+    let user = match editor_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match crate::api::deploy_function(&state.0.app, user.id, req.source, req.name, None, None).await
+    {
+        Ok(value) => axum::Json(value).into_response(),
+        Err(refused) => (
+            refused.status,
+            axum::Json(serde_json::json!({ "error": {
+                "code": refused.code,
+                "message": refused.message,
+            }})),
+        )
+            .into_response(),
+    }
 }
 
 // ------------------------------------------------------------------- admin

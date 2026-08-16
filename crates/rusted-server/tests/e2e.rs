@@ -1786,6 +1786,9 @@ async fn every_console_page_renders() {
         "/console/dashboard",
         "/console/keys",
         "/console/secrets",
+        "/console/editor",
+        "/console/editor?name=greet",
+        "/console/editor?name=does-not-exist",
         "/console/billing",
         "/console/checkout/pro",
         "/console/function/greet",
@@ -1807,6 +1810,145 @@ async fn every_console_page_renders() {
         let body = r.text().await.unwrap();
         assert!(!body.is_empty(), "{path} rendered nothing");
     }
+}
+
+async fn editor_post(t: &TestServer, cookie: &str, path: &str, body: Value) -> reqwest::Response {
+    t.client
+        .post(format!("http://{}{path}", t.handle.admin_addr))
+        .header("cookie", cookie)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn editor_runs_verifies_and_pushes_with_a_session() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+
+    // Run: ad-hoc execution with the full owner-facing envelope.
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/run",
+        json!({
+            "source": r#"export default async function handler(request, context) {
+                console.log("from the editor");
+                return context.json({ ran: true });
+            }"#,
+            "body": "{}",
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "success");
+    assert_eq!(v["response"], r#"{"ran":true}"#);
+    assert_eq!(v["logs"][0]["message"], "from the editor");
+
+    // A thrown error carries the stack — the editor is owner-facing.
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/run",
+        json!({ "source": "export default async () => { throw new Error(\"kapow\"); };" }),
+    )
+    .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "error");
+    assert!(v["message"].as_str().unwrap().contains("kapow"));
+
+    // Verify: both verdicts.
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/verify",
+        json!({ "source": GREET }),
+    )
+    .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["kind"], "http");
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/verify",
+        json!({ "source": "export default function (" }),
+    )
+    .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["ok"], false);
+
+    // Push: deploys through the same shared path the CLI and MCP use.
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/push",
+        json!({ "source": GREET, "name": "from-editor" }),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["name"], "from-editor");
+    assert_eq!(v["revision"], 1);
+    let live = t
+        .client
+        .post(t.data("/f/from-editor"))
+        .body(r#"{"name":"Editor"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(live.text().await.unwrap(), r#"{"message":"Hello, Editor"}"#);
+}
+
+#[tokio::test]
+async fn editor_endpoints_answer_json_401_without_a_session() {
+    let t = boot().await;
+    let r = editor_post(
+        &t,
+        "rusted_session=bogus",
+        "/console/editor/run",
+        json!({ "source": "x" }),
+    )
+    .await;
+    assert_eq!(r.status(), 401);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn editor_page_never_shows_someone_elses_source() {
+    let t = boot().await;
+    push(&t, "greet", GREET).await;
+    // A second account signs in and asks the editor for the first one's function.
+    let other = rusted_server::testsupport::seed_user(&t.pool).await;
+    let session = rusted_server::auth::create_session(&t.pool, other)
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .get(format!(
+            "http://{}/console/editor?name=greet",
+            t.handle.admin_addr
+        ))
+        .header("cookie", format!("rusted_session={session}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().await.unwrap();
+    assert!(
+        !body.contains("greeting"),
+        "the foreign function's source leaked into the editor"
+    );
+    assert!(
+        body.contains("Hello, ${name"),
+        "expected the blank scaffold"
+    );
 }
 
 /// The security property of the admin section: to a signed-in account without

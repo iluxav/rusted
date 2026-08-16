@@ -1157,7 +1157,7 @@ struct PushBody {
 /// Compile-checks the source and reads which surface it declares
 /// (`export const http` or `export const mcp`) plus the runtime config
 /// (`export const config`).
-async fn inspect_source(
+pub(crate) async fn inspect_source(
     state: &Arc<AppState>,
     source: String,
 ) -> Result<rusted_engine::Inspection, String> {
@@ -1840,6 +1840,14 @@ async fn invoke(
         Ok(r) => r,
         Err(response) => return response,
     };
+    Json(invocation_envelope(result)).into_response()
+}
+
+/// The owner-facing invocation envelope `/api/invoke` and the console editor
+/// share: outcome, the reply as the deployed URL would answer it, logs,
+/// timings — and for errors the JS stack, which only owner-authenticated
+/// surfaces ever see.
+pub(crate) fn invocation_envelope(result: InvocationResult) -> Value {
     let mut response = json!({
         "logs": result.logs,
         "wall_ms": result.wall.as_secs_f64() * 1000.0,
@@ -1849,8 +1857,7 @@ async fn invoke(
         Outcome::Success(s) => {
             response["outcome"] = json!("success");
             // The same status, content type, and vetted headers the deployed
-            // URL would have answered with — invoke reports the full reply,
-            // not just its body.
+            // URL would have answered with — the full reply, not just its body.
             response["status"] = json!(result.status.unwrap_or(200));
             response["content_type"] = json!(response_content_type(result.content_type, &s));
             response["headers"] = json!(result.headers);
@@ -1863,9 +1870,42 @@ async fn invoke(
         Outcome::Error(message) => {
             response["outcome"] = json!("error");
             response["message"] = json!(message);
+            if let Some(stack) = result.stack {
+                response["stack"] = json!(stack);
+            }
         }
     }
-    Json(response).into_response()
+    response
+}
+
+/// Runs ad-hoc source as a bare POST under the caller's plan limits, with no
+/// host grant — the console editor's Run button. Same execution and envelope
+/// as `/api/invoke`'s ad-hoc branch.
+pub(crate) async fn run_adhoc(
+    state: &Arc<AppState>,
+    user_id: Uuid,
+    source: String,
+    body: String,
+) -> Response {
+    let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
+    let limits = limits_for_plan(state, &plan.limits);
+    let request = HttpRequest::post_json(body);
+    match execute_raw(
+        state,
+        source,
+        Job::Http(request),
+        limits,
+        Some(user_id),
+        HostGrant::default(),
+    )
+    .await
+    {
+        Ok(result) => {
+            debug_print(state, "editor", &result);
+            Json(invocation_envelope(result)).into_response()
+        }
+        Err(response) => response,
+    }
 }
 
 #[derive(Deserialize)]
