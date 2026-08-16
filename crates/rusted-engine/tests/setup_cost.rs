@@ -65,6 +65,81 @@ fn prelude_eval_cost() {
     );
 }
 
+/// The bytecode experiment: if preludes ship as module bytecode (the same
+/// machinery user modules use), how much of the per-context eval cost —
+/// which is mostly parsing — disappears?
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn prelude_bytecode_vs_source() {
+    const ROUNDS: usize = 300;
+    let preludes = rusted_engine::preludes::ALL;
+
+    // One-time compile per process, timed for completeness.
+    let t = Instant::now();
+    let compiled: Vec<(&str, Vec<u8>)> = preludes
+        .iter()
+        .map(|(name, source)| {
+            let rt = rquickjs::Runtime::new().unwrap();
+            let ctx = rquickjs::Context::full(&rt).unwrap();
+            let bytes = ctx.with(|c| {
+                rquickjs::Module::declare(c.clone(), *name, *source)
+                    .unwrap()
+                    .write(Default::default())
+                    .unwrap()
+            });
+            (*name, bytes)
+        })
+        .collect();
+    let compile_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let mut source_sum = vec![0.0f64; preludes.len()];
+    let mut bytecode_sum = vec![0.0f64; preludes.len()];
+
+    for _ in 0..ROUNDS {
+        let rt = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rt).unwrap();
+        ctx.with(|c| {
+            for (i, (_, source)) in preludes.iter().enumerate() {
+                let t = Instant::now();
+                c.eval::<(), _>(*source).unwrap();
+                source_sum[i] += t.elapsed().as_secs_f64() * 1000.0;
+            }
+        });
+
+        let rt = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rt).unwrap();
+        ctx.with(|c| {
+            for (i, (_, bytes)) in compiled.iter().enumerate() {
+                let t = Instant::now();
+                // SAFETY: written by this same process, exactly like the
+                // executor's own bytecode cache.
+                let declared = unsafe { rquickjs::Module::load(c.clone(), bytes) }.unwrap();
+                let (_, progress) = declared.eval().unwrap();
+                progress.finish::<()>().unwrap();
+                bytecode_sum[i] += t.elapsed().as_secs_f64() * 1000.0;
+            }
+        });
+    }
+
+    eprintln!("BYTECODE vs SOURCE ({ROUNDS} rounds; one-time compile {compile_ms:.1}ms):");
+    let (mut s_total, mut b_total) = (0.0, 0.0);
+    for (i, (name, source)) in preludes.iter().enumerate() {
+        let s = source_sum[i] / ROUNDS as f64 * 1000.0;
+        let b = bytecode_sum[i] / ROUNDS as f64 * 1000.0;
+        s_total += s;
+        b_total += b;
+        eprintln!(
+            "  {name:<8} source {s:>7.1}µs  bytecode {b:>7.1}µs  ({:.0}% saved, {} bytes src)",
+            (s - b) / s * 100.0,
+            source.len(),
+        );
+    }
+    eprintln!(
+        "  total    source {s_total:>7.1}µs  bytecode {b_total:>7.1}µs  ({:.0}% saved)",
+        (s_total - b_total) / s_total * 100.0
+    );
+}
+
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn decompose_invocation_cost() {
