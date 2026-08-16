@@ -2369,31 +2369,57 @@ export const config = {
 };
 "#;
 
-const EDITOR_SCAFFOLD_APP: &str = r#"export const app = rusted
+const EDITOR_SCAFFOLD_APP: &str = r##"export const app = rusted
   .app({
     name: "my-app",           // becomes /f/my-app
-    // access: "private",     // "public" | "private"; unset follows the server
-  })
-  .use(async (request, context, next) => {
-    // runs before every matched route; return a response to short-circuit
-    return next();
+    access: "public",         // a page for browsers; "private" would require a key
   })
   .get("/", home)
-  .get("/hello/{who}", hello); // captures land in request.params
+  .post("/greet", greet);     // the form below posts here; the reply swaps into the page
 
 async function home(request: Rusted.Request, context: Rusted.Context) {
-  return context.json({ routes: ["/", "/hello/{who}"] });
+  return html(context, `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>my-app</title>
+  <script src="https://unpkg.com/htmx.org@2"></script>
+  <style>body { font: 16px/1.5 system-ui; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }</style>
+</head>
+<body>
+  <h1>my-app</h1>
+  <!-- relative URL: the page lives at /f/my-app (no trailing slash), so this posts to /f/my-app/greet -->
+  <form hx-post="my-app/greet" hx-target="#greeting" hx-swap="outerHTML">
+    <input name="name" placeholder="Your name" required>
+    <button>Greet</button>
+  </form>
+  ${greeting("world")}
+</body>
+</html>`);
 }
 
-async function hello(request: Rusted.Request, context: Rusted.Context) {
-  return context.json({ message: `Hello, ${request.params.who}` });
+async function greet(request: Rusted.Request, context: Rusted.Context) {
+  // htmx submits forms url-encoded; URLSearchParams is a native global.
+  const name = new URLSearchParams(request.body).get("name") || "world";
+  return html(context, greeting(name));
 }
+
+// One renderer per fragment: the full page and the mutation return the same
+// HTML, so the DOM is always a reflection of server truth.
+const greeting = (name: string) =>
+  `<p id="greeting">Hello, ${escapeHtml(name)}!</p>`;
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const html = (context: Rusted.Context, body: string) =>
+  context.text(body, { headers: { "content-type": "text/html" } });
 
 export const config = {
   // db: true,                   // shared SQL database on context.db
   // secrets: ["GITHUB_TOKEN"],  // vault names, decrypted into context.env
 };
-"#;
+"##;
 
 #[derive(Template)]
 #[template(path = "editor.html")]

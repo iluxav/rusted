@@ -291,29 +291,67 @@ fn scaffold(name: &str, js: bool, mcp: bool, app: bool) -> Result<(), String> {
     let handler = if app {
         // Routes are the interface — no default export. The `rusted` builder
         // is an engine global, typed in rusted.d.ts for the TypeScript case.
-        let (reference, request_type, context_type) = if js {
-            ("", String::new(), String::new())
+        // Placeholder substitution instead of format!: this template is full
+        // of braces (CSS, template literals) that format! would mangle.
+        let template = r##"__REF__export const app = rusted
+  .app({ name: "__NAME__", access: "public" })
+  .get("/", home)
+  .post("/greet", greet); // the form below posts here; the reply swaps into the page
+
+async function home(request__REQ__, context__CTX__) {
+  return html(context, `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>__NAME__</title>
+  <script src="https://unpkg.com/htmx.org@2"></script>
+  <style>body { font: 16px/1.5 system-ui; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }</style>
+</head>
+<body>
+  <h1>__NAME__</h1>
+  <!-- relative URL: the page lives at /f/__NAME__ (no trailing slash), so this posts to /f/__NAME__/greet -->
+  <form hx-post="__NAME__/greet" hx-target="#greeting" hx-swap="outerHTML">
+    <input name="name" placeholder="Your name" required>
+    <button>Greet</button>
+  </form>
+  ${greeting("world")}
+</body>
+</html>`);
+}
+
+async function greet(request__REQ__, context__CTX__) {
+  // htmx submits forms url-encoded; URLSearchParams is a native global.
+  const name = new URLSearchParams(request.body).get("name") || "world";
+  return html(context, greeting(name));
+}
+
+// One renderer per fragment: the full page and the mutation return the same
+// HTML, so the DOM is always a reflection of server truth.
+const greeting = (name__STR__) =>
+  `<p id="greeting">Hello, ${escapeHtml(name)}!</p>`;
+
+const escapeHtml = (s__STR__) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const html = (context__CTX__, body__STR__) =>
+  context.text(body, { headers: { "content-type": "text/html" } });
+"##;
+        let (reference, request_type, context_type, string_type) = if js {
+            ("", "", "", "")
         } else {
             (
                 "/// <reference path=\"./rusted.d.ts\" />\n\n",
-                ": Rusted.Request".to_string(),
-                ": Rusted.Context".to_string(),
+                ": Rusted.Request",
+                ": Rusted.Context",
+                ": string",
             )
         };
-        format!(
-            "{reference}export const app = rusted\n\
-             \x20 .app({{ name: \"{name}\" }})\n\
-             \x20 .get(\"/\", home)\n\
-             \x20 .get(\"/hello/{{who}}\", hello);\n\
-             \n\
-             async function home(request{request_type}, context{context_type}) {{\n\
-             \x20 return context.json({{ routes: [\"/\", \"/hello/{{who}}\"] }});\n\
-             }}\n\
-             \n\
-             async function hello(request{request_type}, context{context_type}) {{\n\
-             \x20 return context.json({{ message: `Hello, ${{request.params.who}}` }});\n\
-             }}\n"
-        )
+        template
+            .replace("__REF__", reference)
+            .replace("__REQ__", request_type)
+            .replace("__CTX__", context_type)
+            .replace("__STR__", string_type)
+            .replace("__NAME__", name)
     } else if mcp {
         // Tool handlers, not a request handler — the file *is* an MCP server.
         let (reference, annotation) = if js {

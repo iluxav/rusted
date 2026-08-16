@@ -2004,8 +2004,16 @@ pub(crate) fn invocation_envelope(result: InvocationResult) -> Value {
             response["outcome"] = json!("success");
             // The same status, content type, and vetted headers the deployed
             // URL would have answered with — the full reply, not just its body.
+            // A content-type header set by the handler wins here for the same
+            // reason it wins on the wire: headers are inserted last.
             response["status"] = json!(result.status.unwrap_or(200));
-            response["content_type"] = json!(response_content_type(result.content_type, &s));
+            let content_type = result
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| response_content_type(result.content_type, &s));
+            response["content_type"] = json!(content_type);
             response["headers"] = json!(result.headers);
             response["response"] = json!(s);
         }
