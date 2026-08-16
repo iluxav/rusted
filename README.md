@@ -5,6 +5,10 @@
 [![Latest release](https://img.shields.io/github/v/release/iluxav/rusted?color=ff6b24&label=release)](https://github.com/iluxav/rusted/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-c47b45)](LICENSE.md)
 
+<p align="center">
+  <img src="crates/rusted-server/assets/rusted-logo2.png" width="160" alt="rusted logo">
+</p>
+
 A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint — or a live MCP server — in seconds, executed by QuickJS inside a restricted Rust runtime.
 
 `rusted becomes the MCP server that lets agents write their own tools`
@@ -83,8 +87,14 @@ export const mcp = {
   tools: {
     slugify: {
       description: "Turn a title into a URL slug",
-      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-      async handler({ text }) { return text.toLowerCase().replace(/[^a-z0-9]+/g, "-"); },
+      inputSchema: {
+        type: "object",
+        properties: { text: { type: "string" } },
+        required: ["text"],
+      },
+      async handler({ text }) {
+        return text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      },
     },
   },
 };
@@ -107,7 +117,9 @@ export const mcp = {
     whoami: {
       description: "Show the verified caller",
       inputSchema: { type: "object" },
-      handler(_args, context) { return context.auth; },
+      handler(_args, context) {
+        return context.auth;
+      },
     },
   },
 };
@@ -146,7 +158,7 @@ What an mcp function is not:
 
 The dev loop is the http one: `rusted run index.js` serves the tools locally with hot reload and prints a config block of its own — same shape, minus the auth header, since local serving is trusted, plus a note that the pushed endpoint will want your key. Connect a client, edit, push when it works. `rusted new my-tools --mcp` scaffolds a starting point, and [examples/mcp-server](examples/mcp-server) is a complete file.
 
-This is distinct from the platform's own MCP server on the admin port (`/mcp`), whose tools — execute, deploy, list, delete, inbox_create, inbox_read — an agent uses to build on rusted. An mcp *function* is what such an agent (or you) deploys: it serves the tools in the file, under the owner's key and limits.
+This is distinct from the platform's own MCP server on the admin port (`/mcp`), whose tools — execute, deploy, list, delete, inbox_create, inbox_read — an agent uses to build on rusted. An mcp _function_ is what such an agent (or you) deploys: it serves the tools in the file, under the owner's key and limits.
 
 ## Signing in
 
@@ -160,7 +172,7 @@ Resolution order is `--api-key` → `RUSTED_API_KEY` → that file, so CI keeps 
 
 ## Console, auth, and API keys
 
-The web console lives on the admin port (http://127.0.0.1:7412). Sign-in is real GitHub OAuth: create an OAuth app at github.com/settings/developers with callback `http://127.0.0.1:7412/auth/github/callback`, then start the server with `RUSTED_CONSOLE_GITHUB_CLIENT_ID` and `RUSTED_CONSOLE_GITHUB_CLIENT_SECRET` set (the bare `GITHUB_*` names still work as a fallback; the login page shows these instructions until you do). The `RUSTED_CONSOLE_` prefix is deliberate: this is *platform* configuration, distinct from any identically-named tenant secret in the vault — give the console its own dedicated GitHub app whose single callback URL nothing else ever repoints.
+The web console lives on the admin port (http://127.0.0.1:7412). Sign-in is real GitHub OAuth: create an OAuth app at github.com/settings/developers with callback `http://127.0.0.1:7412/auth/github/callback`, then start the server with `RUSTED_CONSOLE_GITHUB_CLIENT_ID` and `RUSTED_CONSOLE_GITHUB_CLIENT_SECRET` set (the bare `GITHUB_*` names still work as a fallback; the login page shows these instructions until you do). The `RUSTED_CONSOLE_` prefix is deliberate: this is _platform_ configuration, distinct from any identically-named tenant secret in the vault — give the console its own dedicated GitHub app whose single callback URL nothing else ever repoints.
 
 API keys are minted in the console (shown once; only a hash is stored). `rusted serve --require-auth` makes every function endpoint demand `Authorization: Bearer rk_live_…`. Key verification is served from an in-memory cache invalidated over Postgres LISTEN/NOTIFY — revocation propagates in milliseconds without per-request DB reads.
 
@@ -172,11 +184,11 @@ Every command takes `--json` for stable machine-readable output.
 
 ## What's here
 
-| Path                   | Purpose                                                                                                                                                                      |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/rusted-engine` | QuickJS executor: uncatchable wall-clock interrupt, heap cap, output cap, structured `console` logs, fresh context per invocation                                            |
+| Path                   | Purpose                                                                                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/rusted-engine` | QuickJS executor: uncatchable wall-clock interrupt, heap cap, output cap, structured `console` logs, fresh context per invocation                                                     |
 | `crates/rusted-server` | Orchestrator: data API (`/f/<name>`, `/r/<id>`), admin API for the CLI, content-addressed Postgres store with immutable revisions, inboxes, per-function concurrency 1, temp-run TTLs |
-| `crates/rusted-cli`    | The single `rusted` binary                                                                                                                                                   |
+| `crates/rusted-cli`    | The single `rusted` binary                                                                                                                                                            |
 
 The engine choice (QuickJS over Boa) came out of a measured spike — cold start, throughput, memory, and whether hostile code can actually be stopped. QuickJS won on all four, decisively on the last: it can interrupt a runaway script uncatchably and cap its heap, which Boa cannot.
 
@@ -269,7 +281,7 @@ Status must be 200–599. Headers that frame the response — `content-length`, 
 
 ## Receiving: inboxes
 
-A function can call out. Nothing can call *in* — which rules out OAuth callbacks, webhooks, form submissions, and anything a third party has to initiate. That's especially true of an agent running in a browser or someone's cloud: it has no address at all.
+A function can call out. Nothing can call _in_ — which rules out OAuth callbacks, webhooks, form submissions, and anything a third party has to initiate. That's especially true of an agent running in a browser or someone's cloud: it has no address at all.
 
 An inbox is a throwaway URL that accepts a POST from anyone and holds what arrives:
 
@@ -357,7 +369,7 @@ export default async function handler(request, context) {
   const counter = await context.state.get("hits");
   const wrote = await context.state.compareAndSet(
     "hits",
-    counter?.version ?? null,          // null = create; a version = replace exactly that
+    counter?.version ?? null, // null = create; a version = replace exactly that
     (counter?.value ?? 0) + 1,
   );
   if (!wrote.ok) return context.json({ retry: true }, { status: 409 });
@@ -365,7 +377,7 @@ export default async function handler(request, context) {
 }
 ```
 
-`context.state` is durable JSON scoped to *(you, the function's name)*. It survives new revisions and even delete/redeploy — only the explicit purge (`rusted state purge <name>`, or the console's admin API) removes it, because a redeploy silently losing coordination state is a worse surprise than a few stale kilobytes.
+`context.state` is durable JSON scoped to _(you, the function's name)_. It survives new revisions and even delete/redeploy — only the explicit purge (`rusted state purge <name>`, or the console's admin API) removes it, because a redeploy silently losing coordination state is a worse surprise than a few stale kilobytes.
 
 Single-key compare-and-set is the whole transaction model: every entry carries a `version`, writes name the version they expect (`null` to create), and the check happens atomically in the database — two racers get exactly one winner and a `currentVersion` to retry from. Keys are 1–512 bytes, values up to 64 KiB serialized, `list` pages lexicographically 100 at a time, and your plan bounds total keys and bytes per function. There are no multi-key transactions; design state so one key is the unit of consistency.
 
@@ -382,8 +394,8 @@ export const config = {
       endpoint: "https://<account>.r2.cloudflarestorage.com",
       region: "auto",
       bucket: "renote-shares",
-      maxObjectBytes: 67108864,                    // 64 MiB, enforced before signing
-      accessKeyIdSecret: "R2_ACCESS_KEY_ID",       // names in your secret vault —
+      maxObjectBytes: 67108864, // 64 MiB, enforced before signing
+      accessKeyIdSecret: "R2_ACCESS_KEY_ID", // names in your secret vault —
       secretAccessKeySecret: "R2_SECRET_ACCESS_KEY", // the values never reach JS
     },
   },
@@ -421,8 +433,8 @@ Because the environment is part of the address, it survives everything code can'
 `Math.random()` is fine for jitter and dice; it is not fine for anything an attacker gains by predicting — and OAuth state, PKCE verifiers, session tokens, and encryption nonces are exactly that. The host lends the real thing instead:
 
 ```js
-const bytes = context.randomBytes(32);       // Uint8Array, straight from the OS CSPRNG
-const state = context.randomBase64Url(32);   // the same 256 bits as 43 URL- and cookie-safe chars
+const bytes = context.randomBytes(32); // Uint8Array, straight from the OS CSPRNG
+const state = context.randomBase64Url(32); // the same 256 bits as 43 URL- and cookie-safe chars
 ```
 
 These draw from the operating system's cryptographic random source (`getrandom` on the host — the same pool `openssl rand` reads), not from the JavaScript engine. Lengths are 1 to 1024 bytes; anything else throws. Unlike `context.inbox` and `context.env`, randomness needs no owner to scope to, so it is present everywhere — `rusted run` included — and the same calls work in mcp tool handlers.
@@ -445,7 +457,8 @@ const session = await context.open(request.cookies[NAME], {
   keySecret: "AUTH_COOKIE_KEY",
   context: "myapp:session:v1",
 });
-if (!session) return context.json({ error: "not_authenticated" }, { status: 401 });
+if (!session)
+  return context.json({ error: "not_authenticated" }, { status: 401 });
 ```
 
 The payload is any JSON value up to 16 KiB; the result is compact base64url, fit for a cookie. `open` answers the payload or `null` — tampering, a different key, and a different `context` string are all the same silent null, so a forger learns nothing about which check refused them. The `context` option is authenticated data: a value sealed for one purpose cannot be replayed into another.
@@ -479,9 +492,21 @@ curl -H "Authorization: Bearer $RUSTED_API_KEY" https://rusted.sh/api/stats
 ```
 
 ```json
-{ "source": "opentelemetry", "functions": [
-  { "function": "renote-auth", "invocations": 812, "success": 780, "error": 2,
-    "terminated": 0, "refused": 30, "error_rate": 0.0025, "p95_exec_ms": 11.4 } ] }
+{
+  "source": "opentelemetry",
+  "functions": [
+    {
+      "function": "renote-auth",
+      "invocations": 812,
+      "success": 780,
+      "error": 2,
+      "terminated": 0,
+      "refused": 30,
+      "error_rate": 0.0025,
+      "p95_exec_ms": 11.4
+    }
+  ]
+}
 ```
 
 `error_rate` counts only what a handler owns — errors and terminations over executed invocations; refusals (rate limits, wrong methods, unpublished) are tallied separately. `p95_exec_ms` is interpolated from histogram buckets tuned to the plans' execution budgets. The console dashboard's headline tiles read from this same pipeline (the day chart and invocation rows stay event-based from Postgres).
