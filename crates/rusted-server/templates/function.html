@@ -27,7 +27,7 @@
           </div>
           {% endfor %}
         </div>
-        <p class="mt-3 font-mono text-[10px] text-clay"><span class="{% if access == "private" %}text-ember{% else if access == "key required" %}text-copper{% else %}text-sage{% endif %}">{{ access }}</span> <span class="text-copper/40">/</span> deployed {{ deployed_at }}{% if !deployed_ago.is_empty() %} <span class="text-copper/40">·</span> {{ deployed_ago }}{% endif %} <span class="text-copper/40">/</span> {{ size }} <span class="text-copper/40">/</span> read-only <span class="text-copper/40">/</span> push via CLI to revise</p>
+        <p class="mt-3 font-mono text-[10px] text-clay"><span class="{% if access == "private" %}text-ember{% else if access == "key required" %}text-copper{% else %}text-sage{% endif %}">{{ access }}</span> <span class="text-copper/40">/</span> deployed {{ deployed_at }}{% if !deployed_ago.is_empty() %} <span class="text-copper/40">·</span> {{ deployed_ago }}{% endif %}{% if !via.is_empty() %} <span class="text-copper/40">/</span> via <span class="text-copper">{{ via }}</span>{% endif %} <span class="text-copper/40">/</span> {{ size }} <span class="text-copper/40">/</span> read-only <span class="text-copper/40">/</span> push via CLI to revise</p>
         {% if !published %}
         <p class="mt-2 inline-flex items-center gap-2 rounded border border-blood/40 bg-blood/10 px-2.5 py-1.5 font-mono text-[10px] font-semibold text-blood">
           <span class="h-1.5 w-1.5 rounded-full bg-blood"></span>

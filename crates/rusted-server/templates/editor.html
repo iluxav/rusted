@@ -13,6 +13,12 @@
     </div>
   </div>
 
+  {% if origin == "cli" || origin == "agent" %}
+  <div class="mb-3 rounded-lg border border-copper/25 bg-copper/[0.06] px-4 py-2.5 font-mono text-[11px] text-clay" id="ed-origin-warning">
+    <span class="mr-1.5 text-copper">⚠</span>{{ name }} was last pushed via {{ origin_label }} — what you see is the deployed bundle, and the original source may live elsewhere{% if origin == "cli" %} (TypeScript files on a developer machine){% endif %}. Pushing from here forks it.
+  </div>
+  {% endif %}
+
   <div class="flex min-h-0 flex-1 gap-4">
     <div class="flex min-w-0 flex-1 overflow-hidden rounded-xl border border-copper/15">
       <div id="ed-files" class="flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-copper/15 bg-rust-950/60 p-2"></div>
@@ -37,6 +43,7 @@
 (() => {
   const initialSource = {{ source_json|safe }};
   const initialName = "{{ name }}";
+  const ORIGIN = "{{ origin }}";
   const ENTRY = "index.js";
   const STORE_KEY = "rusted-editor:" + (initialName || "scratch");
 
@@ -341,7 +348,15 @@
     } catch (e) { out.innerHTML = `<div class="text-blood">${esc(e.message)}</div>`; }
   }
 
+  let forkConfirmed = false;
   async function push() {
+    if ((ORIGIN === "cli" || ORIGIN === "agent") && !forkConfirmed) {
+      const surface = ORIGIN === "cli" ? "the CLI" : "an agent";
+      if (!confirm(`${initialName} was last pushed from ${surface}. Pushing from the editor replaces that revision and forks it from its original source. Continue?`)) {
+        return;
+      }
+      forkConfirmed = true;
+    }
     statusReset();
     busy("bundling");
     let built;

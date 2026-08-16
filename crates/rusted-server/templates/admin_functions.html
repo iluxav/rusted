@@ -31,6 +31,7 @@
           <th class="px-6 py-2 font-normal">function</th>
           <th class="px-3 py-2 font-normal">owner</th>
           <th class="px-3 py-2 font-normal">access</th>
+          <th class="px-3 py-2 font-normal">via</th>
           <th class="px-3 py-2 text-right font-normal">rev</th>
           <th class="px-3 py-2 font-normal">
             <a hx-get="{{ created_url }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="{{ created_url }}"
@@ -48,6 +49,7 @@
           <td class="px-6 py-3 text-cream"><span class="mr-2 text-copper">ƒ</span>{{ row.name }}</td>
           <td class="px-3 py-3 text-clay">{{ row.owner }}</td>
           <td class="px-3 py-3 {% if row.access == "private" %}text-ember{% else %}text-clay{% endif %}">{{ row.access }}</td>
+          <td class="px-3 py-3 text-clay/70">{{ row.via }}</td>
           <td class="px-3 py-3 text-right text-clay">{{ row.rev }}</td>
           <td class="px-3 py-3 text-clay/70">{{ row.created }}</td>
           <td class="px-6 py-3 text-clay/70">{{ row.updated }}</td>

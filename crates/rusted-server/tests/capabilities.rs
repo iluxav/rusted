@@ -128,6 +128,7 @@ async fn state_survives_revisions_and_redeploy_until_purged() {
             "export default async () => 1",
             Some(user),
             &declared,
+            "cli",
         )
         .await
         .unwrap();
@@ -143,6 +144,7 @@ async fn state_survives_revisions_and_redeploy_until_purged() {
             "export default async () => 2",
             Some(user),
             &declared,
+            "cli",
         )
         .await
         .unwrap();

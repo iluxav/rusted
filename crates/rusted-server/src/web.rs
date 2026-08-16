@@ -1048,6 +1048,8 @@ struct FunctionT {
     code_json: String,
     /// Data-plane protocol: `"http"` or `"mcp"`.
     kind: String,
+    /// Which surface pushed the serving revision: "CLI", "web editor", "agent".
+    via: String,
     /// Who may call it on THIS server: "public", "private", or "key required"
     /// (undeclared on a --require-auth server).
     access: &'static str,
@@ -1494,6 +1496,16 @@ async fn page_dashboard(
 }
 
 // ------------------------------------------------------------------- keys
+
+/// Human names for revision origins.
+fn via_label(via: &str) -> &'static str {
+    match via {
+        "editor" => "web editor",
+        "agent" => "agent",
+        "" => "",
+        _ => "CLI",
+    }
+}
 
 fn ago(epoch: i64) -> String {
     let delta = (now_epoch() as i64 - epoch).max(0);
@@ -1961,9 +1973,9 @@ async fn page_function(
         .collect();
     // When the serving revision went live — the store's cached view carries
     // no timestamps, so one small query pays for the header line.
-    let (deployed_at, deployed_ago) = sqlx::query(
+    let (deployed_at, deployed_ago, via) = sqlx::query(
         "SELECT to_char(r.created_at, 'YYYY-MM-DD HH24:MI \"UTC\"') AS at_text,
-                extract(epoch FROM r.created_at)::bigint AS at
+                extract(epoch FROM r.created_at)::bigint AS at, r.via
          FROM revisions r WHERE r.function_name = $1 AND r.rev = $2",
     )
     .bind(&name)
@@ -1976,9 +1988,10 @@ async fn page_function(
         (
             row.get::<String, _>("at_text"),
             ago(row.get::<i64, _>("at")),
+            via_label(row.get::<String, _>("via").as_str()).to_string(),
         )
     })
-    .unwrap_or_else(|| ("unknown".to_string(), String::new()));
+    .unwrap_or_else(|| ("unknown".to_string(), String::new(), String::new()));
     let (user_code, hidden) = split_user_code(source);
     let code_json = serde_json::json!({ "user": user_code, "full": source })
         .to_string()
@@ -2030,6 +2043,7 @@ async fn page_function(
         hidden_kb: hidden / 1024,
         code_json,
         kind: hit.kind.clone(),
+        via,
         access,
         tools,
         mcp_public,
@@ -2230,6 +2244,10 @@ struct EditorT {
     /// The initial buffer as a JSON string literal, safe inside <script>.
     source_json: String,
     name: String,
+    /// Raw origin of the loaded function's serving revision ("cli", "editor",
+    /// "agent"), empty for a blank buffer — drives the fork warning.
+    origin: String,
+    origin_label: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -2256,11 +2274,20 @@ async fn page_editor(
         },
         None => (String::new(), EDITOR_SCAFFOLD.to_string()),
     };
+    let origin = if name.is_empty() {
+        String::new()
+    } else {
+        crate::api::previous_via(&state.0.app, &name)
+            .await
+            .unwrap_or_default()
+    };
     let inner = EditorT {
         source_json: serde_json::to_string(&source)
             .expect("strings serialize")
             .replace("</", "<\\/"),
         name,
+        origin_label: via_label(&origin).to_string(),
+        origin,
     }
     .render()
     .expect("editor renders");
@@ -2350,7 +2377,16 @@ async fn editor_push(
         Ok(user) => user,
         Err(response) => return response,
     };
-    match crate::api::deploy_function(&state.0.app, user.id, req.source, req.name, None, None).await
+    match crate::api::deploy_function(
+        &state.0.app,
+        user.id,
+        req.source,
+        req.name,
+        None,
+        None,
+        "editor",
+    )
+    .await
     {
         Ok(value) => axum::Json(value).into_response(),
         Err(refused) => (
@@ -2692,6 +2728,7 @@ struct AdminFnRow {
     name: String,
     owner: String,
     rev: i64,
+    via: String,
     access: &'static str,
     created: String,
     updated: String,
@@ -2731,9 +2768,11 @@ async fn page_admin_functions(
     // whitelist above, never caller text.
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT f.name, f.current_rev, f.public, coalesce(u.login, '—') AS owner,
+                coalesce(r.via, 'cli') AS via,
                 extract(epoch FROM f.created_at)::bigint AS created,
                 extract(epoch FROM f.updated_at)::bigint AS updated
          FROM functions f LEFT JOIN users u ON u.id = f.user_id
+         LEFT JOIN revisions r ON r.function_name = f.name AND r.rev = f.current_rev
          WHERE $1 = '' OR f.name ILIKE $2
          ORDER BY {order} LIMIT $3 OFFSET $4"
     )))
@@ -2752,6 +2791,7 @@ async fn page_admin_functions(
             name: row.get("name"),
             owner: row.get("owner"),
             rev: row.get("current_rev"),
+            via: via_label(row.get::<String, _>("via").as_str()).to_string(),
             access: match row.get::<Option<bool>, _>("public") {
                 Some(true) => "public",
                 Some(false) => "private",

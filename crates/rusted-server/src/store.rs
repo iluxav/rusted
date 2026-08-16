@@ -200,6 +200,7 @@ impl Store {
         source: &str,
         user_id: Option<Uuid>,
         declared: &Declared,
+        via: &str,
     ) -> sqlx::Result<Revision> {
         let existing: Option<HttpTrigger> =
             sqlx::query("SELECT methods, path FROM functions WHERE name = $1")
@@ -216,6 +217,7 @@ impl Store {
             existing.unwrap_or_default(),
             user_id,
             declared,
+            via,
         )
         .await
     }
@@ -228,6 +230,7 @@ impl Store {
         trigger: HttpTrigger,
         user_id: Option<Uuid>,
         declared: &Declared,
+        via: &str,
     ) -> sqlx::Result<Revision> {
         self.push_full(
             name,
@@ -237,6 +240,7 @@ impl Store {
             None,
             user_id,
             declared,
+            via,
         )
         .await
     }
@@ -254,6 +258,7 @@ impl Store {
         mcp: Option<&serde_json::Value>,
         user_id: Option<Uuid>,
         declared: &Declared,
+        via: &str,
     ) -> sqlx::Result<Revision> {
         let default_trigger = HttpTrigger::default();
         let trigger = trigger.unwrap_or(&default_trigger);
@@ -304,12 +309,13 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         let created_at: i64 = sqlx::query(
-            "INSERT INTO revisions (function_name, rev, artifact_hash) VALUES ($1, $2, $3)
+            "INSERT INTO revisions (function_name, rev, artifact_hash, via) VALUES ($1, $2, $3, $4)
              RETURNING extract(epoch FROM created_at)::bigint AS at",
         )
         .bind(name)
         .bind(rev)
         .bind(&hash)
+        .bind(via)
         .fetch_one(&mut *tx)
         .await?
         .get("at");

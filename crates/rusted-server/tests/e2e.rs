@@ -1905,6 +1905,121 @@ async fn editor_runs_verifies_and_pushes_with_a_session() {
     assert_eq!(live.text().await.unwrap(), r#"{"message":"Hello, Editor"}"#);
 }
 
+async fn current_via(t: &TestServer, name: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT r.via FROM revisions r
+         JOIN functions f ON f.name = r.function_name AND f.current_rev = r.rev
+         WHERE f.name = $1",
+    )
+    .bind(name)
+    .fetch_one(&t.pool)
+    .await
+    .unwrap()
+}
+
+/// Every deploy surface stamps its revisions, the editor warns before
+/// forking a CLI-origin function, and handoffs are reported to the pusher.
+#[tokio::test]
+async fn revisions_carry_their_origin_and_handoffs_warn() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+
+    // 1. API push → cli.
+    let r = push(&t, "clifn", GREET).await;
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["via"], "cli");
+    assert!(v["previous_via"].is_null());
+    assert_eq!(current_via(&t, "clifn").await, "cli");
+
+    // 2. The editor shows the fork warning for a CLI-origin function.
+    let page = t
+        .client
+        .get(format!(
+            "http://{}/console/editor?name=clifn",
+            t.handle.admin_addr
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        page.contains("Pushing from here forks it"),
+        "missing fork warning"
+    );
+
+    // 3. Editor push takes over: previous_via reports the handoff, the
+    //    revision is stamped, and the warning disappears.
+    let r = editor_post(
+        &t,
+        &cookie,
+        "/console/editor/push",
+        json!({ "source": GREET, "name": "clifn" }),
+    )
+    .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["via"], "editor");
+    assert_eq!(v["previous_via"], "cli");
+    assert_eq!(current_via(&t, "clifn").await, "editor");
+    let page = t
+        .client
+        .get(format!(
+            "http://{}/console/editor?name=clifn",
+            t.handle.admin_addr
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !page.contains("Pushing from here forks it"),
+        "warning must clear once the editor owns the revision"
+    );
+
+    // 4. An API push over it reports the editor handoff back to the CLI.
+    let r = push(&t, "clifn", GREET).await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["previous_via"], "editor");
+
+    // 5. The MCP deploy tool stamps agent.
+    let r = t
+        .admin_post(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "deploy", "arguments": { "code": GREET, "name": "agent-fn" } }
+            }),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(current_via(&t, "agent-fn").await, "agent");
+
+    // 6. The function page names the origin.
+    let page = t
+        .client
+        .get(format!(
+            "http://{}/console/function/agent-fn",
+            t.handle.admin_addr
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("via <span class=\"text-copper\">agent</span>"));
+}
+
 #[tokio::test]
 async fn editor_endpoints_answer_json_401_without_a_session() {
     let t = boot().await;

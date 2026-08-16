@@ -1192,6 +1192,21 @@ impl DeployRefused {
     }
 }
 
+/// The origin of a function's currently-serving revision, None for a new name.
+pub(crate) async fn previous_via(state: &Arc<AppState>, name: &str) -> Option<String> {
+    sqlx::query(
+        "SELECT r.via FROM functions f
+         JOIN revisions r ON r.function_name = f.name AND r.rev = f.current_rev
+         WHERE f.name = $1",
+    )
+    .bind(name)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|row| sqlx::Row::get(&row, "via"))
+}
+
 /// Deploys a function and describes what now exists at what URL.
 ///
 /// Shared by the HTTP route and the MCP tool. Everything here is a decision —
@@ -1204,6 +1219,7 @@ pub async fn deploy_function(
     name: Option<String>,
     methods: Option<Vec<String>>,
     path: Option<String>,
+    via: &str,
 ) -> Result<Value, DeployRefused> {
     let plan = crate::plans::effective_plan(&state.pool, &state.plan_cache, Some(user_id)).await;
     if source.len() as i64 > plan.limits.max_script_bytes {
@@ -1298,6 +1314,7 @@ pub async fn deploy_function(
                 "tools": mcp_config.tools,
             });
             let declared = crate::store::Declared::from_config(&config, Some(mcp_config.public));
+            let previous_via = previous_via(state, &name).await;
             let revision = state
                 .store
                 .push_full(
@@ -1308,6 +1325,7 @@ pub async fn deploy_function(
                     Some(&meta),
                     Some(user_id),
                     &declared,
+                    via,
                 )
                 .await
                 .map_err(|e| {
@@ -1328,6 +1346,8 @@ pub async fn deploy_function(
                 "secrets": declared.secrets,
                 "state": declared.state,
                 "objects": declared.objects.keys().collect::<Vec<_>>(),
+                "via": via,
+                "previous_via": previous_via,
                 "url": state.data_url(&format!("/f/{name}")),
             });
             if !mcp_config.public {
@@ -1367,17 +1387,18 @@ pub async fn deploy_function(
         _ => None,
     };
     let declared = crate::store::Declared::from_config(&config, access);
+    let previous_via = previous_via(state, &name).await;
     let pushed = match new_trigger {
         Some(trigger) => {
             state
                 .store
-                .push_with_trigger(&name, &source, trigger, Some(user_id), &declared)
+                .push_with_trigger(&name, &source, trigger, Some(user_id), &declared, via)
                 .await
         }
         None => {
             state
                 .store
-                .push(&name, &source, Some(user_id), &declared)
+                .push(&name, &source, Some(user_id), &declared, via)
                 .await
         }
     };
@@ -1419,6 +1440,8 @@ pub async fn deploy_function(
         "path": trigger.path,
         "secrets": declared.secrets,
         "public": access,
+        "via": via,
+        "previous_via": previous_via,
         "state": declared.state,
         "objects": declared.objects.keys().collect::<Vec<_>>(),
         "limits": limits_json(state, &plan),
@@ -1436,7 +1459,17 @@ async fn push_function(
         Err(response) => return response,
     };
     let methods = body.methods.clone().filter(|m| !m.is_empty());
-    match deploy_function(&state, user_id, body.source, body.name, methods, body.path).await {
+    match deploy_function(
+        &state,
+        user_id,
+        body.source,
+        body.name,
+        methods,
+        body.path,
+        "cli",
+    )
+    .await
+    {
         Ok(value) => Json(value).into_response(),
         Err(refused) => err(refused.status, refused.code, refused.message),
     }
@@ -2299,7 +2332,17 @@ async fn mcp_deploy(state: &Arc<AppState>, user_id: Uuid, args: &Value) -> Value
         .and_then(|p| p.as_str())
         .map(|p| p.to_string());
 
-    match deploy_function(state, user_id, code.to_string(), name, methods, path).await {
+    match deploy_function(
+        state,
+        user_id,
+        code.to_string(),
+        name,
+        methods,
+        path,
+        "agent",
+    )
+    .await
+    {
         Ok(value) => {
             // The URL is the reason to deploy, so lead with it and say plainly
             // that it is callable now.

@@ -533,13 +533,24 @@ fn dispatch(cli: Cli) -> Result<(), String> {
                     .unwrap_or_default();
                 // Only an explicit `access: "private"` prints the auth line —
                 // undeclared functions follow the server and say nothing.
+                // A revision handoff between surfaces deserves a note: the
+                // other side's source of truth is now behind.
+                let handoff = match v["previous_via"].as_str() {
+                    Some("editor") => {
+                        "\nnote: the last revision came from the web editor; this push replaces it"
+                    }
+                    Some("agent") => {
+                        "\nnote: the last revision was deployed by an agent; this push replaces it"
+                    }
+                    _ => "",
+                };
                 let gated = if v["public"] == json!(false) {
                     "\ncallers need your API key (access: \"private\") — Authorization: Bearer <key>"
                 } else {
                     ""
                 };
                 format!(
-                    "pushed {} revision {} ({} bytes)\nbudget: {}ms wall · {}MB memory · {}KB request/response · concurrency {}\n{} {}{gated}",
+                    "pushed {} revision {} ({} bytes)\nbudget: {}ms wall · {}MB memory · {}KB request/response · concurrency {}\n{} {}{gated}{handoff}",
                     v["name"].as_str().unwrap_or(""),
                     v["revision"],
                     v["size_bytes"],
