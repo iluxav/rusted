@@ -1,10 +1,12 @@
-// The console editor's building blocks, exposed as one global for the
-// editor.html template to assemble. Bundled by `make editor-js`.
-import { EditorView, basicSetup } from "codemirror";
-import { EditorState } from "@codemirror/state";
-import { keymap } from "@codemirror/view";
-import { indentWithTab } from "@codemirror/commands";
-import { javascript } from "@codemirror/lang-javascript";
-import { oneDark } from "@codemirror/theme-one-dark";
+// Monaco with the TypeScript language service — the console editor's engine.
+// Bundled by `make editor-js`; workers are bundled separately (see Makefile).
+// The basic-languages contributions register the file extensions and
+// tokenizers; without them models fall back to plaintext and the language
+// service never engages.
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import "monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution";
+import "monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution";
+import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
+import "monaco-editor/esm/vs/editor/contrib/format/browser/formatActions";
 
-window.RustedEditor = { EditorView, EditorState, basicSetup, keymap, indentWithTab, javascript, oneDark };
+window.monaco = monaco;

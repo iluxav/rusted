@@ -2239,14 +2239,14 @@ export const config = {
   // state: true,                // durable context.state
 };
 
-export default async function handler(request, context) {
+export default async function handler(request: Rusted.Request, context: Rusted.Context) {
   // .catch: a bare POST has no body, and that should greet, not throw.
-  const { name } = await request.json().catch(() => ({}));
+  const { name } = await request.json<{ name?: string }>().catch(() => ({}) as { name?: string });
   return context.json({ message: `Hello, ${name ?? "world"}` });
 }
 "#;
 
-const EDITOR_SCAFFOLD_MCP: &str = r#"export const mcp = {
+const EDITOR_SCAFFOLD_MCP: &str = r#"export const mcp: Rusted.Mcp = {
   name: "my-tools",           // becomes /f/my-tools
   // public: true,            // serve without a key; default needs your key
   tools: {
@@ -2257,7 +2257,7 @@ const EDITOR_SCAFFOLD_MCP: &str = r#"export const mcp = {
         properties: { name: { type: "string" } },
         required: ["name"],
       },
-      async handler({ name }) {
+      async handler({ name }: { name: string }) {
         return `Hello, ${name}!`;
       },
     },

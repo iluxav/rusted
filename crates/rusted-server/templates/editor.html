@@ -1,23 +1,13 @@
+<link rel="stylesheet" href="/assets/editor.css">
 <div class="flex h-full min-h-[540px] flex-col px-6 py-5" id="editor-page">
   <div class="mb-4 flex flex-wrap items-center gap-3">
     <div>
       <p class="eyebrow mb-1">Console</p>
       <h1 class="page-title text-xl">Editor</h1>
     </div>
-    <div class="ml-auto flex items-center gap-2">
-      {% if !name.is_empty() %}
-      <span class="mr-1 font-mono text-[12px] text-clay"><span class="text-copper">ƒ</span> {{ name }}</span>
-      {% endif %}
-      <button id="ed-run" class="btn-primary flex h-10 w-10 items-center justify-center p-0" title="Run in a fresh sandbox (⌘⏎)">
-        <svg class="h-[18px] w-[18px]" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v13.72c0 .86.94 1.39 1.68.94l10.9-6.86c.7-.44.7-1.44 0-1.88L9.68 4.2A1.11 1.11 0 0 0 8 5.14Z"/></svg>
-      </button>
-      <button id="ed-verify" class="btn-secondary flex h-10 w-10 items-center justify-center p-0" title="Verify — compile-check and read the declared surface">
-        <svg class="h-[18px] w-[18px]" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
-      </button>
-      <button id="ed-push" class="btn-secondary flex h-10 w-10 items-center justify-center p-0" title="Push — deploy; the URL goes live immediately">
-        <svg class="h-[18px] w-[18px]" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z"/></svg>
-      </button>
-    </div>
+    {% if !name.is_empty() %}
+    <span class="ml-auto font-mono text-[12px] text-clay"><span class="text-copper">ƒ</span> {{ name }}</span>
+    {% endif %}
   </div>
 
   {% if origin == "cli" || origin == "agent" %}
@@ -29,7 +19,27 @@
   <div class="flex min-h-0 flex-1 gap-4">
     <div class="flex min-w-0 flex-1 overflow-hidden rounded-xl border border-copper/15">
       <div id="ed-files" class="flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-copper/15 bg-rust-950/60 p-2"></div>
-      <div class="min-h-0 min-w-0 flex-1" id="ed-mount"></div>
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div class="flex items-center gap-1.5 border-b border-copper/15 bg-rust-950/60 px-2 py-1.5">
+          <button id="ed-format" title="Format code (TypeScript formatter)"
+                  class="flex h-8 w-8 items-center justify-center rounded-md text-clay transition-colors hover:bg-rust-900 hover:text-cream">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" d="M3.75 6.75h16.5M3.75 12h9.75m-9.75 5.25h16.5"/></svg>
+          </button>
+          <span id="ed-lint" class="ml-1 font-mono text-[10px] text-clay/60" title="Language-service diagnostics across all files">checking…</span>
+          <div class="ml-auto flex items-center gap-1.5">
+            <button id="ed-run" class="btn-primary flex h-8 w-8 items-center justify-center p-0" title="Run in a fresh sandbox (⌘⏎)">
+              <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v13.72c0 .86.94 1.39 1.68.94l10.9-6.86c.7-.44.7-1.44 0-1.88L9.68 4.2A1.11 1.11 0 0 0 8 5.14Z"/></svg>
+            </button>
+            <button id="ed-verify" class="btn-secondary flex h-8 w-8 items-center justify-center p-0" title="Verify — compile-check and read the declared surface">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+            </button>
+            <button id="ed-push" class="btn-secondary flex h-8 w-8 items-center justify-center p-0" title="Push — deploy; the URL goes live immediately">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="min-h-0 flex-1" id="ed-mount"></div>
+      </div>
     </div>
 
     <div class="flex w-[380px] shrink-0 flex-col gap-3 overflow-y-auto">
@@ -52,11 +62,7 @@
   const initialName = "{{ name }}";
   const ORIGIN = "{{ origin }}";
   const FRESH = {% if fresh %}true{% else %}false{% endif %};
-  const ENTRY = "index.js";
   const STORE_KEY = "rusted-editor:" + (initialName || "scratch");
-
-  const { EditorView, EditorState, basicSetup, keymap, indentWithTab, javascript, oneDark } =
-    window.RustedEditor;
 
   // ---- project state: a flat virtual filesystem, persisted per function ----
   let project = null;
@@ -64,54 +70,131 @@
     try { project = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch {}
   }
   let restored = false;
-  if (project && project.files && project.files[ENTRY] !== undefined) {
+  const hasEntry = (p) => p && p.files &&
+    (p.files["index.ts"] !== undefined || p.files["index.js"] !== undefined);
+  if (hasEntry(project)) {
     restored = true;
   } else {
-    project = { files: {}, current: ENTRY };
-    project.files[ENTRY] = initialSource;
+    // Fresh scaffolds are TypeScript; a loaded function's deployed source is JS.
+    const entryFile = initialName ? "index.js" : "index.ts";
+    project = { files: {}, current: entryFile };
+    project.files[entryFile] = initialSource;
   }
-  if (!project.files[project.current]) project.current = ENTRY;
+  const entryName = () =>
+    project.files["index.ts"] !== undefined ? "index.ts" : "index.js";
+  if (!Object.prototype.hasOwnProperty.call(project.files, project.current)) {
+    project.current = entryName();
+  }
+
+  // ---- monaco: workers, compiler, runtime types, theme ----
+  window.MonacoEnvironment = {
+    getWorkerUrl: (_id, label) =>
+      label === "typescript" || label === "javascript"
+        ? "/assets/ts.worker.js"
+        : "/assets/editor.worker.js",
+  };
+  const ts = monaco.languages.typescript;
+  for (const d of [ts.typescriptDefaults, ts.javascriptDefaults]) {
+    d.setCompilerOptions({
+      target: ts.ScriptTarget.ES2020,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeJs,
+      allowJs: true,
+      checkJs: true,
+      noEmit: true,
+      allowNonTsExtensions: true,
+      // Imports carry their extension (./lib.ts) because the bundler's
+      // virtual filesystem resolves exact names.
+      allowImportingTsExtensions: true,
+    });
+    d.setEagerModelSync(true);
+  }
+  // The runtime's real types, plus an escape hatch typing bare npm imports as
+  // any — relative-path mistakes stay real errors, package imports don't lint.
+  fetch("/assets/rusted.d.ts").then((r) => r.text()).then((dts) => {
+    for (const d of [ts.typescriptDefaults, ts.javascriptDefaults]) {
+      d.addExtraLib(dts, "file:///rusted.d.ts");
+      d.addExtraLib('declare module "*";', "file:///bare-modules.d.ts");
+    }
+  });
+  monaco.editor.defineTheme("rusted-dark", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#100d0b",
+      "editor.foreground": "#f2eae3",
+      "editorGutter.background": "#0b0908",
+      "editorLineNumber.foreground": "#6b5748",
+      "editorLineNumber.activeForeground": "#c47b45",
+      "editor.lineHighlightBackground": "#1b151160",
+      "editor.selectionBackground": "#ff6b242e",
+      "editorCursor.foreground": "#ff6b24",
+      "editorWidget.background": "#1b1511",
+      "editorWidget.border": "#33261d",
+      "editorSuggestWidget.background": "#1b1511",
+      "editorSuggestWidget.border": "#33261d",
+      "editorSuggestWidget.selectedBackground": "#2b2018",
+      "editorHoverWidget.background": "#1b1511",
+      "editorHoverWidget.border": "#33261d",
+      "list.hoverBackground": "#211912",
+      "scrollbarSlider.background": "#c47b4522",
+      "scrollbarSlider.hoverBackground": "#c47b4540",
+    },
+  });
+
+  const models = {};
+  const modelFor = (name) => {
+    if (!models[name]) {
+      models[name] = monaco.editor.createModel(
+        project.files[name] ?? "",
+        undefined,
+        monaco.Uri.parse("file:///" + name),
+      );
+    }
+    return models[name];
+  };
+  for (const f of Object.keys(project.files)) modelFor(f);
+
+  const editor = monaco.editor.create(document.getElementById("ed-mount"), {
+    model: modelFor(project.current),
+    theme: "rusted-dark",
+    fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+    fontSize: 13,
+    minimap: { enabled: false },
+    automaticLayout: true,
+    scrollBeyondLastLine: false,
+    padding: { top: 10 },
+    fixedOverflowWidgets: true,
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => run());
 
   const save = () => {
-    project.files[project.current] = view.state.doc.toString();
+    for (const [name, model] of Object.entries(models)) {
+      project.files[name] = model.getValue();
+    }
     try { localStorage.setItem(STORE_KEY, JSON.stringify(project)); } catch {}
   };
 
-  // ---- editor ----
-  const extensions = [
-    basicSetup,
-    oneDark,
-    javascript({ typescript: true }),
-    keymap.of([
-      { key: "Mod-Enter", run: () => { run(); return true; } },
-      indentWithTab,
-    ]),
-  ];
-  const view = new EditorView({
-    state: EditorState.create({ doc: project.files[project.current], extensions }),
-    parent: document.getElementById("ed-mount"),
-  });
   window.__edApi = {
     setFile(name, text) {
-      // Replace the buffer first when targeting the open file — openFile
-      // would otherwise save the stale doc back over the new text.
-      if (name === project.current) {
-        view.setState(EditorState.create({ doc: text, extensions }));
-      }
       project.files[name] = text;
+      modelFor(name).setValue(text);
       renderTabs();
       save();
     },
-    project: () => project,
+    project: () => { save(); return project; },
     run: () => run(),
+    editor,
   };
 
   // ---- file list (vertical, left of the buffer) ----
   const tabs = document.getElementById("ed-files");
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
   function renderTabs() {
+    const entry = entryName();
     const names = Object.keys(project.files).sort((a, b) =>
-      a === ENTRY ? -1 : b === ENTRY ? 1 : a.localeCompare(b));
+      a === entry ? -1 : b === entry ? 1 : a.localeCompare(b));
     tabs.innerHTML =
       `<div class="mb-1 flex items-center justify-between px-1">` +
       `<span class="font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-copper/70">Files</span>` +
@@ -119,7 +202,7 @@
       `</div>` +
       names.map((f) => {
         const active = f === project.current;
-        const close = f === ENTRY ? "" :
+        const close = f === entry ? "" :
           `<span data-close="${esc(f)}" title="Delete file" class="ml-1 hidden shrink-0 cursor-pointer text-clay/50 hover:text-blood group-hover:inline">×</span>`;
         const ext = f.endsWith(".ts") ? "ts" : f.endsWith(".json") ? "{}" : "js";
         return `<button data-file="${esc(f)}" class="group flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left font-mono text-[11px] ${
@@ -129,8 +212,9 @@
   function openFile(name) {
     save();
     project.current = name;
-    view.setState(EditorState.create({ doc: project.files[name] ?? "", extensions }));
+    editor.setModel(modelFor(name));
     renderTabs();
+    editor.focus();
   }
   tabs.addEventListener("click", (e) => {
     const close = e.target.closest("[data-close]");
@@ -142,7 +226,8 @@
         .then((yes) => {
           if (!yes) return;
           delete project.files[name];
-          if (project.current === name) project.current = ENTRY;
+          if (models[name]) { models[name].dispose(); delete models[name]; }
+          if (project.current === name) project.current = entryName();
           openFile(project.current);
           save();
         });
@@ -150,7 +235,7 @@
     }
     if (e.target.closest("#ed-add")) {
       window.rustedDialog
-        .prompt({ title: "New file", message: "Import it from index.js with its relative path, e.g. ./lib.js", placeholder: "lib.js" })
+        .prompt({ title: "New file", message: "Import it from the entry with its relative path, e.g. ./lib.ts", placeholder: "lib.ts" })
         .then((name) => {
           if (!name) return;
           const clean = name.trim().replace(/^\.\//, "");
@@ -165,11 +250,40 @@
   });
   renderTabs();
 
+  // ---- lint badge: the language service's verdict across every file ----
+  const lint = document.getElementById("ed-lint");
+  function updateLint() {
+    const markers = monaco.editor
+      .getModelMarkers({})
+      .filter((m) => !m.resource.path.endsWith(".d.ts"));
+    const errors = markers.filter((m) => m.severity === monaco.MarkerSeverity.Error);
+    const warnings = markers.filter((m) => m.severity === monaco.MarkerSeverity.Warning);
+    if (errors.length) {
+      lint.className = "ml-1 font-mono text-[10px] text-blood";
+      lint.textContent = `● ${errors.length} error${errors.length > 1 ? "s" : ""}`;
+      lint.title = errors.slice(0, 5).map((m) =>
+        `${m.resource.path.slice(1)}:${m.startLineNumber} ${m.message}`).join("\n");
+    } else if (warnings.length) {
+      lint.className = "ml-1 font-mono text-[10px] text-copper";
+      lint.textContent = `● ${warnings.length} warning${warnings.length > 1 ? "s" : ""}`;
+      lint.title = warnings.slice(0, 5).map((m) =>
+        `${m.resource.path.slice(1)}:${m.startLineNumber} ${m.message}`).join("\n");
+    } else {
+      lint.className = "ml-1 font-mono text-[10px] text-sage";
+      lint.textContent = "✓ no problems";
+      lint.title = "Language-service diagnostics across all files";
+    }
+  }
+  monaco.editor.onDidChangeMarkers(updateLint);
+  setTimeout(updateLint, 1500);
+
+  document.getElementById("ed-format").addEventListener("click", () => {
+    editor.getAction("editor.action.formatDocument")?.run();
+  });
+
   // ---- output pane ----
   const out = document.getElementById("ed-out");
   const pretty = (text) => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; } };
-  // A live status feed: each phase and each npm package appends a line, so a
-  // slow bundle narrates itself instead of sitting on a spinner.
   let statusLines = [];
   const statusReset = () => { statusLines = []; };
   const pushStatus = (text) => {
@@ -275,22 +389,23 @@
     },
   };
 
-  const needsBundle = () =>
-    Object.keys(project.files).length > 1 ||
-    /(^|\n)\s*import[\s("']/.test(project.files[ENTRY]) ||
-    /(^|\n)\s*export\s+[^=]*\bfrom\s/.test(project.files[ENTRY]) ||
-    ENTRY !== "index.js";
+  const needsBundle = () => {
+    const entry = entryName();
+    return Object.keys(project.files).length > 1 ||
+      entry.endsWith(".ts") ||
+      /(^|\n)\s*import[\s("']/.test(project.files[entry]) ||
+      /(^|\n)\s*export\s+[^=]*\bfrom\s/.test(project.files[entry]);
+  };
 
-  /// The source the server should see: the entry as-is, or the bundle.
   async function prepare() {
     save();
-    if (!needsBundle()) return { code: project.files[ENTRY], note: "" };
+    if (!needsBundle()) return { code: project.files[entryName()], note: "" };
     announced.clear();
     await ensureEsbuild();
     pushStatus("building");
     const started = performance.now();
     const result = await window.esbuild.build({
-      entryPoints: [ENTRY],
+      entryPoints: [entryName()],
       bundle: true,
       write: false,
       format: "esm",
@@ -419,20 +534,9 @@
 </script>
 
 <style>
-  #ed-mount .cm-editor { height: 100%; font-size: 13px; }
-  #ed-mount .cm-editor.cm-focused { outline: none; }
-  #ed-mount .cm-scroller { font-family: "JetBrains Mono", ui-monospace, monospace; }
-  /* oneDark's syntax colors on the console's warm ground instead of its
-     cold blue-gray chrome. */
-  #ed-mount .cm-editor { background: #100d0b; }
-  #ed-mount .cm-gutters { background: #0b0908; border-right: 1px solid rgba(196, 123, 69, 0.13); color: #6b5748; }
-  #ed-mount .cm-activeLine { background: rgba(196, 123, 69, 0.07); }
-  #ed-mount .cm-activeLineGutter { background: rgba(196, 123, 69, 0.1); color: #c47b45; }
-  #ed-mount .cm-editor .cm-selectionBackground,
-  #ed-mount .cm-editor.cm-focused .cm-selectionBackground,
-  #ed-mount .cm-content ::selection { background: rgba(255, 107, 36, 0.18) !important; }
-  #ed-mount .cm-cursor { border-left-color: #ff6b24; }
-  #ed-mount .cm-tooltip { background: #1b1511; border: 1px solid #33261d; }
-  #ed-mount .cm-tooltip-autocomplete ul li[aria-selected] { background: rgba(255, 107, 36, 0.15); color: #f2eae3; }
-  #ed-mount .cm-panels { background: #15110e; color: #a99282; }
+  @font-face {
+    font-family: "codicon";
+    src: url("/assets/codicon.ttf") format("truetype");
+  }
+  #ed-mount .monaco-editor { outline: none; }
 </style>

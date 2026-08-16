@@ -7,6 +7,7 @@
     "@codemirror/theme-one-dark": "^6.1.2",
     "codemirror": "^6.0.1",
     "esbuild": "^0.24.0",
-    "esbuild-wasm": "^0.24.2"
+    "esbuild-wasm": "^0.24.2",
+    "monaco-editor": "^0.52.2"
   }
 }

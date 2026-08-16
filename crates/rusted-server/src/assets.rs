@@ -78,6 +78,38 @@ const ASSETS: &[Asset] = &[
         immutable: false,
     },
     Asset {
+        name: "editor.css",
+        bytes: include_bytes!("../assets/editor.css"),
+        content_type: "text/css; charset=utf-8",
+        immutable: false,
+    },
+    Asset {
+        name: "editor.worker.js",
+        bytes: include_bytes!("../assets/editor.worker.js"),
+        content_type: "text/javascript; charset=utf-8",
+        immutable: false,
+    },
+    Asset {
+        name: "ts.worker.js",
+        bytes: include_bytes!("../assets/ts.worker.js"),
+        content_type: "text/javascript; charset=utf-8",
+        immutable: false,
+    },
+    Asset {
+        name: "codicon.ttf",
+        bytes: include_bytes!("../assets/codicon.ttf"),
+        content_type: "font/ttf",
+        immutable: false,
+    },
+    Asset {
+        // The runtime's exact type surface, fed to the editor's TypeScript
+        // service so context/request are fully typed in the browser.
+        name: "rusted.d.ts",
+        bytes: include_bytes!("../../rusted-engine/rusted.d.ts"),
+        content_type: "text/plain; charset=utf-8",
+        immutable: false,
+    },
+    Asset {
         // esbuild's browser loader + wasm, vendored by `make editor-js` for
         // the editor's in-browser bundling. The wasm is 11MB in the binary
         // but lazy on the wire: the page fetches it only when a buffer

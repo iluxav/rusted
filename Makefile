@@ -77,8 +77,12 @@ release: ## Cut a patch release: bump crate versions, commit, tag, push
 	gh run watch "$$run_id" --exit-status; \
 	echo "v$$new published — deploy with .do/deploy.sh"
 
-editor-js: ## Rebuild the vendored editor assets (CodeMirror bundle + esbuild-wasm)
-	cd crates/rusted-server/editor && npm install --no-fund --no-audit && npx esbuild entry.js --bundle --minify --format=iife --outfile=../assets/editor.js
+editor-js: ## Rebuild the vendored editor assets (Monaco + workers + esbuild-wasm)
+	cd crates/rusted-server/editor && npm install --no-fund --no-audit
+	cd crates/rusted-server/editor && npx esbuild entry.js --bundle --minify --format=iife --outfile=../assets/editor.js --loader:.ttf=file '--asset-names=[name]'
+	cd crates/rusted-server/editor && npx esbuild node_modules/monaco-editor/esm/vs/editor/editor.worker.js --bundle --minify --outfile=../assets/editor.worker.js
+	cd crates/rusted-server/editor && npx esbuild node_modules/monaco-editor/esm/vs/language/typescript/ts.worker.js --bundle --minify --outfile=../assets/ts.worker.js
+	cd crates/rusted-server/editor && cp "$$(find node_modules/monaco-editor -name codicon.ttf | head -1)" ../assets/codicon.ttf
 	cd crates/rusted-server/editor && cp node_modules/esbuild-wasm/esbuild.wasm ../assets/esbuild.wasm && cp node_modules/esbuild-wasm/lib/browser.min.js ../assets/esbuild.min.js
 
 css: ## Recompile the Tailwind sheet inlined into every page (run after template edits)
