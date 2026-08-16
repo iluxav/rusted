@@ -43,6 +43,7 @@ fn boot() -> Harness {
                 require_auth: false,
                 host: "127.0.0.1".to_string(),
                 public_url: None,
+                db_dir: Some(dir.path().join("dbs")),
             })
             .await
         })

@@ -1263,6 +1263,8 @@ fn serve(
             require_auth,
             host,
             public_url,
+            // RUSTED_DB_DIR or ./rusted-dbs — resolved by the server.
+            db_dir: None,
         })
         .await
         .map_err(|e| format!("failed to start server: {e}"))?;

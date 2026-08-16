@@ -80,6 +80,7 @@ async fn boot_full(
         require_auth,
         host: "127.0.0.1".to_string(),
         public_url: None,
+        db_dir: Some(dir.path().join("dbs")),
     })
     .await
     .expect("server should start");
@@ -734,6 +735,7 @@ async fn sweeping_expired_runs_also_prunes_locks_and_records() {
         false,
         false,
         None,
+        std::env::temp_dir().join("rusted-test-dbs"),
     ));
     state.temp_runs.lock().unwrap().insert(
         "dead".into(),
@@ -2109,6 +2111,130 @@ async fn editor_page_never_shows_someone_elses_source() {
         body.contains("Hello, ${name"),
         "expected the blank scaffold"
     );
+}
+
+const DB_FN: &str = r#"export const config = { db: true };
+export default async function handler(request, context) {
+  await context.db.exec("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, title TEXT)");
+  const { title } = await request.json().catch(() => ({}));
+  if (title) await context.db.exec("INSERT INTO todos (title) VALUES (?)", [title]);
+  const rows = await context.db.query("SELECT id, title FROM todos ORDER BY id");
+  return context.json({ count: rows.length, rows });
+}"#;
+
+async fn call_fn(t: &TestServer, path: &str, body: &str) -> Value {
+    t.client
+        .post(t.data(path))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn db_capability_persists_across_invocations() {
+    let t = boot().await;
+    push(&t, "keeper", DB_FN).await;
+    let first = call_fn(&t, "/f/keeper", r#"{"title":"one"}"#).await;
+    assert_eq!(first["count"], 1, "{first}");
+    let second = call_fn(&t, "/f/keeper", r#"{"title":"two"}"#).await;
+    assert_eq!(second["count"], 2, "{second}");
+    assert_eq!(second["rows"][1]["title"], "two");
+    // Fresh sandboxes, same database: the data outlives every invocation.
+    let read_only = call_fn(&t, "/f/keeper", "{}").await;
+    assert_eq!(read_only["count"], 2);
+}
+
+#[tokio::test]
+async fn db_is_absent_without_the_declaration() {
+    let t = boot().await;
+    let source = r#"export default async function handler(request, context) {
+        return context.json({ has: typeof context.db });
+    }"#;
+    push(&t, "no-db", source).await;
+    let v = call_fn(&t, "/f/no-db", "{}").await;
+    assert_eq!(v["has"], "undefined");
+}
+
+#[tokio::test]
+async fn db_is_isolated_per_account_and_env() {
+    let t = boot().await;
+    push(&t, "mine", DB_FN).await;
+    call_fn(&t, "/f/mine", r#"{"title":"prod-row"}"#).await;
+
+    // Another account's function sees an empty database of its own.
+    let other = rusted_server::testsupport::seed_user(&t.pool).await;
+    let (_, other_key) = rusted_server::auth::create_key(&t.pool, other, "o")
+        .await
+        .unwrap();
+    let r = t
+        .client
+        .post(t.admin("/api/functions"))
+        .bearer_auth(&other_key)
+        .json(&json!({ "name": "theirs", "source": DB_FN }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = call_fn(&t, "/f/theirs", "{}").await;
+    assert_eq!(v["count"], 0, "{v}");
+
+    // A stage invocation of MY function sees stage's empty database.
+    rusted_server::secrets::create_env(&t.pool, t.user_id, "stage")
+        .await
+        .unwrap();
+    let v = call_fn(&t, "/f/@stage/mine", "{}").await;
+    assert_eq!(v["count"], 0, "{v}");
+    let v = call_fn(&t, "/f/mine", "{}").await;
+    assert_eq!(v["count"], 1);
+}
+
+#[tokio::test]
+async fn db_transaction_is_atomic() {
+    let t = boot().await;
+    let source = r#"export const config = { db: true };
+export default async function handler(request, context) {
+  await context.db.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)");
+  const { fail } = await request.json().catch(() => ({}));
+  let error = null;
+  try {
+    await context.db.transaction([
+      ["INSERT INTO t (v) VALUES (?)", ["a"]],
+      fail ? ["INSERT INTO t (v) VALUES (NULL)", []] : ["INSERT INTO t (v) VALUES (?)", ["b"]],
+    ]);
+  } catch (e) { error = e.message; }
+  const rows = await context.db.query("SELECT count(*) AS n FROM t");
+  return context.json({ n: rows[0].n, error });
+}"#;
+    push(&t, "txn", source).await;
+    let ok = call_fn(&t, "/f/txn", "{}").await;
+    assert_eq!(ok["n"], 2);
+    assert!(ok["error"].is_null());
+    // The failing batch must roll back entirely: count stays at 2.
+    let failed = call_fn(&t, "/f/txn", r#"{"fail":true}"#).await;
+    assert_eq!(failed["n"], 2, "{failed}");
+    assert!(failed["error"].as_str().unwrap().contains("NOT NULL"));
+}
+
+#[tokio::test]
+async fn db_refuses_attach_and_pragma() {
+    let t = boot().await;
+    let source = r#"export const config = { db: true };
+export default async function handler(request, context) {
+  const out = {};
+  try { await context.db.exec("ATTACH DATABASE '/tmp/x' AS other"); out.attach = "allowed"; }
+  catch (e) { out.attach = "blocked"; }
+  try { await context.db.exec("PRAGMA journal_mode = DELETE"); out.pragma = "allowed"; }
+  catch (e) { out.pragma = "blocked"; }
+  return context.json(out);
+}"#;
+    push(&t, "sneaky", source).await;
+    let v = call_fn(&t, "/f/sneaky", "{}").await;
+    assert_eq!(v["attach"], "blocked");
+    assert_eq!(v["pragma"], "blocked");
 }
 
 /// The security property of the admin section: to a signed-in account without

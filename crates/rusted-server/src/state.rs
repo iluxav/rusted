@@ -59,6 +59,8 @@ pub struct AppState {
     /// Object-storage bindings (`context.objects`): endpoint allowlist and
     /// the signing/HTTP machinery.
     pub objects: crate::objects::ObjectHost,
+    /// Per-(account, env) SQLite databases (`context.db`).
+    pub appdb: crate::appdb::DbHost,
     pub auth: AuthCaches,
     pub analytics: Recorder,
     /// In-process OpenTelemetry metrics: invocation counts and exec-time
@@ -195,6 +197,7 @@ impl Drop for ExecRuntime {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         pool: PgPool,
@@ -203,6 +206,7 @@ impl AppState {
         debug: bool,
         require_auth: bool,
         public_url: Option<String>,
+        db_dir: std::path::PathBuf,
     ) -> Self {
         let workers = worker_slots();
         Self {
@@ -210,6 +214,7 @@ impl AppState {
             secrets: crate::secrets::SecretStore::new(pool.clone()),
             fnstate: crate::fnstate::StateStore::new(pool.clone()),
             objects: crate::objects::ObjectHost::from_env(),
+            appdb: crate::appdb::DbHost::new(db_dir, pool.clone()),
             pool,
             auth: AuthCaches::default(),
             analytics,

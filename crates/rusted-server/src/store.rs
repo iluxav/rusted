@@ -67,6 +67,9 @@ pub struct FunctionRecord {
     /// Whether the module declared `config.state = true`.
     #[serde(default)]
     pub state: bool,
+    /// Whether the module declared `config.db = true`.
+    #[serde(default)]
+    pub db: bool,
     /// Declared object bindings (`config.objects`), as stored JSONB — secret
     /// NAMES only, never credentials.
     #[serde(default)]
@@ -88,6 +91,7 @@ pub struct Declared {
     pub secrets: Vec<String>,
     pub public: Option<bool>,
     pub state: bool,
+    pub db: bool,
     pub objects: std::collections::BTreeMap<String, rusted_engine::ObjectBinding>,
 }
 
@@ -97,6 +101,7 @@ impl Declared {
             secrets: config.secrets.clone(),
             public,
             state: config.wants_state(),
+            db: config.wants_db(),
             objects: config.objects.clone(),
         }
     }
@@ -130,6 +135,8 @@ pub struct Fetched {
     pub public: Option<bool>,
     /// Whether `context.state` was declared.
     pub state: bool,
+    /// Whether `context.db` was declared.
+    pub db: bool,
     /// Whether the owner has this function on the air.
     pub published: bool,
     /// Declared object bindings, parsed once here so the invocation path
@@ -288,12 +295,12 @@ impl Store {
         sqlx::query(
             "INSERT INTO functions
                  (name, current_rev, methods, path, user_id, kind, mcp, secrets, public,
-                  state, objects)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                  state, db, objects)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              ON CONFLICT (name) DO UPDATE
                  SET current_rev = $2, methods = $3, path = $4, updated_at = now(),
                      user_id = coalesce(functions.user_id, $5), kind = $6, mcp = $7,
-                     secrets = $8, public = $9, state = $10, objects = $11",
+                     secrets = $8, public = $9, state = $10, db = $11, objects = $12",
         )
         .bind(name)
         .bind(rev)
@@ -305,6 +312,7 @@ impl Store {
         .bind(declared.secrets.to_vec())
         .bind(declared.public)
         .bind(declared.state)
+        .bind(declared.db)
         .bind(objects)
         .execute(&mut *tx)
         .await?;
@@ -343,7 +351,7 @@ impl Store {
     pub async fn get(&self, name: &str) -> sqlx::Result<Option<FunctionRecord>> {
         let Some(function) = sqlx::query(
             "SELECT current_rev, methods, path, user_id, kind, mcp, secrets, public,
-                    state, objects, published
+                    state, db, objects, published
              FROM functions WHERE name = $1",
         )
         .bind(name)
@@ -379,6 +387,7 @@ impl Store {
             secrets: function.get("secrets"),
             public: function.get("public"),
             state: function.get("state"),
+            db: function.get("db"),
             objects: function.get("objects"),
             published: function.get("published"),
         }))
@@ -417,6 +426,7 @@ impl Store {
             secrets: record.secrets,
             public: record.public,
             state: record.state,
+            db: record.db,
             published: record.published,
             objects: record
                 .objects

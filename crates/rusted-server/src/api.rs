@@ -242,6 +242,8 @@ async fn execute_raw(
             grant.env_name.clone(),
             grant.objects.clone(),
             grant.allowance,
+            grant.caps.db,
+            std::time::Instant::now() + std::time::Duration::from_millis(limits.wall_ms),
         )) as Arc<dyn rusted_engine::HostServices>
     });
     // Handed to the execution runtime rather than run here: JavaScript between
@@ -446,6 +448,7 @@ pub(crate) async fn grant_for_function(
         env,
         caps: rusted_engine::Capabilities {
             state: fetched.state,
+            db: fetched.db,
             objects: fetched.objects.keys().cloned().collect(),
             auth: None,
             env_name: Some(env_name.to_string()),

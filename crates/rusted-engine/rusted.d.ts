@@ -65,6 +65,27 @@ declare namespace Rusted {
     get<T = unknown>(name: string): Promise<T[]>;
   }
 
+  /** The account database (`context.db`): parameterized SQL over SQLite. */
+  interface Db {
+    /** Rows as objects keyed by column name. Refuses >10k rows — add LIMIT. */
+    query<T = Record<string, unknown>>(
+      sql: string,
+      params?: (string | number | boolean | null)[],
+    ): Promise<T[]>;
+    /** Statements that don't return rows. */
+    exec(
+      sql: string,
+      params?: (string | number | boolean | null)[],
+    ): Promise<{ changes: number; lastInsertRowid: number }>;
+    /**
+     * An atomic batch: every statement applies or none. Deliberately not a
+     * callback — nothing may hold the database lock across an await.
+     */
+    transaction(
+      statements: [string, (string | number | boolean | null)[]][],
+    ): Promise<{ changes: number }>;
+  }
+
   /** One durable state entry. */
   interface StateEntry<T = unknown> {
     key: string;
@@ -266,6 +287,13 @@ declare namespace Rusted {
      */
     state?: State;
     /**
+     * The account's SQLite database, present only when the module declares
+     * `config.db = true`. Shared across the account's functions; scoped per
+     * environment. Plain parameterized SQL; params are strings, numbers,
+     * booleans, or null.
+     */
+    db?: Db;
+    /**
      * Object-storage bindings declared in `config.objects`, by name.
      * Present only for declared bindings the host supplies.
      */
@@ -292,6 +320,12 @@ declare namespace Rusted {
     secrets?: string[];
     /** Durable state. Must be exactly `true` when present. */
     state?: true;
+    /**
+     * The account's SQL database (`context.db`), shared across all of the
+     * account's functions and scoped per environment. Must be exactly
+     * `true` when present.
+     */
+    db?: true;
     /** Object-storage bindings by name (`[A-Z][A-Z0-9_]{0,63}`). */
     objects?: Record<string, ObjectBindingConfig>;
   }
@@ -439,6 +473,13 @@ declare namespace Rusted {
      * `config.state = true` and the host supplies it.
      */
     state?: State;
+    /**
+     * The account's SQLite database, present only when the module declares
+     * `config.db = true`. Shared across the account's functions; scoped per
+     * environment. Plain parameterized SQL; params are strings, numbers,
+     * booleans, or null.
+     */
+    db?: Db;
     /**
      * Object-storage bindings declared in `config.objects`, by name.
      * Present only for declared bindings the host supplies.

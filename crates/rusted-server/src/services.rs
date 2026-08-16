@@ -30,9 +30,14 @@ pub struct OwnerScopedServices {
     /// Declared bindings, from the stored record.
     objects: BTreeMap<String, rusted_engine::ObjectBinding>,
     allowance: StateAllowance,
+    /// Whether the module declared `config.db` — undeclared stays absent.
+    db: bool,
+    /// The invocation's wall deadline; bounds SQL exactly like JavaScript.
+    deadline: std::time::Instant,
 }
 
 impl OwnerScopedServices {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<AppState>,
         user_id: Uuid,
@@ -40,6 +45,8 @@ impl OwnerScopedServices {
         env: String,
         objects: BTreeMap<String, rusted_engine::ObjectBinding>,
         allowance: StateAllowance,
+        db: bool,
+        deadline: std::time::Instant,
     ) -> Self {
         Self {
             state,
@@ -48,6 +55,8 @@ impl OwnerScopedServices {
             env,
             objects,
             allowance,
+            db,
+            deadline,
         }
     }
 }
@@ -202,6 +211,21 @@ async fn run_object_op(
 }
 
 impl rusted_engine::HostServices for OwnerScopedServices {
+    fn db_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.db {
+                return Err("this function does not declare config.db".to_string());
+            }
+            self.state
+                .appdb
+                .run(self.user_id, &self.env, op_json, self.deadline)
+                .await
+        })
+    }
+
     fn inbox_get(
         &self,
         name: String,

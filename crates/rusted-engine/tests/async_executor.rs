@@ -534,6 +534,7 @@ export default async function handler(request, context) {
 }"#;
     let caps = Capabilities {
         state: true,
+        db: false,
         objects: vec!["SHARES".to_string()],
         auth: None,
         env_name: None,

@@ -200,6 +200,10 @@ pub struct RuntimeConfig {
     /// `true` when present — `state: false` is a contradiction worth refusing.
     #[serde(default)]
     pub state: Option<bool>,
+    /// The account's SQL database (`context.db`). Optional, and must be
+    /// exactly `true` when present, like `state`.
+    #[serde(default)]
+    pub db: Option<bool>,
     /// Object-storage bindings (`context.objects.<NAME>`), keyed by binding
     /// name.
     #[serde(default)]
@@ -209,6 +213,10 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     pub fn wants_state(&self) -> bool {
         self.state == Some(true)
+    }
+
+    pub fn wants_db(&self) -> bool {
+        self.db == Some(true)
     }
 }
 
@@ -287,6 +295,9 @@ fn vet_runtime_config(config: &RuntimeConfig) -> Result<(), String> {
     if config.state == Some(false) {
         return Err("config.state must be exactly true when present — omit it instead".to_string());
     }
+    if config.db == Some(false) {
+        return Err("config.db must be exactly true when present — omit it instead".to_string());
+    }
     if config.objects.len() > MAX_OBJECT_BINDINGS {
         return Err(format!(
             "too many object bindings: {} (max {MAX_OBJECT_BINDINGS})",
@@ -348,6 +359,8 @@ fn vet_runtime_config(config: &RuntimeConfig) -> Result<(), String> {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Capabilities {
     pub state: bool,
+    /// The account database, granted when the module declared `config.db`.
+    pub db: bool,
     pub objects: Vec<String>,
     /// Sanitized, host-verified MCP caller identity. Never accepts raw tokens.
     pub auth: Option<serde_json::Value>,
@@ -365,6 +378,7 @@ impl Capabilities {
     pub fn from_config(config: &RuntimeConfig) -> Self {
         Self {
             state: config.wants_state(),
+            db: config.wants_db(),
             objects: config.objects.keys().cloned().collect(),
             auth: None,
             env_name: None,
@@ -382,12 +396,17 @@ impl Capabilities {
     }
 
     fn to_glue_json(&self) -> String {
-        if !self.state && self.objects.is_empty() && self.auth.is_none() && self.env_name.is_none()
+        if !self.state
+            && !self.db
+            && self.objects.is_empty()
+            && self.auth.is_none()
+            && self.env_name.is_none()
         {
             return String::new();
         }
         serde_json::json!({
             "state": self.state,
+            "db": self.db,
             "objects": self.objects,
             "auth": self.auth,
             "currentEnv": self.env_name,
@@ -529,7 +548,7 @@ const CAPS_PRELUDE: &str = r#"(() => {
     };
   };
   globalThis.__rustedCaps = (capsJson) => {
-    if (!capsJson) return { state: undefined, objects: undefined, auth: undefined, currentEnv: undefined };
+    if (!capsJson) return { state: undefined, db: undefined, objects: undefined, auth: undefined, currentEnv: undefined };
     const caps = JSON.parse(capsJson);
     const parse = (raw) => {
       const r = JSON.parse(raw);
@@ -546,6 +565,12 @@ const CAPS_PRELUDE: &str = r#"(() => {
         stateOp({ op: "delete", key: String(key), expectedVersion }),
       list: (options) => stateOp({ op: "list", ...(options || {}) }),
     } : undefined;
+    const dbOp = async (op) => parse(await globalThis.__rustedDbOp(JSON.stringify(op)));
+    const db = caps.db ? {
+      query: async (sql, params) => (await dbOp({ op: "query", sql: String(sql), params: params || [] })).rows,
+      exec: (sql, params) => dbOp({ op: "exec", sql: String(sql), params: params || [] }),
+      transaction: (statements) => dbOp({ op: "transaction", statements: statements || [] }),
+    } : undefined;
     const objects = caps.objects && caps.objects.length
       ? Object.fromEntries(caps.objects.map((b) => [b, {
           presignPut: (key, options) =>
@@ -557,7 +582,7 @@ const CAPS_PRELUDE: &str = r#"(() => {
           list: (options) => objectOp(b, { op: "list", ...(options || {}) }),
         }]))
       : undefined;
-    return { state, objects, auth: caps.auth || undefined, currentEnv: caps.currentEnv || undefined };
+    return { state, db, objects, auth: caps.auth || undefined, currentEnv: caps.currentEnv || undefined };
   };
 })()"#;
 
@@ -658,6 +683,7 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
     // Present only when declared via `export const config` and supplied by
     // the host — an undeclared capability is absent, not broken.
     state: caps.state,
+    db: caps.db,
     objects: caps.objects,
     // Which environment this invocation resolved through ("prod" unless the
     // URL said otherwise; "local" under rusted run).
@@ -726,6 +752,7 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
     // Present only when declared via `export const config` and supplied by
     // the host — an undeclared capability is absent, not broken.
     state: caps.state,
+    db: caps.db,
     objects: caps.objects,
     auth: caps.auth,
     // Which environment this invocation resolved through ("prod" unless the
@@ -1173,6 +1200,17 @@ pub trait HostServices: Send + Sync {
         Box::pin(async { Err("object storage is not available on this host".to_string()) })
     }
 
+    /// One `context.db` operation against the owner's per-(account, env)
+    /// SQLite database, JSON in and out. Scoped like state: the
+    /// implementation carries the owner and environment, never the request.
+    fn db_op(
+        &self,
+        op_json: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        let _ = op_json;
+        Box::pin(async { Err("a database is not available on this host".to_string()) })
+    }
+
     /// One `context.seal`/`context.open` operation: authenticated encryption
     /// performed host-side, keyed by one of the owner's vault secrets — the
     /// key material never enters JavaScript.
@@ -1280,6 +1318,24 @@ fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Res
     .map_err(|e| exception_message(ctx, e))?;
     ctx.globals()
         .set("__rustedObjectOp", object_native)
+        .map_err(|e| exception_message(ctx, e))?;
+
+    let db_services = services.clone();
+    let db_native = Function::new(
+        ctx.clone(),
+        rquickjs::function::Async(move |op_json: String| {
+            let services = db_services.clone();
+            async move {
+                match services.db_op(op_json).await {
+                    Ok(result) => result,
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                }
+            }
+        }),
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedDbOp", db_native)
         .map_err(|e| exception_message(ctx, e))?;
 
     let seal_native = Function::new(

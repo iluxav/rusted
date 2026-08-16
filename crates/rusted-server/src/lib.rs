@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 pub mod analytics;
 pub mod api;
+pub mod appdb;
 pub mod assets;
 pub mod auth;
 pub mod bundler;
@@ -58,6 +59,9 @@ pub struct ServerConfig {
     /// The origin callers reach this server on, when that isn't the bound
     /// socket — behind a proxy, every URL we print comes from here.
     pub public_url: Option<String>,
+    /// Where per-account SQLite databases live (`context.db`). None uses
+    /// `RUSTED_DB_DIR`, falling back to ./rusted-dbs.
+    pub db_dir: Option<std::path::PathBuf>,
 }
 
 /// A running server. Both listeners stop when this is dropped.
@@ -93,6 +97,11 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .map_err(|e| db_error(&config.database_url, e))?;
     let store = Store::new(pool.clone());
     let (recorder, analytics_writer) = analytics::start(pool.clone());
+    let db_dir = config.db_dir.clone().unwrap_or_else(|| {
+        std::env::var_os("RUSTED_DB_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("rusted-dbs"))
+    });
     let state = Arc::new(AppState::new(
         store,
         pool.clone(),
@@ -101,6 +110,7 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         config.debug,
         config.require_auth,
         config.public_url.clone(),
+        db_dir,
     ));
 
     let host = config.host.as_str();
