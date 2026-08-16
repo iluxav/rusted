@@ -144,7 +144,18 @@
   // ---- output pane ----
   const out = document.getElementById("ed-out");
   const pretty = (text) => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; } };
-  const busy = (label) => { out.innerHTML = `<p class="text-clay/60">${esc(label)}…</p>`; };
+  // A live status feed: each phase and each npm package appends a line, so a
+  // slow bundle narrates itself instead of sitting on a spinner.
+  let statusLines = [];
+  const statusReset = () => { statusLines = []; };
+  const pushStatus = (text) => {
+    statusLines.push(text);
+    out.innerHTML = statusLines
+      .map((line, i) => `<div class="${i === statusLines.length - 1 ? "text-clay" : "text-clay/50"}">` +
+        `<span class="mr-1.5 text-copper">${i === statusLines.length - 1 ? "⟳" : "✓"}</span>${esc(line)}</div>`)
+      .join("");
+  };
+  const busy = (label) => pushStatus(label);
   const logsHtml = (logs) => (logs || []).map((l) =>
     `<div class="text-clay/80"><span class="mr-1 text-copper">[${esc(l.level)}]</span>${esc(l.message)}</div>`
   ).join("");
@@ -156,6 +167,7 @@
   let esbuildReady = null;
   function ensureEsbuild() {
     if (!esbuildReady) {
+      pushStatus("loading bundler (first use)");
       esbuildReady = new Promise((resolve, reject) => {
         const s = document.createElement("script");
         s.src = "/assets/esbuild.min.js";
@@ -168,6 +180,11 @@
   }
 
   const moduleCache = new Map();
+  const announced = new Set();
+  const packageOf = (url) => {
+    const segments = new URL(url).pathname.split("/").filter(Boolean);
+    return segments.find((seg) => seg.includes("@")) || segments[0] || url;
+  };
   async function fetchModule(url) {
     if (moduleCache.has(url)) return moduleCache.get(url);
     let cache = null;
@@ -175,6 +192,11 @@
     if (cache) {
       const hit = await cache.match(url);
       if (hit) { const text = await hit.text(); moduleCache.set(url, text); return text; }
+    }
+    const name = packageOf(url);
+    if (!announced.has(name)) {
+      announced.add(name);
+      pushStatus(`installing ${name}`);
     }
     const r = await fetch(url);
     if (!r.ok) throw new Error(`npm fetch failed: ${url} → ${r.status}`);
@@ -239,7 +261,9 @@
   async function prepare() {
     save();
     if (!needsBundle()) return { code: project.files[ENTRY], note: "" };
+    announced.clear();
     await ensureEsbuild();
+    pushStatus("building");
     const started = performance.now();
     const result = await window.esbuild.build({
       entryPoints: [ENTRY],
@@ -275,6 +299,7 @@
   };
 
   async function run() {
+    statusReset();
     busy("bundling");
     let built;
     try { built = await prepare(); } catch (e) { bundleError(e); return; }
@@ -303,6 +328,7 @@
   }
 
   async function verify() {
+    statusReset();
     busy("bundling");
     let built;
     try { built = await prepare(); } catch (e) { bundleError(e); return; }
@@ -316,6 +342,7 @@
   }
 
   async function push() {
+    statusReset();
     busy("bundling");
     let built;
     try { built = await prepare(); } catch (e) { bundleError(e); return; }
