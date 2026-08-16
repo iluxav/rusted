@@ -1,0 +1,201 @@
+<div id="database-page" class="page-wrap mx-auto max-w-5xl px-10 py-10">
+  <div class="mb-8">
+    <p class="eyebrow mb-2">Runtime / data</p>
+    <h1 class="page-title">Database</h1>
+    <p class="mt-2 text-sm text-clay">One SQLite database per environment, shared by every function that declares <span class="font-mono text-cream/80">config.db</span>. Queries here run under the same guardrails as function SQL.</p>
+  </div>
+
+  <div class="mb-6 flex flex-wrap items-center gap-2">
+    {% for e in envs %}
+    <a hx-get="/console/database?env={{ e }}" hx-target="#content" hx-swap="innerHTML" hx-push-url="true" href="/console/database?env={{ e }}"
+       class="cursor-pointer rounded-full border px-3.5 py-1.5 font-mono text-[11px] {% if e == env.as_str() %}border-ember/40 bg-ember/10 text-ember{% else %}border-copper/15 text-clay hover:border-copper/40 hover:text-cream{% endif %}">
+      @{{ e }}
+    </a>
+    {% endfor %}
+    <span class="ml-auto font-mono text-[10px] text-clay/60">{{ size_label }} of {{ cap_label }}</span>
+  </div>
+
+  <div class="grid gap-6 lg:grid-cols-[1fr_1.2fr]">
+    <div>
+      <h2 class="mb-3 font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-copper/70">Tables</h2>
+      <div class="surface overflow-hidden rounded-xl">
+        <div id="db-tables" class="divide-y divide-copper/[0.07]">
+          <p class="px-5 py-6 text-center font-mono text-[11px] text-clay/60">loading…</p>
+        </div>
+      </div>
+
+      <h2 class="mb-3 mt-8 font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-copper/70">New table</h2>
+      <div class="surface rounded-xl px-5 py-4">
+        <input id="wz-name" spellcheck="false" autocomplete="off" placeholder="table name"
+               class="field mb-3 w-full px-3 py-2 font-mono text-[12px] text-cream">
+        <div id="wz-cols" class="flex flex-col gap-2"></div>
+        <button id="wz-add" class="mt-2 rounded-md px-2 py-1 text-left font-mono text-[11px] text-copper hover:text-ember">+ add column</button>
+        <!-- The wizard is a visible SQL generator: this is exactly what Create runs. -->
+        <pre id="wz-sql" class="mt-3 overflow-x-auto whitespace-pre-wrap rounded-lg border border-copper/10 bg-rust-950/60 px-3 py-2 font-mono text-[11px] text-clay"></pre>
+        <button id="wz-create" class="btn-primary mt-3 px-4 py-2 text-sm">Create table</button>
+      </div>
+    </div>
+
+    <div>
+      <h2 class="mb-3 font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-copper/70">SQL</h2>
+      <div class="surface rounded-xl px-5 py-4">
+        <textarea id="sql-box" rows="4" spellcheck="false" placeholder="SELECT * FROM …"
+                  class="field w-full px-3 py-2 font-mono text-[12px] text-cream"></textarea>
+        <div class="mt-2 flex items-center gap-2">
+          <button id="sql-run" class="btn-primary px-4 py-2 text-sm">Run</button>
+          <span class="font-mono text-[10px] text-clay/50">⌘⏎ runs · same authorizer and deadline as function SQL</span>
+        </div>
+      </div>
+      <div id="db-out" class="surface mt-4 overflow-x-auto rounded-xl px-5 py-4 font-mono text-[12px] leading-relaxed text-clay">
+        <p class="text-clay/60">results appear here</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const ENV = "{{ env }}";
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  const out = document.getElementById("db-out");
+
+  const runSql = async (sql) => {
+    const r = await fetch("/console/database/sql", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ env: ENV, sql }),
+    });
+    if (r.status === 401) throw new Error("session expired — sign in again");
+    const v = await r.json();
+    if (v.error) throw new Error(v.error);
+    return v;
+  };
+
+  const renderRows = (rows) => {
+    if (!rows.length) return `<p class="text-clay/60">no rows</p>`;
+    const cols = Object.keys(rows[0]);
+    return `<table class="w-full font-mono text-[11px]"><thead><tr class="border-b border-copper/[0.07] text-left text-[9px] uppercase tracking-wider text-clay/60">` +
+      cols.map((c) => `<th class="px-2 py-1.5 font-normal">${esc(c)}</th>`).join("") +
+      `</tr></thead><tbody>` +
+      rows.map((row) => `<tr class="border-b border-copper/[0.07] last:border-0">` +
+        cols.map((c) => `<td class="px-2 py-1.5 text-cream/90">${esc(row[c] === null ? "∅" : row[c])}</td>`).join("") +
+        `</tr>`).join("") +
+      `</tbody></table>`;
+  };
+
+  const showResult = (v) => {
+    if (v.rows) out.innerHTML = renderRows(v.rows);
+    else out.innerHTML = `<p class="text-sage">✓ ok${v.changes !== undefined ? ` — ${v.changes} change${v.changes === 1 ? "" : "s"}` : ""}</p>`;
+  };
+  const showError = (e) => { out.innerHTML = `<p class="text-blood">✗ ${esc(e.message)}</p>`; };
+
+  // ---- tables list ----
+  const quote = (name) => `"${String(name).replace(/"/g, '""')}"`;
+  async function refreshTables() {
+    const el = document.getElementById("db-tables");
+    try {
+      const v = await runSql("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+      if (!v.rows.length) {
+        el.innerHTML = `<p class="px-5 py-6 text-center font-mono text-[11px] text-clay/60">no tables yet — create one below</p>`;
+        return;
+      }
+      const counts = await Promise.all(v.rows.map(async (t) => {
+        try { return (await runSql(`SELECT count(*) AS n FROM ${quote(t.name)}`)).rows[0].n; }
+        catch { return "?"; }
+      }));
+      el.innerHTML = v.rows.map((t, i) =>
+        `<div class="px-5 py-3">
+           <div class="flex items-center justify-between gap-2">
+             <button data-browse="${esc(t.name)}" class="min-w-0 truncate text-left font-mono text-[12px] text-cream hover:text-ember" title="Browse first 50 rows">${esc(t.name)}</button>
+             <span class="shrink-0 font-mono text-[10px] text-clay/50">${counts[i]} rows</span>
+             <button data-drop="${esc(t.name)}" title="Drop table" class="shrink-0 font-mono text-[11px] text-clay/40 hover:text-blood">×</button>
+           </div>
+           <pre class="mt-1 hidden overflow-x-auto whitespace-pre-wrap font-mono text-[10px] text-clay/60" data-schema="${esc(t.name)}">${esc(t.sql)}</pre>
+         </div>`).join("");
+    } catch (e) { el.innerHTML = `<p class="px-5 py-4 font-mono text-[11px] text-blood">${esc(e.message)}</p>`; }
+  }
+  document.getElementById("db-tables").addEventListener("click", async (e) => {
+    const browse = e.target.closest("[data-browse]");
+    if (browse) {
+      const name = browse.dataset.browse;
+      document.querySelector(`[data-schema="${CSS.escape(name)}"]`)?.classList.toggle("hidden");
+      try { showResult(await runSql(`SELECT * FROM ${quote(name)} LIMIT 50`)); } catch (err) { showError(err); }
+      return;
+    }
+    const drop = e.target.closest("[data-drop]");
+    if (drop) {
+      const name = drop.dataset.drop;
+      const yes = await window.rustedDialog.confirm({
+        title: `Drop ${name}?`,
+        message: "The table and every row in it are deleted. There is no undo.",
+        danger: true,
+        confirmLabel: "Drop table",
+      });
+      if (!yes) return;
+      try { showResult(await runSql(`DROP TABLE ${quote(name)}`)); refreshTables(); } catch (err) { showError(err); }
+    }
+  });
+
+  // ---- create-table wizard: a visible SQL generator ----
+  const cols = document.getElementById("wz-cols");
+  const TYPES = ["TEXT", "INTEGER", "REAL", "BLOB", "BOOLEAN", "TIMESTAMP"];
+  const colRow = () => {
+    const row = document.createElement("div");
+    row.className = "flex items-center gap-2";
+    row.innerHTML =
+      `<input data-col-name spellcheck="false" autocomplete="off" placeholder="column"
+              class="field min-w-0 flex-1 px-3 py-1.5 font-mono text-[11px] text-cream">` +
+      `<select data-col-type class="field px-2 py-1.5 font-mono text-[11px] text-cream">` +
+      TYPES.map((t) => `<option>${t}</option>`).join("") + `</select>` +
+      `<label class="flex items-center gap-1 font-mono text-[10px] text-clay"><input type="checkbox" data-col-unique> unique</label>` +
+      `<button data-col-rm class="font-mono text-[11px] text-clay/40 hover:text-blood" title="Remove column">×</button>`;
+    return row;
+  };
+  const preview = () => {
+    const name = document.getElementById("wz-name").value.trim();
+    const lines = ["  id INTEGER PRIMARY KEY"];
+    for (const row of cols.children) {
+      const col = row.querySelector("[data-col-name]").value.trim();
+      if (!col) continue;
+      const type = row.querySelector("[data-col-type]").value;
+      const unique = row.querySelector("[data-col-unique]").checked ? " UNIQUE" : "";
+      lines.push(`  ${quote(col)} ${type}${unique}`);
+    }
+    const sql = `CREATE TABLE ${name ? quote(name) : "…"} (\n${lines.join(",\n")}\n)`;
+    document.getElementById("wz-sql").textContent = sql;
+    return name ? sql : null;
+  };
+  document.getElementById("wz-add").addEventListener("click", () => { cols.appendChild(colRow()); preview(); });
+  document.getElementById("database-page").addEventListener("input", preview);
+  cols.addEventListener("click", (e) => {
+    if (e.target.closest("[data-col-rm]")) { e.target.closest("div").remove(); preview(); }
+  });
+  document.getElementById("wz-create").addEventListener("click", async () => {
+    const sql = preview();
+    if (!sql) { showError(new Error("give the table a name")); return; }
+    try {
+      showResult(await runSql(sql));
+      document.getElementById("wz-name").value = "";
+      cols.innerHTML = "";
+      preview();
+      refreshTables();
+    } catch (e) { showError(e); }
+  });
+
+  // ---- raw SQL ----
+  const box = document.getElementById("sql-box");
+  const run = async () => {
+    const sql = box.value.trim();
+    if (!sql) return;
+    try { showResult(await runSql(sql)); refreshTables(); } catch (e) { showError(e); }
+  };
+  document.getElementById("sql-run").addEventListener("click", run);
+  box.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+  });
+
+  cols.appendChild(colRow());
+  preview();
+  refreshTables();
+})();
+</script>

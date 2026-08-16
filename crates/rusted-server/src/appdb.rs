@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 /// v1 size cap for every plan; becomes a per-plan limit once plan versioning
 /// carries it (plans are immutable rows, so a new limit means new versions).
-const DB_MAX_BYTES: i64 = 64 * 1024 * 1024;
+pub const DB_MAX_BYTES: i64 = 64 * 1024 * 1024;
 const PAGE_SIZE: i64 = 4096;
 /// Progress-handler granularity: check the deadline every N VM ops.
 const PROGRESS_OPS: i32 = 4_000;
@@ -126,6 +126,15 @@ impl DbHost {
             .unwrap()
             .insert((owner, env.to_string()), handle.clone());
         Ok(handle)
+    }
+
+    /// Bytes on disk for (owner, env)'s database — 0 when it doesn't exist
+    /// yet. Includes the WAL, which is where recent writes live.
+    pub fn size_on_disk(&self, owner: Uuid, env: &str) -> u64 {
+        let base = self.dir.join(format!("{owner}-{env}.sqlite"));
+        let wal = self.dir.join(format!("{owner}-{env}.sqlite-wal"));
+        let len = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        len(&base) + len(&wal)
     }
 
     /// Takes or refreshes the (owner, env) lease; refuses if another live

@@ -1792,6 +1792,7 @@ async fn every_console_page_renders() {
         "/console/editor?name=greet",
         "/console/editor?name=does-not-exist",
         "/console/editor?kind=mcp",
+        "/console/database",
         "/console/billing",
         "/console/checkout/pro",
         "/console/function/greet",
@@ -2065,6 +2066,45 @@ async fn sidebar_fragment_reflects_a_fresh_editor_push() {
         after.contains("fresh-fn"),
         "fragment must list the new function"
     );
+}
+
+#[tokio::test]
+async fn console_database_runs_sql_with_a_session() {
+    let t = boot().await;
+    let session = rusted_server::auth::create_session(&t.pool, t.user_id)
+        .await
+        .unwrap();
+    let cookie = format!("rusted_session={session}");
+    let sql = |body: serde_json::Value| editor_post(&t, &cookie, "/console/database/sql", body);
+    let r = sql(json!({ "sql": "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)" })).await;
+    let v: Value = r.json().await.unwrap();
+    assert!(v.get("error").is_none(), "{v}");
+    let r = sql(json!({ "sql": "INSERT INTO notes (body) VALUES ('from console')" })).await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["changes"], 1, "{v}");
+    let r = sql(json!({ "sql": "SELECT body FROM notes" })).await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["rows"][0]["body"], "from console");
+
+    // The console shares the function's database — a db function sees the row.
+    let reader = r#"export const config = { db: true };
+export default async function handler(request, context) {
+  const rows = await context.db.query("SELECT body FROM notes");
+  return context.json({ body: rows[0].body });
+}"#;
+    push(&t, "reader", reader).await;
+    let v = call_fn(&t, "/f/reader", "{}").await;
+    assert_eq!(v["body"], "from console");
+
+    // No session → JSON 401, like the editor endpoints.
+    let r = editor_post(
+        &t,
+        "rusted_session=bogus",
+        "/console/database/sql",
+        json!({ "sql": "SELECT 1" }),
+    )
+    .await;
+    assert_eq!(r.status(), 401);
 }
 
 #[tokio::test]

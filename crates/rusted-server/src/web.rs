@@ -130,6 +130,8 @@ pub fn router(state: WebState) -> Router {
             get(page_function).delete(function_delete),
         )
         .route("/console/function/{name}/published", post(function_publish))
+        .route("/console/database", get(page_database))
+        .route("/console/database/sql", post(database_sql))
         .route("/console/editor", get(page_editor))
         .route("/console/nav/functions", get(nav_functions))
         .route("/console/editor/run", post(editor_run))
@@ -1927,7 +1929,9 @@ fn split_user_code(source: &str) -> (&str, usize) {
 }
 
 fn pretty_size(bytes: usize) -> String {
-    if bytes >= 1024 {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{bytes} bytes")
@@ -2220,6 +2224,88 @@ async fn run_test(
         .expect("result renders"),
     )
     .into_response()
+}
+
+// ---------------------------------------------------------------- database
+
+#[derive(Template)]
+#[template(path = "database.html")]
+struct DatabaseT {
+    envs: Vec<String>,
+    env: String,
+    size_label: String,
+    cap_label: String,
+}
+
+async fn page_database(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Query(query): Query<EnvQuery>,
+) -> Response {
+    let user = match require_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(redirect) => return redirect,
+    };
+    let envs = crate::secrets::list_envs(&state.0.app.pool, user.id).await;
+    let env = query
+        .env
+        .filter(|e| envs.iter().any(|known| known == e))
+        .unwrap_or_else(|| crate::secrets::PROD_ENV.to_string());
+    let size = state.0.app.appdb.size_on_disk(user.id, &env);
+    let inner = DatabaseT {
+        envs,
+        env,
+        size_label: pretty_size(size as usize),
+        cap_label: pretty_size(crate::appdb::DB_MAX_BYTES as usize),
+    }
+    .render()
+    .expect("database renders");
+    console_page(&state, &headers, &user, "database", inner).await
+}
+
+#[derive(Deserialize)]
+struct DatabaseSqlBody {
+    #[serde(default)]
+    env: Option<String>,
+    sql: String,
+}
+
+/// The console's SQL runner: session-authenticated, same authorizer and a
+/// bounded deadline — the console can do nothing a function couldn't.
+async fn database_sql(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<DatabaseSqlBody>,
+) -> Response {
+    let user = match editor_user(&state, &headers).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let env = req
+        .env
+        .unwrap_or_else(|| crate::secrets::PROD_ENV.to_string());
+    if env != crate::secrets::PROD_ENV
+        && !crate::secrets::env_exists(&state.0.app.pool, user.id, &env).await
+    {
+        return axum::Json(serde_json::json!({ "error": "no such environment" })).into_response();
+    }
+    // SELECT-shaped statements return rows; everything else reports changes —
+    // so the console shows "✓ ok — 1 change" for DDL instead of an empty grid.
+    let head = req.sql.trim_start().to_lowercase();
+    let is_query = ["select", "with", "values", "explain"]
+        .iter()
+        .any(|k| head.starts_with(k));
+    let op = serde_json::json!({
+        "op": if is_query { "query" } else { "exec" },
+        "sql": req.sql,
+        "params": [],
+    })
+    .to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    match state.0.app.appdb.run(user.id, &env, op, deadline).await {
+        Ok(result) => Html(result).into_response(),
+        Err(message) => axum::Json(serde_json::json!({ "error": message })).into_response(),
+    }
 }
 
 // ------------------------------------------------------------------ editor
