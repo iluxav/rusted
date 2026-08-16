@@ -178,6 +178,18 @@ fn open_configured(path: &std::path::Path) -> Result<Connection, String> {
     }
     conn.busy_timeout(Duration::from_millis(250))
         .map_err(|e| format!("db setup (busy_timeout): {e}"))?;
+    // A curated SQL function, registered on every connection the platform
+    // opens: SQLite has no native uuid(), and the wizard's UUID primary keys
+    // are `TEXT PRIMARY KEY DEFAULT (uuid())`. Inserts relying on that
+    // default need a connection with the function — i.e. ours; external
+    // tools can read the file freely and must supply ids when writing.
+    conn.create_scalar_function(
+        "uuid",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+        |_| Ok(uuid::Uuid::new_v4().to_string()),
+    )
+    .map_err(|e| format!("db setup (uuid): {e}"))?;
     // Installed after our own pragmas: tenant SQL cannot re-attach, load
     // extensions, or flip journal/sync settings out from under the host.
     conn.authorizer(Some(

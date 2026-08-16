@@ -28,6 +28,13 @@
       <div class="surface rounded-xl px-5 py-4">
         <input id="wz-name" spellcheck="false" autocomplete="off" placeholder="table name"
                class="field mb-3 w-full px-3 py-2 font-mono text-[12px] text-cream">
+        <div class="mb-2 flex items-center gap-2">
+          <span class="w-24 shrink-0 font-mono text-[11px] text-copper">id</span>
+          <select id="wz-id" class="field flex-1 px-2 py-1.5 font-mono text-[11px] text-cream">
+            <option value="integer">INTEGER · auto-increment</option>
+            <option value="uuid">UUID · auto-generated</option>
+          </select>
+        </div>
         <div id="wz-cols" class="flex flex-col gap-2"></div>
         <button id="wz-add" class="mt-2 rounded-md px-2 py-1 text-left font-mono text-[11px] text-copper hover:text-ember">+ add column</button>
         <!-- The wizard is a visible SQL generator: this is exactly what Create runs. -->
@@ -147,24 +154,43 @@
               class="field min-w-0 flex-1 px-3 py-1.5 font-mono text-[11px] text-cream">` +
       `<select data-col-type class="field px-2 py-1.5 font-mono text-[11px] text-cream">` +
       TYPES.map((t) => `<option>${t}</option>`).join("") + `</select>` +
+      `<input data-col-default spellcheck="false" autocomplete="off" placeholder="default"
+              title="A literal, or an expression in parentheses — e.g. 0, pending, (datetime('now')), (uuid())"
+              class="field w-28 shrink-0 px-2 py-1.5 font-mono text-[11px] text-cream">` +
       `<label class="flex items-center gap-1 font-mono text-[10px] text-clay"><input type="checkbox" data-col-unique> unique</label>` +
       `<button data-col-rm class="font-mono text-[11px] text-clay/40 hover:text-blood" title="Remove column">×</button>`;
     return row;
   };
+  // Default values: an input wrapped in parentheses is an expression, a
+  // number is a literal, anything else becomes a quoted string — and the
+  // live SQL shows exactly which reading it got.
+  const defaultClause = (raw) => {
+    const v = raw.trim();
+    if (!v) return "";
+    if (v.startsWith("(") && v.endsWith(")")) return ` DEFAULT ${v}`;
+    if (/^-?\d+(\.\d+)?$/.test(v)) return ` DEFAULT ${v}`;
+    if (/^(null|current_timestamp|current_time|current_date)$/i.test(v)) return ` DEFAULT ${v.toUpperCase()}`;
+    return ` DEFAULT '${v.replace(/'/g, "''")}'`;
+  };
   const preview = () => {
     const name = document.getElementById("wz-name").value.trim();
-    const lines = ["  id INTEGER PRIMARY KEY"];
+    const idMode = document.getElementById("wz-id").value;
+    const lines = [idMode === "uuid"
+      ? "  id TEXT PRIMARY KEY DEFAULT (uuid())"
+      : "  id INTEGER PRIMARY KEY"];
     for (const row of cols.children) {
       const col = row.querySelector("[data-col-name]").value.trim();
       if (!col) continue;
       const type = row.querySelector("[data-col-type]").value;
+      const dflt = defaultClause(row.querySelector("[data-col-default]").value);
       const unique = row.querySelector("[data-col-unique]").checked ? " UNIQUE" : "";
-      lines.push(`  ${quote(col)} ${type}${unique}`);
+      lines.push(`  ${quote(col)} ${type}${dflt}${unique}`);
     }
     const sql = `CREATE TABLE ${name ? quote(name) : "…"} (\n${lines.join(",\n")}\n)`;
     document.getElementById("wz-sql").textContent = sql;
     return name ? sql : null;
   };
+  document.getElementById("wz-id").addEventListener("change", preview);
   document.getElementById("wz-add").addEventListener("click", () => { cols.appendChild(colRow()); preview(); });
   document.getElementById("database-page").addEventListener("input", preview);
   cols.addEventListener("click", (e) => {
