@@ -1898,7 +1898,13 @@ fn split_user_code(source: &str) -> (&str, usize) {
             .or_else(|| trimmed.strip_prefix("// "));
         if let Some(path) = label {
             // `\0`-prefixed labels are the bundler's own injected helpers.
-            if path.starts_with("node_modules/") || path.starts_with('\0') {
+            // `http:`/`https:` labels are the console editor's esm.sh
+            // modules — npm dependencies fetched at bundle time.
+            if path.starts_with("node_modules/")
+                || path.starts_with('\0')
+                || path.starts_with("http:")
+                || path.starts_with("https:")
+            {
                 in_deps = true;
                 entry_start = None;
             } else if in_deps && entry_start.is_none() {
@@ -2776,6 +2782,52 @@ async fn page_admin_functions(
     .render()
     .expect("admin functions renders");
     console_page(&state, &headers, &user, "admin-functions", inner).await
+}
+
+#[cfg(test)]
+mod split_user_code_tests {
+    use super::split_user_code;
+
+    #[test]
+    fn cli_rolldown_bundles_fold_node_modules() {
+        let source = "//#region node_modules/ms/index.js
+var ms = 1;
+//#endregion
+//#region index.js
+export default ms;
+";
+        let (user, hidden) = split_user_code(source);
+        assert!(user.starts_with("//#region index.js"));
+        assert!(hidden > 0);
+    }
+
+    #[test]
+    fn editor_esbuild_bundles_fold_http_modules() {
+        // The console editor bundles npm through esm.sh: dependency modules
+        // are labeled with their URL namespace, the user's files with vfs:.
+        let source = "// http:https://esm.sh/slugify@1.6.9/es2020/slugify.mjs
+var S = () => {};
+
+// vfs:index.js
+var index_default = async () => S();
+export { index_default as default };
+";
+        let (user, hidden) = split_user_code(source);
+        assert!(
+            user.starts_with("// vfs:index.js"),
+            "expected the vfs entry, got: {user}"
+        );
+        assert_eq!(hidden, source.find("// vfs:index.js").unwrap());
+    }
+
+    #[test]
+    fn unbundled_source_shows_whole() {
+        let source = "export default async function handler() { return 1; }
+";
+        let (user, hidden) = split_user_code(source);
+        assert_eq!(user, source);
+        assert_eq!(hidden, 0);
+    }
 }
 
 #[cfg(test)]
