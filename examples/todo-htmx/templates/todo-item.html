@@ -1,0 +1,9 @@
+<li id="todo-{{ id }}" {% if done %}class="done"{% endif %}>
+  <span>{% if done %}<s>{{ title }}</s>{% else %}{{ title }}{% endif %}</span>
+  <span>
+    <button hx-post="todo-htmx/todos/{{ id }}/toggle" hx-target="#todo-{{ id }}" hx-swap="outerHTML">
+      {% if done %}undo{% else %}done{% endif %}
+    </button>
+    <button hx-delete="todo-htmx/todos/{{ id }}" hx-target="#todo-{{ id }}" hx-swap="outerHTML">×</button>
+  </span>
+</li>

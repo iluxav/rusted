@@ -358,7 +358,9 @@
     return stack.join("/");
   }
   const loaderFor = (name) =>
-    name.endsWith(".ts") ? "ts" : name.endsWith(".json") ? "json" : "js";
+    name.endsWith(".ts") ? "ts" :
+    name.endsWith(".json") ? "json" :
+    name.endsWith(".html") ? "text" : "js";
 
   const vfsPlugin = {
     name: "rusted-vfs",

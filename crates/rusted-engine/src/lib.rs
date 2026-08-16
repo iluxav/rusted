@@ -748,6 +748,11 @@ const GLUE: &str = r#"(handler, requestJson, envJson, capsJson) => {
   const context = {
     json: (o, init) => respond(JSON.stringify(o), "application/json", init),
     text: (s, init) => respond(String(s), "text/plain; charset=utf-8", init),
+    html: (s, init) => respond(String(s), "text/html; charset=utf-8", init),
+    // Server-side templating (minijinja): HTML auto-escaping on, `|safe`
+    // opts out. Pairs with `.html` imports — template files in, pages out.
+    render: (tpl, data) => globalThis.__rustedRender(
+      String(tpl), JSON.stringify(data === undefined ? null : data)),
     // Absent when the host lends no services — reading it then is a clearer
     // failure than a function that silently finds nothing.
     inbox: globalThis.__rustedInbox,
@@ -833,6 +838,9 @@ const TOOL_GLUE: &str = r#"(ns, toolName, argsJson, envJson, capsJson) => {
   const caps = globalThis.__rustedCaps(capsJson);
   const sealApi = globalThis.__rustedSealApi();
   const context = {
+    // Server-side templating (minijinja) — a tool can shape HTML too.
+    render: (tpl, data) => globalThis.__rustedRender(
+      String(tpl), JSON.stringify(data === undefined ? null : data)),
     // Absent when the host lends no services — reading it then is a clearer
     // failure than a function that silently finds nothing.
     inbox: globalThis.__rustedInbox,
@@ -1598,6 +1606,66 @@ fn value_bytes(ctx: &Ctx<'_>, value: &Value<'_>) -> rquickjs::Result<Vec<u8>> {
     ))
 }
 
+/// Backs `context.render`: minijinja, compute-only — no filesystem loader, so
+/// a template can reference nothing the module didn't hand it. HTML
+/// auto-escaping is unconditional; `|safe` is the opt-out. v1 renders the
+/// template string it is given (`extends`/`include` across bundled files is
+/// the planned follow-up), and parses per call — caching compiled
+/// environments per revision is the same later optimization bytecode got.
+fn install_render<'js>(ctx: &Ctx<'js>) -> Result<(), String> {
+    let render = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, template: String, data_json: String| -> rquickjs::Result<String> {
+            render_template(&template, &data_json)
+                .map_err(|message| Exception::throw_message(&ctx, &message))
+        },
+    )
+    .map_err(|e| exception_message(ctx, e))?;
+    ctx.globals()
+        .set("__rustedRender", render)
+        .map_err(|e| exception_message(ctx, e))
+}
+
+fn render_template(template: &str, data_json: &str) -> Result<String, String> {
+    let data: serde_json::Value = serde_json::from_str(data_json)
+        .map_err(|e| format!("render data does not serialize: {e}"))?;
+    let mut env = minijinja::Environment::new();
+    env.set_auto_escape_callback(|_| minijinja::AutoEscape::Html);
+    env.add_template("template", template)
+        .map_err(|e| format!("template error: {e:#}"))?;
+    env.get_template("template")
+        .expect("template was just added")
+        .render(template_value(&data))
+        .map_err(|e| format!("template error: {e:#}"))
+}
+
+/// serde_json → minijinja by hand: the serde bridge would do this, except the
+/// workspace's serde_json runs with `arbitrary_precision`, whose internal
+/// number representation leaks through generic serialization as a one-key
+/// map (`{"$serde_json::private::Number": …}`) — wrong value, wrong
+/// truthiness. Walking the tree ourselves keeps numbers numbers.
+fn template_value(v: &serde_json::Value) -> minijinja::Value {
+    use minijinja::Value as V;
+    match v {
+        serde_json::Value::Null => V::from(()),
+        serde_json::Value::Bool(b) => V::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                V::from(i)
+            } else if let Some(u) = n.as_u64() {
+                V::from(u)
+            } else {
+                V::from(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
+        serde_json::Value::String(s) => V::from(s.as_str()),
+        serde_json::Value::Array(items) => V::from_iter(items.iter().map(template_value)),
+        serde_json::Value::Object(map) => {
+            V::from_iter(map.iter().map(|(k, v)| (k.as_str(), template_value(v))))
+        }
+    }
+}
+
 /// Backs `context.sha256`, the base64url/hex codecs, and `timingSafeEqual` —
 /// the primitives every credential-handling function otherwise imports an npm
 /// package (and pays interpreter time) for. Engine-provided, like randomness:
@@ -2020,6 +2088,7 @@ fn load_module_raw<'js>(
     // through, which is what keeps the capability universally present.
     install_random(ctx)?;
     install_codec(ctx)?;
+    install_render(ctx)?;
     install_web(ctx)?;
     eval_prelude(ctx, &prelude_bytecode().builder)?;
     let declared = match bytecode {

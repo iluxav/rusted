@@ -11,7 +11,7 @@ use std::path::Path;
 use rolldown::{
     Bundler, BundlerOptions, BundlerTransformOptions, Either, OutputFormat, Platform, SourceMapType,
 };
-use rolldown_common::Output;
+use rolldown_common::{ModuleType, Output};
 
 /// A file with `import` statements can't run as-is — the runtime resolves no
 /// modules — so it gets bundled first.
@@ -87,6 +87,12 @@ pub async fn bundle(entry: &Path, with_sourcemap: bool) -> Result<Bundled, Strin
             target: Some(Either::Left("es2020".to_string())),
             ..Default::default()
         }),
+        // Template files import as strings — the htmx project shape. Keyed by
+        // extension without the dot.
+        module_types: Some(rustc_hash::FxHashMap::from_iter([(
+            "html".to_string(),
+            ModuleType::Text,
+        )])),
         ..Default::default()
     })
     .map_err(|e| format!("{e}"))?;

@@ -32,3 +32,6 @@ database there, same SQL and semantics, reset when the dev server exits:
 rusted run index.js
 # open http://127.0.0.1:7400/f/todo-app
 ```
+
+Prefer the HTML in its own files, rendered with auto-escaping templates?
+[todo-htmx](../todo-htmx) is this same app in that shape.

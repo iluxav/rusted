@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Todos</title>
+  <script src="https://unpkg.com/htmx.org@2"></script>
+  <style>
+    body { font: 16px/1.5 system-ui; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+    ul { list-style: none; padding: 0; }
+    li { display: flex; justify-content: space-between; padding: .5rem 0; border-bottom: 1px solid #eee; }
+    form { display: flex; gap: .5rem; margin-bottom: 1rem; }
+    input { flex: 1; padding: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Todos</h1>
+  <!-- relative URL: the page lives at /f/todo-htmx (no trailing slash),
+       so this posts to /f/todo-htmx/todos -->
+  <form hx-post="todo-htmx/todos" hx-target="#list" hx-swap="beforeend"
+        hx-on::after-request="this.reset()">
+    <input name="title" placeholder="What needs doing?" required>
+    <button>Add</button>
+  </form>
+  <!-- items arrive pre-rendered through todo-item.html, hence |safe -->
+  <ul id="list">{{ items|safe }}</ul>
+</body>
+</html>

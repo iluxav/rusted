@@ -935,6 +935,91 @@ fn run_without_build_explains_a_missing_file() {
 }
 
 #[test]
+fn run_bundles_html_imports_as_template_strings() {
+    use std::io::BufRead;
+    use std::time::{Duration, Instant};
+
+    // The htmx project shape: templates are .html files, imported as strings
+    // and rendered server-side with data.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("templates")).unwrap();
+    std::fs::write(
+        dir.path().join("templates").join("item.html"),
+        "<li>{{ title }}</li>",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("index.js"),
+        r#"import itemTpl from "./templates/item.html";
+export const app = rusted
+  .app({ name: "templated" })
+  .get("/", async (request, context) =>
+    context.html(context.render(itemTpl, { title: "a <b> title" })));"#,
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rusted"))
+        .args(["run", "index.js", "--port", "7443"])
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = tx.send(line);
+        }
+    });
+    let mut banner = String::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut started = false;
+    while Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
+            banner.push_str(&line);
+            banner.push('\n');
+            if line.contains("/f/templated") {
+                started = true;
+                break;
+            }
+        }
+    }
+    let checks = (|| -> Result<(), String> {
+        if !started {
+            return Err(format!("server never started:\n{banner}"));
+        }
+        let r = reqwest::blocking::Client::new()
+            .get("http://127.0.0.1:7443/f/templated")
+            .send()
+            .map_err(|e| e.to_string())?;
+        if r.status().as_u16() != 200 {
+            return Err(format!("expected 200, got {}", r.status()));
+        }
+        let content_type = r
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = r.text().map_err(|e| e.to_string())?;
+        // Template file in, escaped page out.
+        if body != "<li>a &lt;b&gt; title</li>" {
+            return Err(format!("unexpected body: {body}"));
+        }
+        if !content_type.starts_with("text/html") {
+            return Err(format!("unexpected content type: {content_type}"));
+        }
+        Ok(())
+    })();
+    child.kill().ok();
+    child.wait().ok();
+    checks.unwrap();
+}
+
+#[test]
 fn run_bundles_a_file_with_imports_without_any_flags() {
     use std::io::BufRead;
     use std::time::{Duration, Instant};

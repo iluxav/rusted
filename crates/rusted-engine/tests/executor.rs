@@ -937,6 +937,52 @@ fn undeclared_capabilities_are_absent_from_context() {
 }
 
 #[test]
+fn render_is_minijinja_with_autoescaping() {
+    let src = r#"export default async function handler(request, context) {
+        const page = context.render(
+            "<h1>{{ title }}</h1><ul>{% for item in items %}<li>{{ item }}</li>{% endfor %}</ul>{{ trusted|safe }}",
+            { title: "Hi <script>", items: ["a", "<b>"], trusted: "<em>ok</em>" },
+        );
+        // Numbers stay numbers (ids, counts, 0/1 flags) — arithmetic and
+        // truthiness must work on them.
+        const nums = context.render(
+            "{{ n + 1 }}:{% if zero %}bad{% else %}good{% endif %}:{{ f }}",
+            { n: 41, zero: 0, f: 1.5 },
+        );
+        // A broken template throws a real error, not a mangled page.
+        let bad = "no";
+        try { context.render("{% broken", {}); } catch (e) { bad = e.message; }
+        // Data is optional; a template can be all static.
+        const bare = context.render("plain");
+        return context.json({ page, bad, bare, nums });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    let v: serde_json::Value = serde_json::from_str(success(&r.outcome)).unwrap();
+    assert_eq!(
+        v["page"],
+        "<h1>Hi &lt;script&gt;</h1><ul><li>a</li><li>&lt;b&gt;</li></ul><em>ok</em>"
+    );
+    assert!(
+        v["bad"].as_str().unwrap().contains("template"),
+        "{:?}",
+        v["bad"]
+    );
+    assert_eq!(v["bare"], "plain");
+    assert_eq!(v["nums"], "42:good:1.5");
+}
+
+#[test]
+fn context_html_answers_with_the_html_content_type() {
+    let src = r#"export default async function handler(request, context) {
+        return context.html("<p>hi</p>", { status: 201 });
+    }"#;
+    let r = exec().execute(src, &HttpRequest::post_json("{}"), &Limits::default());
+    assert_eq!(success(&r.outcome), "<p>hi</p>");
+    assert_eq!(r.content_type.as_deref(), Some("text/html; charset=utf-8"));
+    assert_eq!(r.status, Some(201));
+}
+
+#[test]
 fn digest_and_codec_primitives_are_native_and_correct() {
     let src = r#"export default async function handler(request, context) {
         const abc = context.sha256("abc");

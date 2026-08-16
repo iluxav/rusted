@@ -17,6 +17,8 @@
   <tr><th>helper</th><th>what it does</th></tr>
   <tr><td><code>context.json(body, init?)</code></td><td>An <code>application/json</code> response; <code>init</code> sets status and extra headers.</td></tr>
   <tr><td><code>context.text(body, init?)</code></td><td><code>text/plain; charset=utf-8</code>.</td></tr>
+  <tr><td><code>context.html(body, init?)</code></td><td><code>text/html; charset=utf-8</code> — pages and htmx fragments.</td></tr>
+  <tr><td><code>context.render(template, data?)</code></td><td>Server-side templating (minijinja): <code>{{ expr }}</code>, <code>{% if %}</code>/<code>{% for %}</code>, filters. HTML auto-escaping is always on; <code>|safe</code> marks a value as pre-escaped. Pairs with <code>.html</code> imports, which bundle as strings. A syntax error throws, naming the line.</td></tr>
   <tr><td><code>context.redirect(url, init?)</code></td><td>A redirect; status defaults to 302.</td></tr>
   <tr><td><code>context.setCookie(name, value, options?)</code></td><td>A <code>set-cookie</code> header value with safe defaults: <code>Path=/</code>, <code>HttpOnly</code>, <code>SameSite=Lax</code>, <code>Secure</code>.</td></tr>
   <tr><td><code>context.formEncode(values)</code></td><td><code>application/x-www-form-urlencoded</code> — for query strings and form bodies.</td></tr>

@@ -201,6 +201,21 @@ declare namespace Rusted {
     json(body: unknown, init?: ResponseInit): Response;
     /** `text/plain; charset=utf-8`. */
     text(body: string, init?: ResponseInit): Response;
+    /** `text/html; charset=utf-8`. */
+    html(body: string, init?: ResponseInit): Response;
+    /**
+     * Server-side templating (minijinja syntax: `{{ expr }}`, `{% for %}`,
+     * filters). HTML auto-escaping is always on; `|safe` marks a value as
+     * pre-escaped HTML. Pairs with `.html` imports, which bundle as strings:
+     *
+     * ```ts
+     * import page from "./templates/page.html";
+     * return context.html(context.render(page, { title, items }));
+     * ```
+     *
+     * Throws on template syntax errors, naming the line.
+     */
+    render(template: string, data?: unknown): string;
     /**
      * Present on a deployed function. Absent when running somewhere the
      * host lends no services — `rusted run` locally, for instance — so a
@@ -642,4 +657,10 @@ declare namespace Rusted {
     /** Runs before every matched route; return without calling next() to short-circuit. */
     use(middleware: AppMiddleware): AppBuilder;
   }
+}
+
+/** Template files bundle as strings — feed them to `context.render`. */
+declare module "*.html" {
+  const template: string;
+  export default template;
 }

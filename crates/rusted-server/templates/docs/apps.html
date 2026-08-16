@@ -23,23 +23,33 @@
 </table>
 
 <h2>Serving HTML</h2>
-<p>A fragment is just a string with the right content type:</p>
-<pre><code>const html = (context, body, init) =>
-  context.text(body, { ...init, headers: { "content-type": "text/html", ...(init &amp;&amp; init.headers) } });
-
-.get("/", async (request, context) => {
+<p>A fragment is just a string with the right content type — <code>context.html</code> is <code>context.text</code> with <code>text/html</code>:</p>
+<pre><code>.get("/", async (request, context) => {
   const todos = await context.db.query("SELECT * FROM todos ORDER BY id");
-  return html(context, `&lt;ul&gt;${todos.map(todoLi).join("")}&lt;/ul&gt;`);
+  return context.html(`&lt;ul&gt;${todos.map(todoLi).join("")}&lt;/ul&gt;`);
 })</code></pre>
 <p>That composes naturally with <a href="https://htmx.org">htmx</a>: elements request fragments, the server renders them, htmx swaps them in. The pattern that keeps it honest — write one renderer per thing (<code>todoLi</code>) and return it from the full page <em>and</em> from every mutation, so the DOM is always a reflection of server truth. Form posts arrive url-encoded: <code>new URLSearchParams(request.body).get("title")</code>.</p>
 <p>One URL subtlety: the page lives at <code>/f/todo-app</code> with no trailing slash, so <em>relative</em> asset and hx- URLs resolve from <code>/f/</code> — write them as <code>todo-app/todos</code>, or absolute.</p>
 
-<h2>The complete example</h2>
-<p><a href="https://github.com/iluxav/rusted/tree/main/examples/todo-app">examples/todo-app</a> is the whole idea in one commented file: routes + middleware + <code>context.db</code> + htmx fragments — push it and the URL is a working todo app.</p>
+<h2>Templates in files</h2>
+<p>Past a certain size, HTML wants its own files. Two pieces make that the project shape:</p>
+<pre><code>import pageTpl from "./templates/page.html";  // bundles in as a string
+import itemTpl from "./templates/todo-item.html";
+
+.get("/", async (request, context) => {
+  const todos = await context.db.query("SELECT * FROM todos ORDER BY id");
+  const items = todos.map((todo) => context.render(itemTpl, todo)).join("");
+  return context.html(context.render(pageTpl, { items }));
+})</code></pre>
+<p><code>.html</code> imports work in the CLI bundler and the console editor's file panel alike; the deployed artifact is still one file, so <code>rusted pull</code> shows everything. <code>context.render</code> is minijinja: <code>{{ expr }}</code>, <code>{% if %}</code>/<code>{% for %}</code>, filters — with HTML auto-escaping always on, so templated projects need no escape helper. Composed HTML entering a template does so explicitly: <code>{{ items|safe }}</code>.</p>
+<p>Each file keeps one interpolation owner — <code>${...}</code> is inert in templates, <code>{{ ... }}</code> is inert in JS literals — so nothing is evaluated twice.</p>
+
+<h2>The complete examples</h2>
+<p><a href="https://github.com/iluxav/rusted/tree/main/examples/todo-app">examples/todo-app</a> is the whole idea in one commented file: routes + middleware + <code>context.db</code> + htmx fragments — push it and the URL is a working todo app. <a href="https://github.com/iluxav/rusted/tree/main/examples/todo-htmx">examples/todo-htmx</a> is the same app restructured with its HTML in <code>templates/*.html</code> and no escape helper.</p>
 
 <h2>Notes</h2>
 <ul>
-  <li>Escape user input interpolated into HTML (the example ships a five-line <code>escapeHtml</code>). A native auto-escaping <code>context.html</code> is on the roadmap.</li>
+  <li>Escaping: <code>context.render</code> escapes everything by default — prefer it for user input. Hand-built template literals escape nothing; if you interpolate user input into one, escape it yourself (todo-app ships a five-line <code>escapeHtml</code>).</li>
   <li><code>--method</code>/<code>--path</code> push flags don't apply — routes come from the module.</li>
   <li><code>/api/invoke</code> refuses app functions — they're invoked through their routes. <code>rusted run</code> serves them locally with hot reload, and <code>rusted new &lt;name&gt; --app</code> scaffolds one.</li>
   <li>Sessions without a database: <code>request.cookies</code> + <code>context.setCookie</code> + <code>context.seal</code>/<code>open</code> — see <a href="/docs/security">security</a>.</li>

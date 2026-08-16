@@ -20,3 +20,4 @@ hex = { workspace = true }
 getrandom = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }
+minijinja = "2.24.0"
