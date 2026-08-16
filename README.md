@@ -6,8 +6,9 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%2F%20AGPL--3.0-c47b45)](LICENSE.md)
 
 <p align="center">
-  <img src="crates/rusted-server/assets/rusted-logo2.png" width="160" alt="rusted logo">
+  <img src="crates/rusted-server/assets/rusted-logo2.png" width="160" alt="rusted logo">  
 </p>
+<p align="center" style="color:#e66201; ">Rusted</p>
 
 A microfunction platform where a tiny JavaScript file becomes a live HTTP endpoint — or a live MCP server — in seconds, executed by QuickJS inside a restricted Rust runtime.
 
@@ -158,7 +159,7 @@ What an mcp function is not:
 
 The dev loop is the http one: `rusted run index.js` serves the tools locally with hot reload and prints a config block of its own — same shape, minus the auth header, since local serving is trusted, plus a note that the pushed endpoint will want your key. Connect a client, edit, push when it works. `rusted new my-tools --mcp` scaffolds a starting point, and [examples/mcp-server](examples/mcp-server) is a complete file.
 
-This is distinct from the platform's own MCP server on the admin port (`/mcp`), whose tools — execute, deploy, list, delete, inbox_create, inbox_read — an agent uses to build on rusted. An mcp _function_ is what such an agent (or you) deploys: it serves the tools in the file, under the owner's key and limits.
+This is distinct from the platform's own MCP server on the admin port (`/mcp`), whose tools — execute, deploy, list, delete, inbox*create, inbox_read — an agent uses to build on rusted. An mcp \_function* is what such an agent (or you) deploys: it serves the tools in the file, under the owner's key and limits.
 
 ## Signing in
 
