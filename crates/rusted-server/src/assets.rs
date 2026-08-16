@@ -77,6 +77,22 @@ const ASSETS: &[Asset] = &[
         content_type: "text/javascript; charset=utf-8",
         immutable: false,
     },
+    Asset {
+        // esbuild's browser loader + wasm, vendored by `make editor-js` for
+        // the editor's in-browser bundling. The wasm is 11MB in the binary
+        // but lazy on the wire: the page fetches it only when a buffer
+        // actually contains imports.
+        name: "esbuild.min.js",
+        bytes: include_bytes!("../assets/esbuild.min.js"),
+        content_type: "text/javascript; charset=utf-8",
+        immutable: false,
+    },
+    Asset {
+        name: "esbuild.wasm",
+        bytes: include_bytes!("../assets/esbuild.wasm"),
+        content_type: "application/wasm",
+        immutable: false,
+    },
 ];
 
 /// Content hashes, in the same order as `ASSETS`. Hashing at first use rather

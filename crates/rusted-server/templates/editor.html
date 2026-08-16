@@ -14,7 +14,10 @@
   </div>
 
   <div class="flex min-h-0 flex-1 gap-4">
-    <div class="min-w-0 flex-1 overflow-hidden rounded-xl border border-copper/15" id="ed-mount"></div>
+    <div class="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-copper/15">
+      <div id="ed-tabs" class="flex flex-wrap items-center gap-1 border-b border-copper/15 bg-rust-950/60 px-2 py-1.5"></div>
+      <div class="min-h-0 flex-1" id="ed-mount"></div>
+    </div>
 
     <div class="flex w-[380px] shrink-0 flex-col gap-3 overflow-y-auto">
       <div>
@@ -23,7 +26,7 @@
                   class="field w-full px-3 py-2 font-mono text-[12px] text-cream">{"name":"Ada"}</textarea>
       </div>
       <div id="ed-out" class="surface flex-1 overflow-y-auto rounded-xl px-4 py-3 font-mono text-[12px] leading-relaxed text-clay">
-        <p class="text-clay/60">Run executes this buffer in a fresh sandbox on the server — nothing is saved. Push deploys it.</p>
+        <p class="text-clay/60">Run executes this project in a fresh sandbox on the server — nothing is saved. Imports are bundled in the browser: relative ones from your files, bare ones from npm via esm.sh. Push deploys the bundled result.</p>
       </div>
     </div>
   </div>
@@ -32,30 +35,231 @@
 <script src="/assets/editor.js"></script>
 <script>
 (() => {
-  const initial = {{ source_json|safe }};
-  const { EditorView, basicSetup, keymap, indentWithTab, javascript, oneDark } = window.RustedEditor;
+  const initialSource = {{ source_json|safe }};
+  const initialName = "{{ name }}";
+  const ENTRY = "index.js";
+  const STORE_KEY = "rusted-editor:" + (initialName || "scratch");
 
-  const out = document.getElementById("ed-out");
-  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-  const pretty = (text) => {
-    try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+  const { EditorView, EditorState, basicSetup, keymap, indentWithTab, javascript, oneDark } =
+    window.RustedEditor;
+
+  // ---- project state: a flat virtual filesystem, persisted per function ----
+  let project = null;
+  try { project = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch {}
+  let restored = false;
+  if (project && project.files && project.files[ENTRY] !== undefined) {
+    restored = true;
+  } else {
+    project = { files: {}, current: ENTRY };
+    project.files[ENTRY] = initialSource;
+  }
+  if (!project.files[project.current]) project.current = ENTRY;
+
+  const save = () => {
+    project.files[project.current] = view.state.doc.toString();
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(project)); } catch {}
   };
-  const busy = (label) => { out.innerHTML = `<p class="text-clay/60">${esc(label)}…</p>`; };
 
+  // ---- editor ----
+  const extensions = [
+    basicSetup,
+    oneDark,
+    javascript({ typescript: true }),
+    keymap.of([
+      { key: "Mod-Enter", run: () => { run(); return true; } },
+      indentWithTab,
+    ]),
+  ];
   const view = new EditorView({
-    doc: initial,
+    state: EditorState.create({ doc: project.files[project.current], extensions }),
     parent: document.getElementById("ed-mount"),
-    extensions: [
-      basicSetup,
-      oneDark,
-      javascript(),
-      keymap.of([
-        { key: "Mod-Enter", run: () => { run(); return true; } },
-        indentWithTab,
-      ]),
-    ],
   });
+  window.__edApi = {
+    setFile(name, text) {
+      // Replace the buffer first when targeting the open file — openFile
+      // would otherwise save the stale doc back over the new text.
+      if (name === project.current) {
+        view.setState(EditorState.create({ doc: text, extensions }));
+      }
+      project.files[name] = text;
+      renderTabs();
+      save();
+    },
+    project: () => project,
+    run: () => run(),
+  };
 
+  // ---- file tabs ----
+  const tabs = document.getElementById("ed-tabs");
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  function renderTabs() {
+    const names = Object.keys(project.files).sort((a, b) =>
+      a === ENTRY ? -1 : b === ENTRY ? 1 : a.localeCompare(b));
+    tabs.innerHTML = names.map((f) => {
+      const active = f === project.current;
+      const close = f === ENTRY ? "" :
+        `<span data-close="${esc(f)}" title="Delete file" class="ml-1 cursor-pointer text-clay/50 hover:text-blood">×</span>`;
+      return `<button data-file="${esc(f)}" class="flex items-center rounded-md px-2.5 py-1 font-mono text-[11px] ${
+        active ? "bg-rust-800 text-cream" : "text-clay hover:text-cream"}">${esc(f)}${close}</button>`;
+    }).join("") +
+      `<button id="ed-add" title="New file — relative imports resolve between files" class="rounded-md px-2 py-1 font-mono text-[12px] text-copper hover:text-ember">+</button>`;
+  }
+  function openFile(name) {
+    save();
+    project.current = name;
+    view.setState(EditorState.create({ doc: project.files[name] ?? "", extensions }));
+    renderTabs();
+  }
+  tabs.addEventListener("click", (e) => {
+    const close = e.target.closest("[data-close]");
+    if (close) {
+      const name = close.dataset.close;
+      if (confirm(`Delete ${name}?`)) {
+        delete project.files[name];
+        if (project.current === name) project.current = ENTRY;
+        openFile(project.current);
+        save();
+      }
+      e.stopPropagation();
+      return;
+    }
+    if (e.target.closest("#ed-add")) {
+      const name = prompt("File name (e.g. lib.js — import it as ./lib.js):");
+      if (!name) return;
+      const clean = name.trim().replace(/^\.\//, "");
+      if (project.files[clean] === undefined) project.files[clean] = "";
+      openFile(clean);
+      save();
+      return;
+    }
+    const tab = e.target.closest("[data-file]");
+    if (tab) openFile(tab.dataset.file);
+  });
+  renderTabs();
+
+  // ---- output pane ----
+  const out = document.getElementById("ed-out");
+  const pretty = (text) => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; } };
+  const busy = (label) => { out.innerHTML = `<p class="text-clay/60">${esc(label)}…</p>`; };
+  const logsHtml = (logs) => (logs || []).map((l) =>
+    `<div class="text-clay/80"><span class="mr-1 text-copper">[${esc(l.level)}]</span>${esc(l.message)}</div>`
+  ).join("");
+  if (restored) {
+    out.innerHTML = `<p class="text-clay/60">restored your local draft — Push to make it the deployed revision</p>`;
+  }
+
+  // ---- bundling: esbuild-wasm, loaded only when a project needs it ----
+  let esbuildReady = null;
+  function ensureEsbuild() {
+    if (!esbuildReady) {
+      esbuildReady = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "/assets/esbuild.min.js";
+        s.onload = resolve;
+        s.onerror = () => reject(new Error("could not load the bundler"));
+        document.head.appendChild(s);
+      }).then(() => window.esbuild.initialize({ wasmURL: "/assets/esbuild.wasm" }));
+    }
+    return esbuildReady;
+  }
+
+  const moduleCache = new Map();
+  async function fetchModule(url) {
+    if (moduleCache.has(url)) return moduleCache.get(url);
+    let cache = null;
+    try { cache = await caches.open("rusted-npm-v1"); } catch {}
+    if (cache) {
+      const hit = await cache.match(url);
+      if (hit) { const text = await hit.text(); moduleCache.set(url, text); return text; }
+    }
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`npm fetch failed: ${url} → ${r.status}`);
+    const text = await r.text();
+    if (cache) {
+      try { await cache.put(url, new Response(text, { headers: { "content-type": "text/javascript" } })); } catch {}
+    }
+    moduleCache.set(url, text);
+    return text;
+  }
+
+  const dirname = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  function normalize(importer, path) {
+    const parts = (dirname(importer) ? dirname(importer) + "/" + path : path).split("/");
+    const stack = [];
+    for (const part of parts) {
+      if (part === "." || part === "") continue;
+      if (part === "..") stack.pop();
+      else stack.push(part);
+    }
+    return stack.join("/");
+  }
+  const loaderFor = (name) =>
+    name.endsWith(".ts") ? "ts" : name.endsWith(".json") ? "json" : "js";
+
+  const vfsPlugin = {
+    name: "rusted-vfs",
+    setup(build) {
+      build.onResolve({ filter: /.*/ }, (args) => {
+        if (args.kind === "entry-point") return { path: args.path, namespace: "vfs" };
+        if (args.namespace === "vfs") {
+          if (/^\.\.?\//.test(args.path)) {
+            const resolved = normalize(args.importer, args.path);
+            if (project.files[resolved] === undefined) {
+              return { errors: [{ text: `no such file in this project: ${resolved}` }] };
+            }
+            return { path: resolved, namespace: "vfs" };
+          }
+          if (/^https?:\/\//.test(args.path)) return { path: args.path, namespace: "http" };
+          return { path: "https://esm.sh/" + args.path + "?target=es2020", namespace: "http" };
+        }
+        return { path: new URL(args.path, args.importer).href, namespace: "http" };
+      });
+      build.onLoad({ filter: /.*/, namespace: "vfs" }, (args) => ({
+        contents: project.files[args.path],
+        loader: loaderFor(args.path),
+      }));
+      build.onLoad({ filter: /.*/, namespace: "http" }, async (args) => ({
+        contents: await fetchModule(args.path),
+        loader: "js",
+      }));
+    },
+  };
+
+  const needsBundle = () =>
+    Object.keys(project.files).length > 1 ||
+    /(^|\n)\s*import[\s("']/.test(project.files[ENTRY]) ||
+    /(^|\n)\s*export\s+[^=]*\bfrom\s/.test(project.files[ENTRY]) ||
+    ENTRY !== "index.js";
+
+  /// The source the server should see: the entry as-is, or the bundle.
+  async function prepare() {
+    save();
+    if (!needsBundle()) return { code: project.files[ENTRY], note: "" };
+    await ensureEsbuild();
+    const started = performance.now();
+    const result = await window.esbuild.build({
+      entryPoints: [ENTRY],
+      bundle: true,
+      write: false,
+      format: "esm",
+      target: "es2020",
+      plugins: [vfsPlugin],
+    });
+    const code = result.outputFiles[0].text;
+    const ms = performance.now() - started;
+    return {
+      code,
+      note: `<div class="mb-1 text-clay/50">bundled in ${ms.toFixed(0)}ms → ${(code.length / 1024).toFixed(1)}KB</div>`,
+    };
+  }
+
+  function bundleError(e) {
+    const messages = (e && e.errors ? e.errors.map((x) => x.text) : [String(e && e.message || e)]);
+    out.innerHTML = `<div class="text-blood">✗ bundle failed</div>` +
+      messages.map((m) => `<div class="text-blood/80">${esc(m)}</div>`).join("");
+  }
+
+  // ---- server calls ----
   const call = async (path, payload) => {
     const r = await fetch(path, {
       method: "POST",
@@ -66,28 +270,27 @@
     return r.json();
   };
 
-  const logsHtml = (logs) => (logs || []).map((l) =>
-    `<div class="text-clay/80"><span class="mr-1 text-copper">[${esc(l.level)}]</span>${esc(l.message)}</div>`
-  ).join("");
-
   async function run() {
+    busy("bundling");
+    let built;
+    try { built = await prepare(); } catch (e) { bundleError(e); return; }
     busy("running");
     try {
       const v = await call("/console/editor/run", {
-        source: view.state.doc.toString(),
+        source: built.code,
         body: document.getElementById("ed-body").value,
       });
       if (v.outcome === "success") {
-        out.innerHTML =
+        out.innerHTML = built.note +
           `<div class="mb-1"><span class="text-sage">● ${v.status}</span>` +
           ` <span class="text-clay/50">${esc(v.content_type)} / ${v.wall_ms.toFixed(2)}ms wall · ${v.cpu_ms.toFixed(2)}ms cpu</span></div>` +
           `<pre class="mb-2 overflow-x-auto whitespace-pre-wrap text-cream">${esc(pretty(v.response))}</pre>` +
           logsHtml(v.logs);
       } else if (v.outcome === "terminated") {
-        out.innerHTML =
+        out.innerHTML = built.note +
           `<div class="mb-1 text-blood">● terminated: ${esc(v.reason)}</div>` + logsHtml(v.logs);
       } else {
-        out.innerHTML =
+        out.innerHTML = built.note +
           `<div class="mb-1 text-blood">● ${esc(v.message || (v.error && v.error.message) || "error")}</div>` +
           (v.stack ? `<pre class="mb-2 overflow-x-auto whitespace-pre-wrap text-blood/80">${esc(v.stack)}</pre>` : "") +
           logsHtml(v.logs);
@@ -96,28 +299,34 @@
   }
 
   async function verify() {
+    busy("bundling");
+    let built;
+    try { built = await prepare(); } catch (e) { bundleError(e); return; }
     busy("verifying");
     try {
-      const v = await call("/console/editor/verify", { source: view.state.doc.toString() });
-      out.innerHTML = v.ok
+      const v = await call("/console/editor/verify", { source: built.code });
+      out.innerHTML = built.note + (v.ok
         ? `<div class="text-sage">✓ ok — ${esc(v.kind)} function${v.tools ? `, tools: ${esc(v.tools.join(", "))}` : ""}</div>`
-        : `<div class="text-blood">✗ ${esc(v.message)}</div>`;
+        : `<div class="text-blood">✗ ${esc(v.message)}</div>`);
     } catch (e) { out.innerHTML = `<div class="text-blood">${esc(e.message)}</div>`; }
   }
 
   async function push() {
+    busy("bundling");
+    let built;
+    try { built = await prepare(); } catch (e) { bundleError(e); return; }
     busy("deploying");
     try {
       const name = document.getElementById("ed-name").value.trim();
-      const payload = { source: view.state.doc.toString() };
+      const payload = { source: built.code };
       if (name) payload.name = name;
       const v = await call("/console/editor/push", payload);
       if (v.error) {
-        out.innerHTML = `<div class="text-blood">✗ ${esc(v.error.message)}</div>`;
+        out.innerHTML = built.note + `<div class="text-blood">✗ ${esc(v.error.message)}</div>`;
         return;
       }
       document.getElementById("ed-name").value = v.name;
-      out.innerHTML =
+      out.innerHTML = built.note +
         `<div class="mb-1 text-sage">✓ deployed ${esc(v.name)} — revision ${v.revision}</div>` +
         `<div class="mb-2"><a class="text-ember-soft underline decoration-ember/30 underline-offset-4" href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.url)}</a></div>` +
         `<div class="text-clay/60">function page: <a class="text-ember-soft underline decoration-ember/30 underline-offset-4" href="/console/function/${esc(v.name)}">ƒ ${esc(v.name)}</a></div>`;
@@ -127,6 +336,7 @@
   document.getElementById("ed-run").addEventListener("click", run);
   document.getElementById("ed-verify").addEventListener("click", verify);
   document.getElementById("ed-push").addEventListener("click", push);
+  window.addEventListener("beforeunload", save);
 })();
 </script>
 

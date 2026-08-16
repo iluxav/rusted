@@ -77,8 +77,9 @@ release: ## Cut a patch release: bump crate versions, commit, tag, push
 	gh run watch "$$run_id" --exit-status; \
 	echo "v$$new published — deploy with .do/deploy.sh"
 
-editor-js: ## Rebuild the vendored CodeMirror bundle for the console editor
+editor-js: ## Rebuild the vendored editor assets (CodeMirror bundle + esbuild-wasm)
 	cd crates/rusted-server/editor && npm install --no-fund --no-audit && npx esbuild entry.js --bundle --minify --format=iife --outfile=../assets/editor.js
+	cd crates/rusted-server/editor && cp node_modules/esbuild-wasm/esbuild.wasm ../assets/esbuild.wasm && cp node_modules/esbuild-wasm/lib/browser.min.js ../assets/esbuild.min.js
 
 css: ## Recompile the Tailwind sheet inlined into every page (run after template edits)
 	cd crates/rusted-server/tailwind && npx -y tailwindcss@3.4.17 -c tailwind.config.js -i input.css -o ../templates/app.css --minify
