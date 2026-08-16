@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
@@ -818,15 +818,56 @@ impl QuickJsExecutor {
 
 /// Parses `source` in a throwaway context and returns its bytecode.
 fn compile(source: &str) -> Result<Vec<u8>, String> {
+    compile_named("handler", source)
+}
+
+fn compile_named(name: &str, source: &str) -> Result<Vec<u8>, String> {
     let rt = Runtime::new().expect("quickjs runtime");
     let ctx = Context::full(&rt).expect("quickjs context");
     ctx.with(|c| {
         let declared =
-            Module::declare(c.clone(), "handler", source).map_err(|e| exception_message(&c, e))?;
+            Module::declare(c.clone(), name, source).map_err(|e| exception_message(&c, e))?;
         declared
             .write(Default::default())
             .map_err(|e| exception_message(&c, e))
     })
+}
+
+/// The preludes as module bytecode, compiled once per process and evaluated
+/// per context: parsing was ~88% of their per-context eval cost (measured in
+/// `setup_cost.rs`), and a fresh context pays it on every invocation.
+struct PreludeBytecode {
+    console: Vec<u8>,
+    caps: Vec<u8>,
+    fetch: Vec<u8>,
+    inbox: Vec<u8>,
+    web: Vec<u8>,
+}
+
+fn prelude_bytecode() -> &'static PreludeBytecode {
+    static COMPILED: OnceLock<PreludeBytecode> = OnceLock::new();
+    let compiled = |name, source| {
+        compile_named(name, source).expect("preludes are compiled in-tree and always parse")
+    };
+    COMPILED.get_or_init(|| PreludeBytecode {
+        console: compiled("prelude:console", CONSOLE_PRELUDE),
+        caps: compiled("prelude:caps", CAPS_PRELUDE),
+        fetch: compiled("prelude:fetch", FETCH_PRELUDE),
+        inbox: compiled("prelude:inbox", INBOX_PRELUDE),
+        web: compiled("prelude:web", WEB_PRELUDE),
+    })
+}
+
+/// Evaluates one precompiled prelude in this context.
+fn eval_prelude(ctx: &Ctx<'_>, bytecode: &[u8]) -> Result<(), String> {
+    // SAFETY: written by `compile_named` in this same process, so the QuickJS
+    // build that reads the bytes is the one that wrote them.
+    let declared =
+        unsafe { Module::load(ctx.clone(), bytecode) }.map_err(|e| exception_message(ctx, e))?;
+    let (_, progress) = declared.eval().map_err(|e| exception_message(ctx, e))?;
+    progress
+        .finish::<()>()
+        .map_err(|e| exception_message(ctx, e))
 }
 
 impl Default for QuickJsExecutor {
@@ -1173,8 +1214,7 @@ fn install_services<'js>(ctx: &Ctx<'js>, services: Arc<dyn HostServices>) -> Res
         ctx.globals()
             .set("__rustedInboxGet", native)
             .map_err(|e| exception_message(ctx, e))?;
-        ctx.eval::<(), _>(INBOX_PRELUDE)
-            .map_err(|e| exception_message(ctx, e))?;
+        eval_prelude(ctx, &prelude_bytecode().inbox)?;
     }
 
     let state_services = services.clone();
@@ -1281,8 +1321,7 @@ fn install_fetch_async<'js>(
     ctx.globals()
         .set("__rustedFetch", native)
         .map_err(|e| exception_message(ctx, e))?;
-    ctx.eval::<(), _>(FETCH_PRELUDE)
-        .map_err(|e| exception_message(ctx, e))
+    eval_prelude(ctx, &prelude_bytecode().fetch)
 }
 
 /// Backs `context.randomBytes` / `context.randomBase64Url` with the OS's
@@ -1502,8 +1541,7 @@ fn install_web<'js>(ctx: &Ctx<'js>) -> Result<(), String> {
     .map_err(|e| exception_message(ctx, e))?;
     set("__rustedUtf8Valid", utf8_valid)?;
 
-    ctx.eval::<(), _>(WEB_PRELUDE)
-        .map_err(|e| exception_message(ctx, e))
+    eval_prelude(ctx, &prelude_bytecode().web)
 }
 
 /// Spec-shaped rather than spec-complete: the constructors, properties, and
@@ -1750,8 +1788,7 @@ fn install_fetch<'js>(ctx: &Ctx<'js>, budget: Arc<outbound::OutboundBudget>) -> 
     ctx.globals()
         .set("__rustedFetch", native)
         .map_err(|e| exception_message(ctx, e))?;
-    ctx.eval::<(), _>(FETCH_PRELUDE)
-        .map_err(|e| exception_message(ctx, e))
+    eval_prelude(ctx, &prelude_bytecode().fetch)
 }
 
 /// Evaluates the module without demanding any particular exports. The surface
@@ -1761,10 +1798,8 @@ fn load_module_raw<'js>(
     source: &str,
     bytecode: Option<&[u8]>,
 ) -> Result<Module<'js, rquickjs::module::Evaluated>, String> {
-    ctx.eval::<(), _>(CONSOLE_PRELUDE)
-        .map_err(|e| exception_message(ctx, e))?;
-    ctx.eval::<(), _>(CAPS_PRELUDE)
-        .map_err(|e| exception_message(ctx, e))?;
+    eval_prelude(ctx, &prelude_bytecode().console)?;
+    eval_prelude(ctx, &prelude_bytecode().caps)?;
     // Before evaluation, so top-level code can already draw randomness. This
     // is the choke point every path — execute, tools, verify, inspect — goes
     // through, which is what keeps the capability universally present.
