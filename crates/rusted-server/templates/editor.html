@@ -14,9 +14,9 @@
   </div>
 
   <div class="flex min-h-0 flex-1 gap-4">
-    <div class="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-copper/15">
-      <div id="ed-tabs" class="flex flex-wrap items-center gap-1 border-b border-copper/15 bg-rust-950/60 px-2 py-1.5"></div>
-      <div class="min-h-0 flex-1" id="ed-mount"></div>
+    <div class="flex min-w-0 flex-1 overflow-hidden rounded-xl border border-copper/15">
+      <div id="ed-files" class="flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-copper/15 bg-rust-950/60 p-2"></div>
+      <div class="min-h-0 min-w-0 flex-1" id="ed-mount"></div>
     </div>
 
     <div class="flex w-[380px] shrink-0 flex-col gap-3 overflow-y-auto">
@@ -89,20 +89,24 @@
     run: () => run(),
   };
 
-  // ---- file tabs ----
-  const tabs = document.getElementById("ed-tabs");
+  // ---- file list (vertical, left of the buffer) ----
+  const tabs = document.getElementById("ed-files");
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
   function renderTabs() {
     const names = Object.keys(project.files).sort((a, b) =>
       a === ENTRY ? -1 : b === ENTRY ? 1 : a.localeCompare(b));
-    tabs.innerHTML = names.map((f) => {
-      const active = f === project.current;
-      const close = f === ENTRY ? "" :
-        `<span data-close="${esc(f)}" title="Delete file" class="ml-1 cursor-pointer text-clay/50 hover:text-blood">×</span>`;
-      return `<button data-file="${esc(f)}" class="flex items-center rounded-md px-2.5 py-1 font-mono text-[11px] ${
-        active ? "bg-rust-800 text-cream" : "text-clay hover:text-cream"}">${esc(f)}${close}</button>`;
-    }).join("") +
-      `<button id="ed-add" title="New file — relative imports resolve between files" class="rounded-md px-2 py-1 font-mono text-[12px] text-copper hover:text-ember">+</button>`;
+    tabs.innerHTML =
+      `<div class="mb-1 flex items-center justify-between px-1">` +
+      `<span class="font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-copper/70">Files</span>` +
+      `<button id="ed-add" title="New file — relative imports resolve between files" class="rounded-md px-1.5 font-mono text-[13px] leading-none text-copper hover:text-ember">+</button>` +
+      `</div>` +
+      names.map((f) => {
+        const active = f === project.current;
+        const close = f === ENTRY ? "" :
+          `<span data-close="${esc(f)}" title="Delete file" class="ml-1 hidden shrink-0 cursor-pointer text-clay/50 hover:text-blood group-hover:inline">×</span>`;
+        return `<button data-file="${esc(f)}" class="group flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left font-mono text-[11px] ${
+          active ? "bg-rust-800 text-cream" : "text-clay hover:bg-rust-900 hover:text-cream"}"><span class="truncate"><span class="mr-1.5 text-copper">ƒ</span>${esc(f)}</span>${close}</button>`;
+      }).join("");
   }
   function openFile(name) {
     save();
