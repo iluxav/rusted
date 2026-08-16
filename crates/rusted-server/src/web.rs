@@ -871,7 +871,7 @@ struct AuthorizeT {
 #[template(path = "console.html")]
 struct ConsoleT {
     active: String,
-    lambdas: Vec<String>,
+    lambdas: Vec<NavFn>,
     user_name: String,
     user_initial: String,
     is_admin: bool,
@@ -1286,13 +1286,7 @@ async fn console_page(
     if headers.contains_key("hx-request") {
         return Html(inner).into_response();
     }
-    let lambdas = state
-        .0
-        .app
-        .store
-        .names_for_user(user.id)
-        .await
-        .unwrap_or_default();
+    let lambdas = nav_rows(state, user.id).await;
     let display = user.name.clone().unwrap_or_else(|| user.login.clone());
     let shell = ConsoleT {
         active: active.to_string(),
@@ -2230,13 +2224,49 @@ async fn run_test(
 
 // ------------------------------------------------------------------ editor
 
-/// What a blank editor buffer holds: the same tolerant hello the CLI
-/// scaffolds, minus the name so pushing asks for one.
-const EDITOR_SCAFFOLD: &str = r#"export default async function handler(request, context) {
+/// Blank-buffer starting points, one per surface. The declarations are all
+/// visible — commented where optional — so the module is its own reference:
+/// the name lives in the file, not in a form field.
+const EDITOR_SCAFFOLD_HTTP: &str = r#"export const http = {
+  name: "my-function",        // becomes /f/my-function
+  methods: ["POST"],          // e.g. ["GET", "POST"]
+  // path: "/users/{id}",     // optional route; captures in request.params
+  // access: "private",       // "public" | "private"; unset follows the server
+};
+
+export const config = {
+  // secrets: ["GITHUB_TOKEN"],  // vault names, decrypted into context.env
+  // state: true,                // durable context.state
+};
+
+export default async function handler(request, context) {
   // .catch: a bare POST has no body, and that should greet, not throw.
   const { name } = await request.json().catch(() => ({}));
   return context.json({ message: `Hello, ${name ?? "world"}` });
 }
+"#;
+
+const EDITOR_SCAFFOLD_MCP: &str = r#"export const mcp = {
+  name: "my-tools",           // becomes /f/my-tools
+  // public: true,            // serve without a key; default needs your key
+  tools: {
+    hello: {
+      description: "Say hello",
+      inputSchema: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+      },
+      async handler({ name }) {
+        return `Hello, ${name}!`;
+      },
+    },
+  },
+};
+
+export const config = {
+  // secrets: ["GITHUB_TOKEN"],  // vault names, decrypted into context.env
+};
 "#;
 
 #[derive(Template)]
@@ -2249,12 +2279,19 @@ struct EditorT {
     /// "agent"), empty for a blank buffer — drives the fork warning.
     origin: String,
     origin_label: String,
+    /// True when ?kind= asked for a fresh scaffold: the scratch draft is
+    /// replaced instead of restored.
+    fresh: bool,
 }
 
 #[derive(Deserialize, Default)]
 struct EditorPageQuery {
     #[serde(default)]
     name: Option<String>,
+    /// "http" or "mcp": open a fresh scaffold of that surface, replacing any
+    /// scratch draft — the explicit choice made in the new-function dialog.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 async fn page_editor(
@@ -2268,12 +2305,19 @@ async fn page_editor(
     };
     // ?name= loads a function you own; anything else opens a blank buffer —
     // the editor is not a way to read other people's source.
+    let scaffold = || {
+        if query.kind.as_deref() == Some("mcp") {
+            EDITOR_SCAFFOLD_MCP.to_string()
+        } else {
+            EDITOR_SCAFFOLD_HTTP.to_string()
+        }
+    };
     let (name, source) = match &query.name {
         Some(wanted) => match state.0.app.store.fetch(wanted).await {
             Ok(Some(hit)) if hit.owner == Some(user.id) => (wanted.clone(), hit.source.clone()),
-            _ => (String::new(), EDITOR_SCAFFOLD.to_string()),
+            _ => (String::new(), scaffold()),
         },
-        None => (String::new(), EDITOR_SCAFFOLD.to_string()),
+        None => (String::new(), scaffold()),
     };
     let origin = if name.is_empty() {
         String::new()
@@ -2289,17 +2333,49 @@ async fn page_editor(
         name,
         origin_label: via_label(&origin).to_string(),
         origin,
+        fresh: query.kind.is_some(),
     }
     .render()
     .expect("editor renders");
     console_page(&state, &headers, &user, "editor", inner).await
 }
 
+/// One sidebar entry: the function and which surface pushed its serving
+/// revision, for the little origin marker.
+struct NavFn {
+    name: String,
+    via: String,
+    via_label: String,
+}
+
 #[derive(Template)]
 #[template(path = "nav_functions.html")]
 struct NavFunctionsT {
-    lambdas: Vec<String>,
+    lambdas: Vec<NavFn>,
     active: String,
+}
+
+async fn nav_rows(state: &WebState, user_id: Uuid) -> Vec<NavFn> {
+    sqlx::query(
+        "SELECT f.name, coalesce(r.via, 'cli') AS via
+         FROM functions f
+         LEFT JOIN revisions r ON r.function_name = f.name AND r.rev = f.current_rev
+         WHERE f.user_id = $1 ORDER BY f.name",
+    )
+    .bind(user_id)
+    .fetch_all(&state.0.app.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| {
+        let via: String = row.get("via");
+        NavFn {
+            name: row.get("name"),
+            via_label: via_label(&via).to_string(),
+            via,
+        }
+    })
+    .collect()
 }
 
 /// The sidebar's function list as a fragment, so the editor can refresh it
@@ -2309,16 +2385,9 @@ async fn nav_functions(State(state): State<WebState>, headers: HeaderMap) -> Res
         Ok(user) => user,
         Err(redirect) => return redirect,
     };
-    let lambdas = state
-        .0
-        .app
-        .store
-        .names_for_user(user.id)
-        .await
-        .unwrap_or_default();
     Html(
         NavFunctionsT {
-            lambdas,
+            lambdas: nav_rows(&state, user.id).await,
             active: String::new(),
         }
         .render()

@@ -1,9 +1,10 @@
 {% if lambdas.is_empty() %}
 <p class="px-3 py-2 font-mono text-xs text-clay/60">none yet — write one in the <a href="/console/editor" class="text-copper hover:text-ember">editor</a><br>or <span class="text-clay">rusted push fn.js</span></p>
 {% endif %}
-{% for name in lambdas %}
-<a hx-get="/console/function/{{ name }}" href="/console/function/{{ name }}"
-   class="nav-item {% if active == name.as_str() %}nav-active{% endif %} flex items-center gap-2 truncate rounded-full px-3 py-2 font-mono text-[12px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
-  <span class="text-copper">ƒ</span> {{ name }}
+{% for f in lambdas %}
+<a hx-get="/console/function/{{ f.name }}" href="/console/function/{{ f.name }}"
+   class="nav-item {% if active == f.name.as_str() %}nav-active{% endif %} flex items-center gap-2 truncate rounded-full px-3 py-2 font-mono text-[12px] text-clay hover:bg-rust-900 hover:text-cream transition-colors cursor-pointer">
+  <span class="text-copper">ƒ</span> <span class="truncate">{{ f.name }}</span>
+  <span class="ml-auto shrink-0 text-[10px] text-clay/40" title="last pushed via {{ f.via_label }}">{% if f.via == "editor" %}✎{% else if f.via == "agent" %}✦{% else %}❯{% endif %}</span>
 </a>
 {% endfor %}

@@ -1789,6 +1789,7 @@ async fn every_console_page_renders() {
         "/console/editor",
         "/console/editor?name=greet",
         "/console/editor?name=does-not-exist",
+        "/console/editor?kind=mcp",
         "/console/billing",
         "/console/checkout/pro",
         "/console/function/greet",
