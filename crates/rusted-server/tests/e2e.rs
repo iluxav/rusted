@@ -2232,6 +2232,47 @@ async fn call_fn(t: &TestServer, path: &str, body: &str) -> Value {
         .unwrap()
 }
 
+/// The production failure shape (2026-08-17): systemd's `ProtectSystem=strict`
+/// left every path read-only except the StateDirectory, `RUSTED_DB_DIR` was
+/// unset, and the server defaulted to a relative path it could not create.
+/// Losing the database must degrade only the database — and the owner must be
+/// told what actually happened.
+#[tokio::test]
+async fn an_unwritable_db_directory_degrades_only_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    // A file where the directory should be: create_dir_all fails exactly as a
+    // read-only filesystem does, without depending on test-process privileges.
+    std::fs::write(dir.path().join("dbs"), b"not a directory").unwrap();
+    let t = boot_in(dir).await;
+
+    // The platform still serves: an unusable database is not an outage.
+    push(&t, "greeter", GREET).await;
+    let r = t
+        .client
+        .post(t.data("/f/greeter"))
+        .body(r#"{"name":"Ada"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), r#"{"message":"Hello, Ada"}"#);
+
+    // The owner-facing path names the real cause, rather than a bare failure.
+    push(&t, "keeper", DB_FN).await;
+    let r = t
+        .admin_post("/api/invoke", json!({ "name": "keeper", "body": "{}" }))
+        .await;
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["outcome"], "error", "{v}");
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("database directory"),
+        "{v}"
+    );
+}
+
 #[tokio::test]
 async fn db_capability_persists_across_invocations() {
     let t = boot().await;

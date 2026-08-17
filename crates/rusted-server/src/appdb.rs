@@ -41,6 +41,69 @@ const LEASE_STALE: &str = "30 seconds";
 /// One open database: the connection behind its per-db lock.
 type DbHandle = Arc<Mutex<Connection>>;
 
+/// Where the SQLite files live, in precedence order: an explicit config value,
+/// then `RUSTED_DB_DIR`, then systemd's `STATE_DIRECTORY`, then a directory
+/// beside the working one.
+///
+/// The systemd rung is the one that matters in production. A unit that runs
+/// other people's code wants `ProtectSystem=strict`, which leaves the whole
+/// filesystem read-only except what `StateDirectory=` grants — and systemd
+/// hands that path to the process as `STATE_DIRECTORY`. Defaulting to it means
+/// the packaged unit works unconfigured; the relative fallback below only ever
+/// applies to a developer's working copy, where the cwd is writable.
+pub(crate) fn resolve_db_dir(
+    explicit: Option<PathBuf>,
+    rusted_db_dir: Option<std::ffi::OsString>,
+    state_directory: Option<std::ffi::OsString>,
+) -> PathBuf {
+    // Set-but-empty means unset here: an empty STATE_DIRECTORY would otherwise
+    // resolve to "/dbs", which is precisely the unwritable-root failure.
+    let non_empty = |value: std::ffi::OsString| (!value.is_empty()).then_some(value);
+    if let Some(dir) = explicit {
+        return dir;
+    }
+    if let Some(dir) = rusted_db_dir.and_then(non_empty) {
+        return PathBuf::from(dir);
+    }
+    if let Some(state) = state_directory.and_then(non_empty) {
+        // Several `StateDirectory=` entries arrive colon-separated; the unit
+        // declares ours first.
+        let first = state.to_string_lossy();
+        let first = first.split(':').next().unwrap_or_default();
+        if !first.is_empty() {
+            return PathBuf::from(first).join("dbs");
+        }
+    }
+    PathBuf::from("rusted-dbs")
+}
+
+/// Confirms the database directory can be created and written, returning the
+/// operator-facing complaint when it cannot.
+///
+/// Called once at startup because the alternative is what happened on
+/// 2026-08-17: a read-only path produced no server-side signal at all, and the
+/// first anyone knew of it was a tenant's `context.db` call failing. The check
+/// is deliberately not fatal — http and mcp functions do not need this
+/// directory, and a database misconfiguration should not be an outage.
+pub(crate) fn check_db_dir(dir: &std::path::Path) -> Result<(), String> {
+    let complain = |what: &str, e: std::io::Error| {
+        format!(
+            "the database directory {} is unusable ({what}: {e}) — every `context.db` \
+             call will fail while http and mcp functions keep serving. Set RUSTED_DB_DIR \
+             to a writable path, or (under systemd's ProtectSystem=strict) let \
+             StateDirectory= grant one.",
+            dir.display()
+        )
+    };
+    std::fs::create_dir_all(dir).map_err(|e| complain("cannot create it", e))?;
+    // Creating it is not the same as being able to write into it: a directory
+    // can exist and still be read-only for this user.
+    let probe = dir.join(".write-probe");
+    std::fs::write(&probe, b"").map_err(|e| complain("cannot write into it", e))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 /// The `rusted run` database: one connection over one scratch file, with the
 /// same SQLite configuration and op protocol as the hosted path. No lease and
 /// no Postgres — a dev server is the only process that knows the file exists.
@@ -364,4 +427,72 @@ fn run_transaction(
     }
     conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
     Ok(json!({ "changes": changes }).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where `context.db` files land, in precedence order. The systemd rung is
+    /// what makes the packaged unit work unconfigured: `StateDirectory=rusted`
+    /// grants exactly one writable path under `ProtectSystem=strict`, and
+    /// exports it as `STATE_DIRECTORY`.
+    #[test]
+    fn db_dir_resolves_explicit_then_env_then_systemd_then_cwd() {
+        let resolve = |explicit: Option<&str>, env: Option<&str>, state: Option<&str>| {
+            resolve_db_dir(
+                explicit.map(PathBuf::from),
+                env.map(std::ffi::OsString::from),
+                state.map(std::ffi::OsString::from),
+            )
+        };
+        // An explicit config value is the caller's decision; nothing overrides it.
+        assert_eq!(
+            resolve(Some("/explicit"), Some("/env"), Some("/state")),
+            PathBuf::from("/explicit")
+        );
+        // RUSTED_DB_DIR is the operator's override of the systemd default.
+        assert_eq!(
+            resolve(None, Some("/env"), Some("/state")),
+            PathBuf::from("/env")
+        );
+        assert_eq!(
+            resolve(None, None, Some("/var/lib/rusted")),
+            PathBuf::from("/var/lib/rusted/dbs")
+        );
+        // Several StateDirectory= entries arrive colon-separated; ours is first.
+        assert_eq!(
+            resolve(None, None, Some("/var/lib/rusted:/var/lib/other")),
+            PathBuf::from("/var/lib/rusted/dbs")
+        );
+        // Set-but-empty is not a path — fall through rather than write to "/dbs".
+        assert_eq!(
+            resolve(None, Some(""), Some("/var/lib/rusted")),
+            PathBuf::from("/var/lib/rusted/dbs")
+        );
+        assert_eq!(
+            resolve(None, Some(""), Some("")),
+            PathBuf::from("rusted-dbs")
+        );
+        // Developer default: beside the working directory, no configuration.
+        assert_eq!(resolve(None, None, None), PathBuf::from("rusted-dbs"));
+    }
+
+    /// The startup probe: an unusable directory has to be said out loud, at
+    /// boot, in terms an operator can act on — the production incident was
+    /// invisible in the log and only surfaced as a tenant's runtime error.
+    #[test]
+    fn unusable_db_dir_is_reported_with_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_db_dir(&dir.path().join("fresh")).is_ok());
+        // Writable and already present is fine on the next boot, too.
+        assert!(check_db_dir(&dir.path().join("fresh")).is_ok());
+
+        std::fs::write(dir.path().join("afile"), b"x").unwrap();
+        let complaint = check_db_dir(&dir.path().join("afile").join("dbs"))
+            .expect_err("a file is not a directory");
+        assert!(complaint.contains("RUSTED_DB_DIR"), "{complaint}");
+        assert!(complaint.contains("StateDirectory"), "{complaint}");
+        assert!(complaint.contains("context.db"), "{complaint}");
+    }
 }

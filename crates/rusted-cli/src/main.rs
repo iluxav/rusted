@@ -82,6 +82,11 @@ enum Cmd {
         /// The origin callers reach this server on, e.g. https://rusted.sh
         #[arg(long, env = "PUBLIC_URL")]
         public_url: Option<String>,
+        /// Where per-account `context.db` databases are stored. Defaults to
+        /// systemd's StateDirectory when there is one, else ./rusted-dbs —
+        /// it must be writable, or every database call fails.
+        #[arg(long, env = "RUSTED_DB_DIR")]
+        db_dir: Option<PathBuf>,
     },
     /// Deploy a persistent function
     Push {
@@ -557,6 +562,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             require_auth,
             ref host,
             ref public_url,
+            ref db_dir,
         } => serve(
             port,
             admin_port,
@@ -565,6 +571,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
             require_auth,
             host.clone(),
             public_url.clone(),
+            db_dir.clone(),
         ),
         Cmd::Push {
             ref file,
@@ -1347,6 +1354,7 @@ fn serve(
     require_auth: bool,
     host: String,
     public_url: Option<String>,
+    db_dir: Option<PathBuf>,
 ) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async move {
@@ -1359,8 +1367,9 @@ fn serve(
             require_auth,
             host,
             public_url,
-            // RUSTED_DB_DIR or ./rusted-dbs — resolved by the server.
-            db_dir: None,
+            // Unset here means the server decides: systemd's StateDirectory
+            // when it runs under one, else ./rusted-dbs.
+            db_dir,
         })
         .await
         .map_err(|e| format!("failed to start server: {e}"))?;

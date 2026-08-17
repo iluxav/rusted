@@ -97,11 +97,16 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
         .map_err(|e| db_error(&config.database_url, e))?;
     let store = Store::new(pool.clone());
     let (recorder, analytics_writer) = analytics::start(pool.clone());
-    let db_dir = config.db_dir.clone().unwrap_or_else(|| {
-        std::env::var_os("RUSTED_DB_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("rusted-dbs"))
-    });
+    let db_dir = appdb::resolve_db_dir(
+        config.db_dir.clone(),
+        std::env::var_os("RUSTED_DB_DIR"),
+        std::env::var_os("STATE_DIRECTORY"),
+    );
+    // Said at boot, in the log the operator already reads, rather than one
+    // tenant at a time through failing invocations.
+    if let Err(complaint) = appdb::check_db_dir(&db_dir) {
+        eprintln!("rusted: {complaint}");
+    }
     let state = Arc::new(AppState::new(
         store,
         pool.clone(),

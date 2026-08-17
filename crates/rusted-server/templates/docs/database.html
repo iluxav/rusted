@@ -50,4 +50,5 @@ export default async function handler(request, context) {
   <li>Types are affinities: <code>BOOLEAN</code> stores as integer, <code>TIMESTAMP</code> as text. <code>datetime('now')</code> is the idiomatic timestamp.</li>
   <li>Data lives on the server, durable across restarts and redeploys. Off-server snapshot backups and export are on the roadmap; until then, treat irreplaceable data accordingly.</li>
   <li><code>rusted run</code> (the local no-server loop) supplies a scratch SQLite database — same SQL, same op protocol, reset when the dev server exits.</li>
+  <li>Self-hosting: the files live in one directory — systemd's <code>StateDirectory</code> when the server runs under a unit that grants one, otherwise <code>./rusted-dbs</code>; <code>rusted serve --db-dir</code> (or <code>RUSTED_DB_DIR</code>) overrides it. If that path isn't writable, the server says so at boot and only database calls fail.</li>
 </ul>
